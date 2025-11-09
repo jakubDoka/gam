@@ -24,7 +24,7 @@ pub const ClientHandshake = struct {
     server: std.net.Address,
     hello_timeout: gam.Timeout,
     interop: gam.UdpInterop = .{},
-    task: gam.Task(Error!gam.auth.Verified) = .{},
+    task: gam.Task(Error!struct { gam.auth.Verified, xev.UDP }) = .{},
     ch: gam.auth.ClientHello = undefined,
     sh: gam.auth.ServerHello = undefined,
     finished: gam.auth.Finished = undefined,
@@ -113,7 +113,7 @@ pub const ClientHandshake = struct {
                 return self.task.ret(error.InvalidHello);
             };
 
-        self.task.res = verified;
+        self.task.res = .{ verified, sock };
         self.finished = finished;
 
         self.interop.send(
@@ -166,9 +166,11 @@ pub const Client = struct {
         one_off: *gam.OneOffPacket,
         retry_handshake: *gam.Sleep,
         ping_interval: *gam.Sleep,
+        close: *gam.proto.Stream.Closer,
     }) = .{},
 
     stream: gam.proto.Stream,
+    closer: gam.proto.Stream.Closer = .{},
 
     reader: gam.UdpReader,
     reader_canc: xev.Completion = .{},
@@ -195,6 +197,7 @@ pub const Client = struct {
 
     connection_state: enum {
         disconnected,
+        disconnecting,
         connecting,
         connected,
     } = .disconnected,
@@ -205,9 +208,11 @@ pub const Client = struct {
         ServerUnreachable,
         ServerOverload,
         ServerUnresponsive,
+        CantOpenSocket,
+        CantBindSocket,
     } = null,
 
-    pub fn startHandshake(self: *Client, ip: std.net.Address) void {
+    pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
         self.connection_state = .connecting;
         self.handshake_retry_round = 0;
         self.handshake = ClientHandshake{
@@ -216,18 +221,30 @@ pub const Client = struct {
             .kp = &self.kp,
             .hello_timeout = .{ .deadline = 500 },
         };
-        try self.handshake.schedule(&self.loop, self.stream.sock);
+
+        const addr = std.net.Address.initIp4(@splat(0), 0);
+        const sock = xev.UDP.init(addr) catch |err| {
+            std.log.err("udp connection failed: {}", .{err});
+            return error.CantOpenSocket;
+        };
+        sock.bind(addr) catch |err| {
+            std.log.err("udp binding failed: {}", .{err});
+            return error.CantBindSocket;
+        };
+
+        try self.handshake.schedule(&self.loop, sock);
         self.q.queue(.{ .ch = &self.handshake });
 
-        self.stream.rebind() catch unreachable;
         self.chat.messages.items.len = 0;
         self.chat.message_timeouts = @splat(0);
     }
 
     pub fn disconnect(self: *Client) void {
-        self.connection_state = .disconnected;
+        self.connection_state = .disconnecting;
         self.reader.unschedule(&self.loop, &self.reader_canc);
         self.stream.unschedule(&self.loop);
+        self.closer.schedule(&self.loop, self.stream.sock);
+        self.q.queue(.{ .close = &self.closer });
     }
 
     pub fn send(
@@ -339,7 +356,7 @@ pub const Client = struct {
         while (self.q.next()) |task| switch (task) {
             .ch => |ch| {
                 std.debug.assert(self.connection_state == .connecting);
-                const verified = ch.task.res catch |err| {
+                const verified, const sock = ch.task.res catch |err| {
                     std.log.warn("handshake failed: {}", .{err});
                     if (self.handshake_retry_round < max_retries) {
                         self.handshake_retry_sleep.schedule(&self.loop, 250);
@@ -358,8 +375,8 @@ pub const Client = struct {
 
                 std.log.debug("handshake succrsfull", .{});
 
-                self.stream.schedule(&self.loop, verified.secret, ch.server);
-                self.reader.schedule(&self.loop, self.stream.sock);
+                self.stream.schedule(&self.loop, sock, verified.secret, ch.server);
+                self.reader.schedule(&self.loop, sock);
 
                 if (!self.ping_sleep.task.inProgress()) {
                     self.ping_sleep.schedule(&self.loop, ping_interval);
@@ -396,6 +413,9 @@ pub const Client = struct {
                 self.ping_sleep.schedule(&self.loop, ping_interval);
                 self.q.queue(.{ .ping_interval = &self.ping_sleep });
                 self.ping_n += 1;
+            },
+            .close => {
+                self.connection_state = .disconnected;
             },
         };
     }
@@ -452,7 +472,9 @@ pub const ConnectionMenu = struct {
 
                 client.ip_error = null;
 
-                client.startHandshake(server_ip);
+                client.startHandshake(server_ip) catch |err| {
+                    client.ip_error = err;
+                };
             }
         } else {
             if (rl.GuiButton(layout.server_box_bounds, "disconnect") != 0 or
@@ -505,6 +527,8 @@ pub const ConnectionMenu = struct {
                 error.ServerUnreachable => "server unreachable",
                 error.ServerOverload => "server is overloaded",
                 error.ServerUnresponsive => "server ignored us",
+                error.CantBindSocket => "cant bind socket??",
+                error.CantOpenSocket => "cant open socket??",
             };
 
             rl.DrawText(
@@ -517,7 +541,9 @@ pub const ConnectionMenu = struct {
             );
         }
 
-        if (client.connection_state == .connecting) {
+        if (client.connection_state == .connecting or
+            client.connection_state == .disconnecting)
+        {
             self.spinner_angle += rl.PI * rl.GetFrameTime();
 
             const radius = 10;
@@ -727,14 +753,9 @@ pub fn main() !void {
         .reader = undefined,
     };
 
-    const addr = try std.net.Address.parseIp4("0.0.0.0", 0);
-    const sock = try xev.UDP.init(addr);
-    try sock.bind(addr);
-
     self.chat.messages = self.pool.arena.makeArrayList(u8, 1 << 16);
     self.stream = .init(
         &self.pool.arena,
-        sock,
         std.crypto.random,
         gam.proto.message_queue_size,
     );

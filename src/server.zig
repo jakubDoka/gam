@@ -225,6 +225,7 @@ pub const Server = struct {
                 conn.id = verified.id;
                 conn.stream.schedule(
                     &self.loop,
+                    self.sock,
                     verified.secret,
                     p.from.toStd(),
                 );
@@ -314,7 +315,6 @@ pub const Server = struct {
 
                 slot.stream = .init(
                     &self.pool.arena,
-                    self.sock,
                     self.rng,
                     gam.proto.message_queue_size,
                 );

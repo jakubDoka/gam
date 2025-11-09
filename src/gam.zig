@@ -66,6 +66,7 @@ pub const UdpReader = struct {
     listen_red: usize = undefined,
     cleared: bool = undefined,
     schedule_lock: std.debug.SafetyLock = .{},
+    cancel_task: Task(void) = .{},
 
     pub fn schedule(self: *UdpReader, loop: *xev.Loop, sock: xev.UDP) void {
         self.schedule_lock.lock();

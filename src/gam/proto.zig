@@ -251,7 +251,7 @@ pub const Stream = struct {
     ping_interop: gam.UdpInterop = .{},
     ping_timeout: gam.Timeout = .{ .deadline = 150 },
 
-    sock: xev.UDP,
+    sock: xev.UDP = undefined,
     addr: std.net.Address = undefined,
     key: gam.auth.CipherKey = undefined,
     rng: std.Random,
@@ -285,12 +285,10 @@ pub const Stream = struct {
 
     pub fn init(
         scratch: *utils.Arena,
-        sock: xev.UDP,
         rng: std.Random,
         max_packet_queue: usize,
     ) Stream {
         return .{
-            .sock = sock,
             .rng = rng,
             .send_buffer = scratch.alloc(Fragment, max_packet_queue),
             .recv_buffer = scratch.alloc(Fragment, max_packet_queue),
@@ -300,10 +298,12 @@ pub const Stream = struct {
     pub fn schedule(
         self: *Stream,
         loop: *xev.Loop,
+        sock: xev.UDP,
         key: gam.auth.CipherKey,
         addr: std.net.Address,
     ) void {
         self.schedule_lock.lock();
+        self.sock = sock;
         self.key = key;
         self.addr = addr;
         self.send_tail = 0;
@@ -328,12 +328,24 @@ pub const Stream = struct {
         return .disarm;
     }
 
-    pub fn rebind(self: *Stream) !void {
-        (std.net.Stream{ .handle = self.sock.fd }).close();
-        const addr = try std.net.Address.parseIp4("0.0.0.0", 0);
-        self.sock = try xev.UDP.init(addr);
-        try self.sock.bind(addr);
-    }
+    pub const Closer = struct {
+        task: gam.Task(xev.CloseError!void) = .{},
+        comp: xev.Completion = .{},
+
+        pub fn schedule(self: *Closer, loop: *xev.Loop, sock: xev.UDP) void {
+            sock.close(loop, &self.comp, Closer, self, closeDriver);
+        }
+
+        pub fn closeDriver(
+            ud: ?*Closer,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: xev.UDP,
+            r: xev.CloseError!void,
+        ) xev.CallbackAction {
+            return ud.?.task.ret(r);
+        }
+    };
 
     pub fn pingTimeoutDriver(
         ud: *gam.Timeout,
