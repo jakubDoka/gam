@@ -6,11 +6,8 @@ const gam = @import("../gam.zig");
 const vec = gam.vec;
 
 pub const message_queue_size = 8;
-
-// Replicated
-pub const PlayerState = struct {
-    pos: vec.T,
-};
+pub const player_size = 64;
+pub const bullet_size = 15;
 
 pub const PlayerInput = extern struct {
     seq: u32 = 0,
@@ -19,8 +16,10 @@ pub const PlayerInput = extern struct {
         down: bool = false,
         left: bool = false,
         right: bool = false,
-        _padd: u4 = 0,
+        shoot: bool = false,
+        _padd: u3 = 0,
     } = .{},
+    mouse_pos: vec.T = vec.zero,
 };
 
 pub fn bufferPacket(packet: Packet, gpa: std.mem.Allocator) !Crypt {
@@ -65,15 +64,25 @@ pub const Packet = union(enum) {
     ping: PingPayload,
     pong: PingPayload,
     chat_message: ChatMessage,
-    player_states: struct {
+    state: struct {
         seq: u32,
-        states: []align(1) PlayerSync,
+        players: []align(1) PlayerSync,
+        bullets: []align(1) BulletSync,
     },
     player_input: PlayerInput,
 
     pub const PlayerSync = struct {
-        state: PlayerState,
+        pos: vec.T,
+        mouse_pos: vec.T,
         id: gam.auth.Identity,
+    };
+
+    pub const BulletSync = struct {
+        pos: vec.T,
+        vel: vec.T,
+        content_id: u16,
+        owner: u16,
+        lifetime: f32,
     };
 
     pub const ChatMessage = struct {
@@ -99,9 +108,11 @@ pub const Packet = union(enum) {
                 try writer.writeAll(std.mem.asBytes(&c.id));
                 try writer.writeAll(c.content);
             },
-            .player_states => |ps| {
+            .state => |ps| {
                 try writer.writeInt(u32, ps.seq, .little);
-                try writer.writeAll(@ptrCast(ps.states));
+                try writer.writeInt(u16, @intCast(ps.players.len), .little);
+                try writer.writeAll(@ptrCast(ps.players));
+                try writer.writeAll(@ptrCast(ps.bullets));
             },
         }
     }
@@ -120,14 +131,25 @@ pub const Packet = union(enum) {
                 },
                 .content = reader.buffered(),
             } },
-            .player_states => return .{ .player_states = .{
+            .state => return .{ .state = .{
                 .seq = try reader.takeInt(u32, .little),
-                .states = s: {
-                    if (reader.buffered().len % @sizeOf(PlayerState) != 0) {
+                .players = s: {
+                    const count = try reader.takeInt(u16, .little) *
+                        @sizeOf(PlayerSync);
+                    if (reader.buffered().len < count) {
                         return error.ReadFailed;
                     }
 
-                    break :s @ptrCast(reader.buffered());
+                    defer reader.seek += count;
+                    break :s @ptrCast(reader.buffered()[0..count]);
+                },
+                .bullets = b: {
+                    if (reader.buffered().len % @sizeOf(BulletSync) != 0) {
+                        return error.ReadFailed;
+                    }
+
+                    defer reader.seek = reader.end;
+                    break :b @ptrCast(reader.buffered());
                 },
             } },
         }
