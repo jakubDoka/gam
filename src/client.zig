@@ -6,6 +6,7 @@ const ui = @import("client/ui.zig");
 const proto = @import("client/proto.zig");
 const PlayerSync = gam.proto.Packet.PlayerSync;
 const BulletSync = gam.proto.Packet.BulletSync;
+const vec = gam.vec;
 
 pub const Client = @This();
 
@@ -14,6 +15,12 @@ pub const rl = @cImport({
     @cInclude("raymath.h");
     @cInclude("raygui.h");
 });
+
+pub const Particle = struct {
+    pos: vec.T,
+    vel: vec.T,
+    lifetime: f32,
+};
 
 const ping_interval = 300;
 const stale_connection_period = 2 * std.time.ns_per_s;
@@ -65,6 +72,8 @@ ping_n: u32 = 0,
 ping: u64 = 0,
 tps: usize = 0,
 
+prng: std.Random.DefaultPrng = .init(0),
+
 chat: ui.Chat = .{},
 connection_menu: ui.ConnectionMenu = .{},
 
@@ -72,13 +81,14 @@ state_seq: u32 = 0,
 input_seq: u32 = 1,
 player_states: std.ArrayList(PlayerSync) = undefined,
 bullet_states: std.ArrayList(BulletSync) = undefined,
+particles: std.ArrayList(Particle) = undefined,
 
 player_sprites: []const rl.Texture2D = undefined,
 
 pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
     self.connection_state = .connecting;
     self.handshake_retry_round = 0;
-    self.handshake = proto.ClientHandshake{
+    self.handshake = .{
         .server = ip,
         .rng = self.stream.rng,
         .kp = &self.kp,
@@ -94,6 +104,8 @@ pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
         std.log.err("udp binding failed: {}", .{err});
         return error.@"cant bind the socket";
     };
+
+    self.stream.sock = sock; // HACK: we read this from ther on retry
 
     try self.handshake.schedule(&self.loop, sock);
     self.q.queue(.{ .ch = &self.handshake });
@@ -212,6 +224,21 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
             if (ps.seq > self.state_seq) {
                 self.state_seq = ps.seq;
 
+                o: for (self.bullet_states.items) |state| {
+                    for (ps.bullets) |ostate| {
+                        if (ostate.id == state.id) continue :o;
+                    }
+
+                    for (0..10) |_| {
+                        self.particles.appendBounded(.{
+                            .pos = state.pos,
+                            .vel = vec.unit(self.prng.random().float(f32) * rl.PI * 2) *
+                                vec.splat(100),
+                            .lifetime = 1,
+                        }) catch {};
+                    }
+                }
+
                 self.player_states.items.len = ps.players.len;
                 @memcpy(self.player_states.items, ps.players);
 
@@ -291,10 +318,28 @@ pub fn handleTask(self: *Client) !void {
     };
 }
 
+pub fn update(self: *Client) void {
+    const delta = rl.GetFrameTime();
+    const friction = 1;
+
+    var keep: usize = 0;
+    for (self.particles.items) |*p| {
+        p.lifetime -= delta;
+        if (p.lifetime <= 0) continue;
+
+        p.pos += p.vel * vec.splat(delta);
+        p.vel *= vec.splat(1 - (friction * delta));
+
+        self.particles.items[keep] = p.*;
+        keep += 1;
+    }
+    self.particles.items.len = keep;
+}
+
 pub fn draw(self: *Client) void {
     for (self.bullet_states.items) |bl| {
         const color: rl.Color = @bitCast(self.player_states.items[bl.owner]
-            .id.bytes[0..3].* ++ .{0xff});
+            .identity.bytes[0..3].* ++ .{0xff});
         rl.DrawRectanglePro(
             .{
                 .x = bl.pos[0],
@@ -306,7 +351,7 @@ pub fn draw(self: *Client) void {
                 .x = gam.proto.bullet_size / 2,
                 .y = gam.proto.bullet_size / 2,
             },
-            gam.vec.ang(bl.vel) / rl.PI / 2 * 360,
+            vec.ang(bl.vel) / rl.PI / 2 * 360,
             color,
         );
     }
@@ -315,7 +360,7 @@ pub fn draw(self: *Client) void {
         rl.DrawLineV(@bitCast(pl.pos), @bitCast(pl.mouse_pos), rl.RED);
 
         for (self.player_sprites, 0..) |tex, i| {
-            const color: rl.Color = @bitCast(pl.id.bytes[i * 3 ..][0..3].* ++
+            const color: rl.Color = @bitCast(pl.identity.bytes[i * 3 ..][0..3].* ++
                 .{0xff});
             rl.DrawTexturePro(
                 tex,
@@ -337,10 +382,20 @@ pub fn draw(self: *Client) void {
                     .x = gam.proto.player_size / 2,
                     .y = gam.proto.player_size / 2,
                 },
-                gam.vec.ang(pl.mouse_pos - pl.pos) / rl.PI / 2 * 360 + 90,
+                vec.ang(pl.mouse_pos - pl.pos) / rl.PI / 2 * 360 + 90,
                 color,
             );
         }
+    }
+
+    const size = 20;
+    for (self.particles.items) |p| {
+        rl.DrawRectangleRec(.{
+            .x = p.pos[0] - size / 2,
+            .y = p.pos[1] - size / 2,
+            .width = size,
+            .height = size,
+        }, rl.RED);
     }
 }
 
@@ -377,6 +432,7 @@ pub fn main() !void {
     self.reader = .{ .listen_buf = self.pool.arena.alloc(u8, 1 << 16) };
     self.player_states = self.pool.arena.makeArrayList(PlayerSync, 32);
     self.bullet_states = self.pool.arena.makeArrayList(BulletSync, 128);
+    self.particles = self.pool.arena.makeArrayList(Particle, 256);
 
     rl.SetConfigFlags(rl.FLAG_WINDOW_RESIZABLE);
     rl.InitWindow(800, 600, "gam");
@@ -407,6 +463,7 @@ pub fn main() !void {
 
             self.draw();
             self.input();
+            self.update();
         }
 
         self.connection_menu.render();

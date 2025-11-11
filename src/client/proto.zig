@@ -65,7 +65,7 @@ pub const ClientHandshake = struct {
         ud: *gam.UdpInterop,
         loop: *xev.Loop,
         sock: xev.UDP,
-        addr: std.net.Address,
+        _: std.net.Address,
         r: xev.ReadError!usize,
     ) xev.CallbackAction {
         const self: *ClientHandshake = @fieldParentPtr("interop", ud);
@@ -74,8 +74,6 @@ pub const ClientHandshake = struct {
             error.Canceled => return self.task.end(),
             else => return self.task.ret(err),
         };
-
-        if (addr.any.family == 0xaaaa) unreachable;
 
         self.hello_timeout.cancel(loop, helloTimeoutCancel);
 

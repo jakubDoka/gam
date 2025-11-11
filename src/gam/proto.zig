@@ -9,6 +9,13 @@ pub const message_queue_size = 8;
 pub const player_size = 64;
 pub const bullet_size = 15;
 
+pub const Id = packed struct(u64) {
+    index: u32,
+    gen: u32,
+
+    pub const invalid = Id{ .index = 0, .gen = std.math.maxInt(u32) };
+};
+
 pub const PlayerInput = extern struct {
     seq: u32 = 0,
     key_mask: packed struct(u8) {
@@ -74,15 +81,16 @@ pub const Packet = union(enum) {
     pub const PlayerSync = struct {
         pos: vec.T,
         mouse_pos: vec.T,
-        id: gam.auth.Identity,
+        identity: gam.auth.Identity,
+        id: Id,
     };
 
     pub const BulletSync = struct {
         pos: vec.T,
         vel: vec.T,
-        content_id: u16,
-        owner: u16,
+        owner: u32,
         lifetime: f32,
+        id: Id,
     };
 
     pub const ChatMessage = struct {
