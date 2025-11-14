@@ -6,6 +6,7 @@ const xev = @import("xev");
 pub const proto = @import("gam/proto.zig");
 pub const auth = @import("gam/auth.zig");
 pub const vec = @import("gam/vec.zig");
+pub const sim = @import("gam/sim.zig");
 
 pub const Addr = extern struct {
     bytes: [16]u8,

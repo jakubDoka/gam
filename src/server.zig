@@ -3,15 +3,12 @@ const gam = @import("gam");
 const xev = @import("xev");
 const utils = @import("utils");
 const vec = gam.vec;
+const Sim = gam.sim;
+const Id = Sim.Id;
 
-pub const Id = gam.proto.Id;
-
-pub const max_ents = 256;
 pub const max_conns = 30;
 pub const stale_conn_trashold = 300 * std.time.ns_per_ms;
 pub const pong_period = 500;
-pub const reload_period = 0.5;
-pub const no_coll_id = std.math.maxInt(u32);
 pub const Server = @This();
 
 pub const std_options: std.Options = .{
@@ -31,7 +28,7 @@ pub const Connection = struct {
     last_packet: std.time.Instant,
     negotiated: bool = false,
 
-    input: gam.proto.PlayerInput,
+    input: Sim.InputState,
     ent: Id,
 };
 
@@ -108,80 +105,6 @@ pub const ServerHandshake = struct {
     }
 };
 
-pub const SlotMap = struct {
-    slots: std.ArrayList(Ent),
-    free: ?*Ent = null,
-
-    pub fn init(scratch: *utils.Arena, cap: usize) !SlotMap {
-        return .{
-            .slots = try .initCapacity(scratch.allocator(), cap),
-        };
-    }
-
-    pub fn add(self: *SlotMap) !*Ent {
-        if (self.free) |fent| {
-            const idx = (@intFromPtr(fent) - @intFromPtr(self.slots.items.ptr)) /
-                @sizeOf(Ent);
-            self.free = fent.next_free;
-
-            fent.* = .{ .id = .{ .index = @intCast(idx), .gen = fent.id.gen + 1 } }; // eaven gen means we are alive
-
-            return fent;
-        }
-
-        const slot = try self.slots.addOneBounded();
-        slot.* = .{
-            .id = .{ .index = @intCast(self.slots.items.len - 1), .gen = 0 },
-        };
-
-        return slot;
-    }
-
-    pub fn remove(self: *SlotMap, id: Id) bool {
-        const slot = self.get(id) orelse return false;
-        slot.id.gen += 1;
-        slot.next_free = self.free;
-        self.free = slot.next_free;
-        return true;
-    }
-
-    pub fn get(self: *SlotMap, id: Id) ?*Ent {
-        const slot = &self.slots.items[id.index];
-        if (slot.id.gen != id.gen) return null;
-        return slot;
-    }
-};
-
-const Ent = struct {
-    kind: enum { bullet, player } = undefined,
-
-    // mostly static
-    friction: f32 = 0.0,
-    radius: f32 = 0.0,
-    mass_mult: f32 = 1.0,
-    damage: u32 = 0,
-
-    reload: f32 = 0.0,
-    lifetime: f32 = 0.0,
-    health: u32 = 0,
-
-    tmp_idx: u32 = undefined,
-
-    owner: Id = .invalid,
-
-    vel: vec.T = vec.zero,
-    pos: vec.T = vec.zero,
-
-    coll_id: u32 = no_coll_id,
-
-    next_free: ?*Ent = null,
-    id: Id,
-
-    pub fn isAlive(self: Ent) bool {
-        return self.id.gen % 2 == 0;
-    }
-};
-
 pub const Frame = struct {
     time: f64 = undefined,
 
@@ -190,7 +113,7 @@ pub const Frame = struct {
     last_tps_snapshot: std.time.Instant = undefined,
     delta: f32 = 0,
     prev_time: f64 = undefined,
-    comptime target_tps: f64 = 60,
+    comptime target_tps: usize = 60,
 
     tick_timer: xev.Timer = .{},
     tick: xev.Completion = .{},
@@ -203,7 +126,7 @@ pub const Frame = struct {
             self.delta = @floatCast(now_time - self.prev_time);
             self.delta /= 1000;
             self.prev_time = now_time;
-            self.time += 1000.0 / self.target_tps;
+            self.time += 1000.0 / @as(f64, @floatFromInt(self.target_tps));
             const sleep_duration = @max(self.time - now_time, 1);
 
             self.tick_timer.run(
@@ -256,7 +179,7 @@ q: gam.Queue(union(enum) {
 conns: std.ArrayHashMapUnmanaged(std.net.Address, *Connection, *AddrCtx, false) =
     .empty,
 
-ents: SlotMap,
+sim: Sim,
 
 state_seq: u32 = 1,
 
@@ -355,7 +278,7 @@ pub fn killConnection(self: *Server, conn: *Connection) void {
     ).?;
     _ = self.conns.swapRemoveAtContext(idx, &self.hash_ctx);
     conn.stream.unschedule(&self.loop);
-    _ = self.ents.remove(conn.ent);
+    _ = self.sim.ents.remove(conn.ent);
     self.free_conns.push(conn);
 }
 
@@ -476,7 +399,7 @@ pub fn handlePackets(self: *Server) void {
             break :b slot;
         };
 
-        const ent = self.ents.add() catch {
+        const ent = self.sim.ents.add() catch {
             self.sendRaw(p.from.toStd(), .constant, gam.auth.max_conns_reached);
             continue;
         };
@@ -484,7 +407,7 @@ pub fn handlePackets(self: *Server) void {
         ent.kind = .player;
         ent.pos = .{ 100, 100 };
         ent.friction = 1;
-        ent.radius = gam.proto.player_size / 2;
+        ent.radius = 32;
         ent.health = 100;
 
         conn.* = .{
@@ -536,10 +459,10 @@ pub fn init(port: u16) !Server {
         },
         .kp = gam.auth.KeyPair.generate(),
         .reader = undefined,
-        .ents = undefined,
+        .sim = undefined,
     };
 
-    self.ents = try .init(tmp_alloc, max_ents);
+    self.sim = try .init(tmp_alloc, Sim.max_ents);
     self.reader = .{ .listen_buf = self.pool.arena.alloc(u8, 1 << 16) };
     try self.conns.ensureTotalCapacityContext(
         tmp_alloc.allocator(),
@@ -557,46 +480,20 @@ pub fn init(port: u16) !Server {
 pub fn sync(self: *Server) void {
     errdefer unreachable;
 
+    if (self.frame.tps_counter % (self.frame.target_tps / gam.proto.sps) != 0) return;
+
     var tmp = utils.Arena.scrath(null);
     defer tmp.deinit();
 
-    const conns: []*Connection = self.conns.entries.items(.value);
-
-    var player_states: std.ArrayList(gam.proto.Packet.PlayerSync) = .empty;
-    var i: u32 = 0;
-    for (conns) |conn| {
-        const ent = self.ents.get(conn.ent) orelse continue;
-
-        ent.tmp_idx = i;
-        i += 1;
-
-        try player_states.append(tmp.arena.allocator(), .{
-            .identity = conn.id,
-            .pos = ent.pos,
-            .mouse_pos = conn.input.mouse_pos,
-            .id = ent.id,
-        });
-    }
-
-    var bullet_states: std.ArrayList(gam.proto.Packet.BulletSync) = .empty;
-    for (self.ents.slots.items) |ent| {
-        if (!ent.isAlive()) continue;
-        if (ent.kind != .bullet) continue;
-        const owner = self.ents.get(ent.owner) orelse continue;
-
-        try bullet_states.append(tmp.arena.allocator(), .{
-            .pos = ent.pos,
-            .vel = ent.vel,
-            .owner = owner.tmp_idx,
-            .lifetime = ent.lifetime,
-            .id = ent.id,
-        });
+    const conns = tmp.arena.alloc(gam.proto.Packet.ConnSync, self.conns.entries.len);
+    for (conns, self.conns.entries.items(.value)) |*slot, conn| {
+        slot.* = .{ .id = conn.id, .ent = conn.ent, .input = conn.input };
     }
 
     self.broadcast(.unrelyable, .{ .state = .{
         .seq = self.state_seq,
-        .players = player_states.items,
-        .bullets = bullet_states.items,
+        .conns = conns,
+        .ents = self.sim.ents.slots.items,
     } });
     self.state_seq += 1;
 }
@@ -608,153 +505,7 @@ pub fn handleInput(self: *Server) void {
     const conns: []*Connection = self.conns.entries.items(.value);
 
     for (conns) |conn| {
-        const ent = self.ents.get(conn.ent) orelse continue;
-
-        var dir = vec.zero;
-        if (conn.input.key_mask.up) dir += .{ 0, -1 };
-        if (conn.input.key_mask.down) dir += .{ 0, 1 };
-        if (conn.input.key_mask.left) dir += .{ -1, 0 };
-        if (conn.input.key_mask.right) dir += .{ 1, 0 };
-        dir = vec.norm(dir);
-
-        const player_acc = 500;
-
-        ent.vel += dir * vec.splat(player_acc * self.frame.delta);
-
-        const look_dir = vec.norm(conn.input.mouse_pos - ent.pos);
-        const bullet_lifetime = 0.5;
-        const bullet_speed = 1000;
-
-        ent.reload -= self.frame.delta;
-        if (conn.input.key_mask.shoot) {
-            if (ent.reload <= 0) b: {
-                const slot = self.ents.add() catch break :b;
-                ent.reload = reload_period;
-
-                slot.kind = .bullet;
-                slot.pos = ent.pos;
-                slot.vel = look_dir * vec.splat(bullet_speed);
-                slot.owner = conn.ent;
-                slot.lifetime = bullet_lifetime;
-                slot.radius = gam.proto.bullet_size / 2;
-                slot.damage = 25;
-            }
-        }
-    }
-}
-
-pub fn simulate(self: *Server) void {
-    errdefer unreachable;
-
-    var tmp = utils.Arena.scrath(null);
-    defer tmp.deinit();
-
-    const Coll = struct { a: Id, b: Id, t: f32 };
-    var collisions: std.ArrayList(Coll) = .empty;
-
-    for (self.ents.slots.items) |*ent| {
-        if (!ent.isAlive()) continue;
-
-        ent.vel *= vec.splat(1 - (ent.friction * self.frame.delta));
-        ent.pos += ent.vel * vec.splat(self.frame.delta);
-
-        collect_colls: for (self.ents.slots.items) |*oent| {
-            if (!oent.isAlive() or oent == ent) continue;
-            if (oent.owner == ent.id or ent.owner == oent.id) continue;
-
-            const min_dist = ent.radius + oent.radius;
-            const dist = vec.dist2(ent.pos, oent.pos);
-
-            // get rid of overlaps
-            if (min_dist * min_dist > dist) {
-                if (ent.radius > oent.radius) {
-                    oent.pos = ent.pos + vec.norm(oent.pos - ent.pos) *
-                        vec.splat(min_dist);
-                } else {
-                    ent.pos = oent.pos + vec.norm(ent.pos - oent.pos) *
-                        vec.splat(min_dist);
-                }
-            }
-
-            // this is a formula I derived somehow
-            const d = oent.pos - ent.pos;
-            const dv = oent.vel - ent.vel;
-
-            const a = vec.dot(dv, dv);
-            const b = 2 * vec.dot(dv, d);
-            const c = vec.dot(d, d) - min_dist * min_dist;
-
-            const disc = b * b - 4 * a * c;
-            if (disc <= 0) continue;
-
-            const t1 = (-b + std.math.sqrt(disc)) / (2 * a);
-            const t2 = (-b - std.math.sqrt(disc)) / (2 * a);
-            const t = @min(t1, t2);
-
-            if (t < 0 or t > self.frame.delta) continue;
-
-            for ([_]*Ent{ ent, oent }) |e| {
-                if (e.coll_id != no_coll_id) {
-                    if (collisions.items[e.coll_id].t > t) {
-                        collisions.items[e.coll_id].t = -1;
-                    } else continue :collect_colls;
-                }
-            }
-
-            oent.coll_id = @intCast(collisions.items.len);
-            ent.coll_id = @intCast(collisions.items.len);
-
-            try collisions.append(
-                tmp.arena.allocator(),
-                .{ .a = ent.id, .b = oent.id, .t = t },
-            );
-        }
-
-        const prev_lt = ent.lifetime;
-        ent.lifetime -= self.frame.delta;
-        if (ent.lifetime <= 0 and prev_lt > 0) {
-            _ = self.ents.remove(ent.id);
-            continue;
-        }
-    }
-
-    for (collisions.items) |col| {
-        const aent_o = self.ents.get(col.a);
-        const bent_o = self.ents.get(col.b);
-
-        if (aent_o) |aent| aent.coll_id = no_coll_id;
-        if (bent_o) |bent| bent.coll_id = no_coll_id;
-
-        if (col.t < 0) continue;
-
-        const aent = aent_o orelse continue;
-        const bent = bent_o orelse continue;
-
-        aent.pos += aent.vel * vec.splat(col.t);
-        bent.pos += bent.vel * vec.splat(col.t);
-
-        const amass = aent.radius * aent.mass_mult;
-        const bmass = bent.radius * bent.mass_mult;
-
-        const dist = vec.dist(aent.pos, bent.pos);
-        const norm = (bent.pos - aent.pos) / vec.splat(dist);
-        const p = 2 * (vec.dot(aent.vel, norm) -
-            vec.dot(bent.vel, norm)) / (amass + bmass);
-
-        for ([_]*Ent{ aent, bent }, [_]f32{ -bmass, amass }) |c, m| {
-            c.vel += vec.splat(p * m) * norm;
-            c.pos -= c.vel * vec.splat(col.t);
-        }
-
-        for ([_]*Ent{ aent, bent }, [_]*Ent{ bent, aent }) |a, b| {
-            // NOTE: we dont die twice, but also, invincible objects start with
-            // health 0
-            if (a.health == 0) continue;
-            a.health -|= b.damage;
-            if (a.health == 0) {
-                _ = self.ents.remove(a.id);
-            }
-        }
+        self.sim.handleInput(.{ .delta = self.frame.delta }, conn.ent, conn.input);
     }
 }
 
@@ -772,7 +523,7 @@ pub fn main() !void {
 
         self.sync();
         self.handleInput();
-        self.simulate();
+        self.sim.simulate(.{ .delta = self.frame.delta });
 
         const conns: []*Connection = self.conns.entries.items(.value);
 

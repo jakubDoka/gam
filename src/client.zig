@@ -7,6 +7,7 @@ const proto = @import("client/proto.zig");
 const PlayerSync = gam.proto.Packet.PlayerSync;
 const BulletSync = gam.proto.Packet.BulletSync;
 const vec = gam.vec;
+const Sim = gam.sim;
 
 pub const Client = @This();
 
@@ -15,6 +16,8 @@ pub const rl = @cImport({
     @cInclude("raymath.h");
     @cInclude("raygui.h");
 });
+
+const sheet_rects = @import("sheet_zig");
 
 pub const Particle = struct {
     pos: vec.T,
@@ -25,6 +28,10 @@ pub const Particle = struct {
 const ping_interval = 300;
 const stale_connection_period = 2 * std.time.ns_per_s;
 const max_retries = 4;
+
+pub fn get_time_secs() f64 {
+    return @as(f64, @floatFromInt(std.time.milliTimestamp())) / 1000;
+}
 
 pub fn InRect(r: rl.Rectangle, v: rl.Vector2) bool {
     return r.x <= v.x and v.x <= r.x + r.width and
@@ -70,7 +77,10 @@ last_server_ping: std.time.Instant = undefined,
 ping_sleep: gam.Sleep = .{},
 ping_n: u32 = 0,
 ping: u64 = 0,
+average_ping_sum: u64 = 0,
+ping_count: u64 = 0,
 tps: usize = 0,
+frame_counter: usize = 0,
 
 prng: std.Random.DefaultPrng = .init(0),
 
@@ -79,11 +89,13 @@ connection_menu: ui.ConnectionMenu = .{},
 
 state_seq: u32 = 0,
 input_seq: u32 = 1,
-player_states: std.ArrayList(PlayerSync) = undefined,
-bullet_states: std.ArrayList(BulletSync) = undefined,
+
+conns: std.ArrayList(gam.proto.Packet.ConnSync) = undefined,
+sim: Sim,
+
 particles: std.ArrayList(Particle) = undefined,
 
-player_sprites: []const rl.Texture2D = undefined,
+sheet: rl.Texture2D = undefined,
 
 pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
     self.connection_state = .connecting;
@@ -215,39 +227,47 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
             if (pong.tps == self.ping_n - 1) {
                 self.ping = (try std.time.Instant.now())
                     .since(self.last_ping);
+                self.average_ping_sum += self.ping;
+                self.ping_count += 1;
             }
         },
         .chat_message => |msg| {
             self.chat.addMessage(msg);
         },
-        .state => |ps| {
-            if (ps.seq > self.state_seq) {
-                self.state_seq = ps.seq;
+        .state => |s| {
+            if (s.seq > self.state_seq) {
+                self.state_seq = s.seq;
 
-                o: for (self.bullet_states.items) |state| {
-                    for (ps.bullets) |ostate| {
-                        if (ostate.id == state.id) continue :o;
-                    }
+                const ents = self.sim.ents.slots.items;
 
-                    for (0..10) |_| {
-                        self.particles.appendBounded(.{
-                            .pos = state.pos,
-                            .vel = vec.unit(self.prng.random().float(f32) * rl.PI * 2) *
-                                vec.splat(100),
-                            .lifetime = 1,
-                        }) catch {};
+                for (ents, s.ents[0..ents.len]) |a, b| {
+                    if (a.isAlive() and !b.isAlive()) {
+                        for (0..10) |_| {
+                            const rng = self.prng.random();
+                            self.particles.appendBounded(.{
+                                .pos = a.pos,
+                                .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                                    vec.splat(rng.float(f32) * 100 + 10),
+                                .lifetime = 0.3 + rng.float(f32) * 0.2,
+                            }) catch {};
+                        }
                     }
                 }
 
-                self.player_states.items.len = ps.players.len;
-                @memcpy(self.player_states.items, ps.players);
+                self.conns.items.len = s.conns.len;
+                @memcpy(self.conns.items, s.conns);
 
-                self.bullet_states.items.len = ps.bullets.len;
-                @memcpy(self.bullet_states.items, ps.bullets);
+                self.sim.ents.slots.items.len = s.ents.len;
+                @memcpy(self.sim.ents.slots.items, s.ents);
             }
         },
         .player_input => unreachable,
     }
+}
+
+pub fn rtt(self: *Client) f64 {
+    return @as(f64, @floatFromInt(self.average_ping_sum)) /
+        @as(f64, @floatFromInt(self.average_ping_sum)) / 2000.0;
 }
 
 pub fn handleTask(self: *Client) !void {
@@ -337,69 +357,63 @@ pub fn update(self: *Client) void {
 }
 
 pub fn draw(self: *Client) void {
-    for (self.bullet_states.items) |bl| {
-        const color: rl.Color = @bitCast(self.player_states.items[bl.owner]
-            .identity.bytes[0..3].* ++ .{0xff});
-        rl.DrawRectanglePro(
+    var tmp = utils.Arena.scrath(null);
+    defer tmp.deinit();
+
+    const no_conn = std.math.maxInt(u16);
+
+    const ent_to_conn_table = tmp.arena.alloc(u16, self.sim.ents.slots.items.len);
+    @memset(ent_to_conn_table, no_conn);
+
+    for (self.conns.items, 0..) |c, i| {
+        if (self.sim.ents.get(c.ent) == null) continue;
+        ent_to_conn_table[c.ent.index] = @intCast(i);
+    }
+
+    for (self.sim.ents.slots.items, ent_to_conn_table) |ent, _| {
+        if (!ent.isAlive()) continue;
+
+        const rot = switch (ent.kind) {
+            .bullet => vec.ang(ent.vel),
+            .player => ent.rot,
+        };
+
+        const region = switch (ent.kind) {
+            .bullet => sheet_rects.bullet,
+            .player => sheet_rects.player,
+        };
+
+        rl.DrawTexturePro(
+            self.sheet,
+            region,
             .{
-                .x = bl.pos[0],
-                .y = bl.pos[1],
-                .width = gam.proto.bullet_size,
-                .height = gam.proto.bullet_size,
+                .x = ent.pos[0],
+                .y = ent.pos[1],
+                .width = ent.radius * 2,
+                .height = ent.radius * 2,
             },
             .{
-                .x = gam.proto.bullet_size / 2,
-                .y = gam.proto.bullet_size / 2,
+                .x = ent.radius,
+                .y = ent.radius,
             },
-            vec.ang(bl.vel) / rl.PI / 2 * 360,
-            color,
+            rot / rl.PI / 2 * 360,
+            rl.WHITE,
         );
     }
 
-    for (self.player_states.items) |pl| {
-        rl.DrawLineV(@bitCast(pl.pos), @bitCast(pl.mouse_pos), rl.RED);
-
-        for (self.player_sprites, 0..) |tex, i| {
-            const color: rl.Color = @bitCast(pl.identity.bytes[i * 3 ..][0..3].* ++
-                .{0xff});
-            rl.DrawTexturePro(
-                tex,
-                .{
-                    .x = 0,
-                    .y = 0,
-                    .width = @floatFromInt(tex.width),
-                    .height = @floatFromInt(tex.height),
-                },
-                .{
-                    .x = pl.pos[0],
-                    .y = pl.pos[1],
-                    .width = gam.proto.player_size,
-                    .height = @as(f32, @floatFromInt(gam.proto.player_size)) /
-                        @as(f32, @floatFromInt(tex.width)) *
-                        @as(f32, @floatFromInt(tex.height)),
-                },
-                .{
-                    .x = gam.proto.player_size / 2,
-                    .y = gam.proto.player_size / 2,
-                },
-                vec.ang(pl.mouse_pos - pl.pos) / rl.PI / 2 * 360 + 90,
-                color,
-            );
-        }
-    }
-
-    const size = 20;
     for (self.particles.items) |p| {
         rl.DrawRectangleRec(.{
-            .x = p.pos[0] - size / 2,
-            .y = p.pos[1] - size / 2,
-            .width = size,
-            .height = size,
+            .x = p.pos[0],
+            .y = p.pos[1],
+            .width = 15,
+            .height = 15,
         }, rl.RED);
     }
 }
 
 pub fn input(self: *Client) void {
+    if (self.frame_counter % 3 != 0) return;
+
     self.send(.unrelyable, .{ .player_input = .{
         .seq = self.input_seq,
         .key_mask = .{
@@ -414,14 +428,16 @@ pub fn input(self: *Client) void {
     self.input_seq += 1;
 }
 
-pub fn main() !void {
-    utils.Arena.initScratch(1024 * 1024 * 16);
-
+pub fn init() !Client {
     var self = Client{
         .pool = utils.SclassPool{ .arena = utils.Arena.init(1024 * 1024 * 32) },
         .kp = gam.auth.KeyPair.generate(),
         .loop = try xev.Loop.init(.{}),
+        .sim = undefined,
     };
+
+    self.sim = try .init(&self.pool.arena, Sim.max_ents);
+    self.sim.ents.dont_modify = true;
 
     self.chat.messages = self.pool.arena.makeArrayList(u8, 1 << 16);
     self.stream = .init(
@@ -430,22 +446,24 @@ pub fn main() !void {
         gam.proto.message_queue_size,
     );
     self.reader = .{ .listen_buf = self.pool.arena.alloc(u8, 1 << 16) };
-    self.player_states = self.pool.arena.makeArrayList(PlayerSync, 32);
-    self.bullet_states = self.pool.arena.makeArrayList(BulletSync, 128);
     self.particles = self.pool.arena.makeArrayList(Particle, 256);
+    self.conns = self.pool.arena.makeArrayList(gam.proto.Packet.ConnSync, 32);
+
+    return self;
+}
+
+pub fn main() !void {
+    utils.Arena.initScratch(1024 * 1024 * 16);
+
+    var self = try init();
 
     rl.SetConfigFlags(rl.FLAG_WINDOW_RESIZABLE);
     rl.InitWindow(800, 600, "gam");
     rl.SetTargetFPS(60);
     rl.GuiSetStyle(rl.DEFAULT, rl.TEXT_SIZE, ui.font_size);
 
-    const player_sprites = [_]rl.Texture2D{
-        rl.LoadTexture("./assets/player/wings.png"),
-        rl.LoadTexture("./assets/player/shield.png"),
-        rl.LoadTexture("./assets/player/core.png"),
-        rl.LoadTexture("./assets/player/outline.png"),
-    };
-    self.player_sprites = &player_sprites;
+    const sheet = @embedFile("sheet_png");
+    self.sheet = rl.LoadTextureFromImage(rl.LoadImageFromMemory(".png", sheet.ptr, sheet.len));
 
     while (!rl.WindowShouldClose()) {
         rl.BeginDrawing();
@@ -461,9 +479,19 @@ pub fn main() !void {
                 self.disconnect();
             }
 
-            self.draw();
             self.input();
+
             self.update();
+            self.sim.simulate(.{ .delta = rl.GetFrameTime() });
+            for (self.conns.items) |conn| {
+                self.sim.handleInput(
+                    .{ .delta = rl.GetFrameTime() },
+                    conn.ent,
+                    conn.input,
+                );
+            }
+
+            self.draw();
         }
 
         self.connection_menu.render();
@@ -474,5 +502,20 @@ pub fn main() !void {
             try self.handlePackets();
             try self.handleTask();
         }
+
+        self.frame_counter += 1;
     }
+}
+
+pub fn smoothAngle(current: f32, target: f32, dt: f32, speed: f32) f32 {
+    const tau = 2.0 * std.math.pi;
+
+    const a = @mod(current, tau);
+    const b = @mod(target, tau);
+
+    const diff = @mod(b - a + std.math.pi, tau) - std.math.pi;
+    const factor = 1.0 - std.math.exp(-speed * dt);
+    const new_angle = a + diff * factor;
+
+    return @mod(new_angle, tau);
 }

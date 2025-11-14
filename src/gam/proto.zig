@@ -3,31 +3,13 @@ const std = @import("std");
 const utils = @import("utils");
 const xev = @import("xev");
 const gam = @import("../gam.zig");
+const sim = gam.sim;
 const vec = gam.vec;
+const Id = sim.Id;
+
+pub const sps = 20;
 
 pub const message_queue_size = 8;
-pub const player_size = 64;
-pub const bullet_size = 15;
-
-pub const Id = packed struct(u64) {
-    index: u32,
-    gen: u32,
-
-    pub const invalid = Id{ .index = 0, .gen = std.math.maxInt(u32) };
-};
-
-pub const PlayerInput = extern struct {
-    seq: u32 = 0,
-    key_mask: packed struct(u8) {
-        up: bool = false,
-        down: bool = false,
-        left: bool = false,
-        right: bool = false,
-        shoot: bool = false,
-        _padd: u3 = 0,
-    } = .{},
-    mouse_pos: vec.T = vec.zero,
-};
 
 pub fn bufferPacket(packet: Packet, gpa: std.mem.Allocator) !Crypt {
     const len = packet.size();
@@ -73,24 +55,15 @@ pub const Packet = union(enum) {
     chat_message: ChatMessage,
     state: struct {
         seq: u32,
-        players: []align(1) PlayerSync,
-        bullets: []align(1) BulletSync,
+        conns: []align(1) ConnSync,
+        ents: []align(1) sim.Ent,
     },
-    player_input: PlayerInput,
+    player_input: sim.InputState,
 
-    pub const PlayerSync = struct {
-        pos: vec.T,
-        mouse_pos: vec.T,
-        identity: gam.auth.Identity,
-        id: Id,
-    };
-
-    pub const BulletSync = struct {
-        pos: vec.T,
-        vel: vec.T,
-        owner: u32,
-        lifetime: f32,
-        id: Id,
+    pub const ConnSync = struct {
+        id: gam.auth.Identity,
+        ent: sim.Id,
+        input: sim.InputState,
     };
 
     pub const ChatMessage = struct {
@@ -118,9 +91,9 @@ pub const Packet = union(enum) {
             },
             .state => |ps| {
                 try writer.writeInt(u32, ps.seq, .little);
-                try writer.writeInt(u16, @intCast(ps.players.len), .little);
-                try writer.writeAll(@ptrCast(ps.players));
-                try writer.writeAll(@ptrCast(ps.bullets));
+                try writer.writeInt(u16, @intCast(ps.conns.len), .little);
+                try writer.writeAll(@ptrCast(ps.conns));
+                try writer.writeAll(@ptrCast(ps.ents));
             },
         }
     }
@@ -141,18 +114,18 @@ pub const Packet = union(enum) {
             } },
             .state => return .{ .state = .{
                 .seq = try reader.takeInt(u32, .little),
-                .players = s: {
-                    const count = try reader.takeInt(u16, .little) *
-                        @sizeOf(PlayerSync);
-                    if (reader.buffered().len < count) {
+                .conns = b: {
+                    const len = try reader.takeInt(u16, .little) *
+                        @sizeOf(Packet.ConnSync);
+                    if (reader.buffered().len < len) {
                         return error.ReadFailed;
                     }
 
-                    defer reader.seek += count;
-                    break :s @ptrCast(reader.buffered()[0..count]);
+                    defer reader.seek += len;
+                    break :b @ptrCast(reader.buffered()[0..len]);
                 },
-                .bullets = b: {
-                    if (reader.buffered().len % @sizeOf(BulletSync) != 0) {
+                .ents = b: {
+                    if (reader.buffered().len % @sizeOf(sim.Ent) != 0) {
                         return error.ReadFailed;
                     }
 
