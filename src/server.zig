@@ -522,8 +522,8 @@ pub fn main() !void {
         self.frame.update();
 
         self.sync();
-        self.handleInput();
         self.sim.simulate(.{ .delta = self.frame.delta });
+        self.handleInput();
 
         const conns: []*Connection = self.conns.entries.items(.value);
 

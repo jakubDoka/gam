@@ -22,7 +22,10 @@ const sheet_rects = @import("sheet_zig");
 pub const Particle = struct {
     pos: vec.T,
     vel: vec.T,
+    radius: f32,
     lifetime: f32,
+    age: f32 = 0.0,
+    color: rl.Color,
 };
 
 const ping_interval = 300;
@@ -242,14 +245,33 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
 
                 for (ents, s.ents[0..ents.len]) |a, b| {
                     if (a.isAlive() and !b.isAlive()) {
-                        for (0..10) |_| {
-                            const rng = self.prng.random();
-                            self.particles.appendBounded(.{
-                                .pos = a.pos,
-                                .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
-                                    vec.splat(rng.float(f32) * 100 + 10),
-                                .lifetime = 0.3 + rng.float(f32) * 0.2,
-                            }) catch {};
+                        switch (a.kind) {
+                            .bullet => {
+                                for (0..10) |_| {
+                                    const rng = self.prng.random();
+                                    self.particles.appendBounded(.{
+                                        .pos = a.pos,
+                                        .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                                            vec.splat(rng.float(f32) * 100 + 10),
+                                        .lifetime = 0.3 + rng.float(f32) * 0.2,
+                                        .radius = 10 + rng.float(f32) * 10,
+                                        .color = rl.SKYBLUE,
+                                    }) catch {};
+                                }
+                            },
+                            .player => {
+                                for (0..30) |_| {
+                                    const rng = self.prng.random();
+                                    self.particles.appendBounded(.{
+                                        .pos = a.pos,
+                                        .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                                            vec.splat(rng.float(f32) * 200 + 30),
+                                        .lifetime = 0.3 + rng.float(f32) * 0.2,
+                                        .radius = 20 + rng.float(f32) * 10,
+                                        .color = rl.SKYBLUE,
+                                    }) catch {};
+                                }
+                            },
                         }
                     }
                 }
@@ -344,8 +366,8 @@ pub fn update(self: *Client) void {
 
     var keep: usize = 0;
     for (self.particles.items) |*p| {
-        p.lifetime -= delta;
-        if (p.lifetime <= 0) continue;
+        p.age += delta;
+        if (p.lifetime <= p.age) continue;
 
         p.pos += p.vel * vec.splat(delta);
         p.vel *= vec.splat(1 - (friction * delta));
@@ -354,6 +376,60 @@ pub fn update(self: *Client) void {
         keep += 1;
     }
     self.particles.items.len = keep;
+
+    for (self.conns.items) |conn| {
+        const ent = self.sim.ents.get(conn.ent) orelse continue;
+
+        var boost_dir = vec.zero;
+        for (vec.dirs, [_]bool{
+            conn.input.key_mask.down,
+            conn.input.key_mask.right,
+            conn.input.key_mask.up,
+            conn.input.key_mask.left,
+        }) |d, k| {
+            if (k) boost_dir -= d;
+        }
+
+        const dir = conn.input.mouse_pos - ent.pos;
+        const ang = vec.ang(dir);
+
+        if (boost_dir[0] != 0 or boost_dir[1] != 0) for (vec.dirs) |d| {
+            const rotated_dir = vec.unit(vec.ang(d) + ang);
+            const offset = vec.angBetween(boost_dir, rotated_dir);
+            if (offset >= std.math.pi / 2.5) continue;
+
+            const emit_pos = ent.pos + rotated_dir * vec.splat(-ent.radius * 0.8);
+            const intensity = 15 * (1 - std.math.pow(f32, offset / (std.math.pi / 2.0), 2));
+
+            for (0..3) |_| {
+                const rng = self.prng.random();
+                _ = self.particles.appendBounded(Particle{
+                    .pos = emit_pos + ent.vel * vec.splat(rl.GetFrameTime()),
+                    .vel = vec.unit(rng.float(f32) * std.math.tau) *
+                        vec.splat(100) + rotated_dir * -vec.splat(150),
+                    .lifetime = 0.1 - rng.float(f32) * 0.04,
+                    .radius = intensity,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            }
+        };
+    }
+
+    for (self.sim.ents.slots.items) |ent| {
+        if (!ent.isAlive()) continue;
+        switch (ent.kind) {
+            .bullet => {
+                self.particles.appendBounded(.{
+                    .pos = ent.pos,
+                    .vel = vec.zero,
+                    .radius = 10,
+                    .lifetime = 0.5,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            },
+            .player => {},
+        }
+    }
 }
 
 pub fn draw(self: *Client) void {
@@ -368,6 +444,15 @@ pub fn draw(self: *Client) void {
     for (self.conns.items, 0..) |c, i| {
         if (self.sim.ents.get(c.ent) == null) continue;
         ent_to_conn_table[c.ent.index] = @intCast(i);
+    }
+
+    for (self.particles.items) |p| {
+        const coff = p.age / p.lifetime;
+        rl.DrawCircleV(
+            @bitCast(p.pos),
+            p.radius * (1 - coff),
+            rl.ColorAlpha(p.color, 1 - coff * coff),
+        );
     }
 
     for (self.sim.ents.slots.items, ent_to_conn_table) |ent, _| {
@@ -399,15 +484,6 @@ pub fn draw(self: *Client) void {
             rot / rl.PI / 2 * 360,
             rl.WHITE,
         );
-    }
-
-    for (self.particles.items) |p| {
-        rl.DrawRectangleRec(.{
-            .x = p.pos[0],
-            .y = p.pos[1],
-            .width = 15,
-            .height = 15,
-        }, rl.RED);
     }
 }
 
@@ -483,6 +559,7 @@ pub fn main() !void {
 
             self.update();
             self.sim.simulate(.{ .delta = rl.GetFrameTime() });
+
             for (self.conns.items) |conn| {
                 self.sim.handleInput(
                     .{ .delta = rl.GetFrameTime() },
