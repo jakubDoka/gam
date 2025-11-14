@@ -19,18 +19,10 @@ pub const rl = @cImport({
 
 const sheet_rects = @import("sheet_zig");
 
-pub const Particle = struct {
-    pos: vec.T,
-    vel: vec.T,
-    radius: f32,
-    lifetime: f32,
-    age: f32 = 0.0,
-    color: rl.Color,
-};
-
 const ping_interval = 300;
 const stale_connection_period = 2 * std.time.ns_per_s;
 const max_retries = 4;
+const max_particles = 256;
 
 pub fn get_time_secs() f64 {
     return @as(f64, @floatFromInt(std.time.milliTimestamp())) / 1000;
@@ -100,6 +92,94 @@ particles: std.ArrayList(Particle) = undefined,
 
 sheet: rl.Texture2D = undefined,
 
+stats: []const Stats = &.{ .{
+    .sprite = sheet_rects.player,
+    .rotation_derived_from = .rot,
+    .cbs = .init(opaque {
+        pub fn explode(self: *Client, a: Sim.Ent) void {
+            for (0..30) |_| {
+                const rng = self.prng.random();
+                self.particles.appendBounded(.{
+                    .pos = a.pos,
+                    .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                        vec.splat(rng.float(f32) * 200 + 30),
+                    .lifetime = 0.3 + rng.float(f32) * 0.2,
+                    .radius = 20 + rng.float(f32) * 10,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            }
+        }
+    }),
+}, .{
+    .sprite = sheet_rects.bullet,
+    .cbs = .init(opaque {
+        pub fn explode(self: *Client, a: Sim.Ent) void {
+            for (0..10) |_| {
+                const rng = self.prng.random();
+                self.particles.appendBounded(.{
+                    .pos = a.pos,
+                    .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                        vec.splat(rng.float(f32) * 100 + 10),
+                    .lifetime = 0.3 + rng.float(f32) * 0.2,
+                    .radius = 10 + rng.float(f32) * 10,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            }
+        }
+        pub fn trail(self: *Client, ent: Sim.Ent) void {
+            self.particles.appendBounded(.{
+                .pos = ent.pos,
+                .vel = vec.zero,
+                .radius = 10,
+                .lifetime = 0.5,
+                .color = rl.SKYBLUE,
+            }) catch {};
+        }
+    }),
+} },
+
+pub const Particle = struct {
+    pos: vec.T,
+    vel: vec.T,
+    radius: f32,
+    lifetime: f32,
+    age: f32 = 0.0,
+    color: rl.Color,
+};
+
+pub const Stats = struct {
+    rotation_derived_from: enum { rot, vel } = .vel,
+    sprite: rl.Rectangle,
+    cbs: Callbacks,
+};
+
+pub const Callbacks = struct {
+    explode: *const fn (sim: *Client, ent: Sim.Ent) void = default.explode,
+    trail: *const fn (sim: *Client, ent: Sim.Ent) void = default.trail,
+
+    const default = opaque {
+        fn explode(self: *Client, ent: Sim.Ent) void {
+            _ = self;
+            _ = ent;
+        }
+
+        fn trail(self: *Client, ent: Sim.Ent) void {
+            _ = self;
+            _ = ent;
+        }
+    };
+
+    pub fn init(comptime cbs: type) Callbacks {
+        var self = Callbacks{};
+
+        for (std.meta.fields(Callbacks)) |f| {
+            if (@hasDecl(cbs, f.name)) @field(self, f.name) = &@field(cbs, f.name);
+        }
+
+        return self;
+    }
+};
+
 pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
     self.connection_state = .connecting;
     self.handshake_retry_round = 0;
@@ -127,6 +207,7 @@ pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
 
     self.chat.messages.items.len = 0;
     self.chat.message_timeouts = @splat(0);
+    self.sim.ents.slots.items.len = 0;
 }
 
 pub fn disconnect(self: *Client) void {
@@ -244,34 +325,9 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
                 const ents = self.sim.ents.slots.items;
 
                 for (ents, s.ents[0..ents.len]) |a, b| {
-                    if (a.isAlive() and !b.isAlive()) {
-                        switch (a.kind) {
-                            .bullet => {
-                                for (0..10) |_| {
-                                    const rng = self.prng.random();
-                                    self.particles.appendBounded(.{
-                                        .pos = a.pos,
-                                        .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
-                                            vec.splat(rng.float(f32) * 100 + 10),
-                                        .lifetime = 0.3 + rng.float(f32) * 0.2,
-                                        .radius = 10 + rng.float(f32) * 10,
-                                        .color = rl.SKYBLUE,
-                                    }) catch {};
-                                }
-                            },
-                            .player => {
-                                for (0..30) |_| {
-                                    const rng = self.prng.random();
-                                    self.particles.appendBounded(.{
-                                        .pos = a.pos,
-                                        .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
-                                            vec.splat(rng.float(f32) * 200 + 30),
-                                        .lifetime = 0.3 + rng.float(f32) * 0.2,
-                                        .radius = 20 + rng.float(f32) * 10,
-                                        .color = rl.SKYBLUE,
-                                    }) catch {};
-                                }
-                            },
+                    if (a.id != b.id) {
+                        if (a.isAlive()) {
+                            self.stats[a.stats.id(&self.sim)].cbs.explode(self, a);
                         }
                     }
                 }
@@ -281,6 +337,10 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
 
                 self.sim.ents.slots.items.len = s.ents.len;
                 @memcpy(self.sim.ents.slots.items, s.ents);
+
+                for (self.sim.ents.slots.items) |*ent| {
+                    if (ent.isAlive()) ent.globalize(&self.sim);
+                }
             }
         },
         .player_input => unreachable,
@@ -292,7 +352,7 @@ pub fn rtt(self: *Client) f64 {
         @as(f64, @floatFromInt(self.average_ping_sum)) / 2000.0;
 }
 
-pub fn handleTask(self: *Client) !void {
+pub fn handleTasks(self: *Client) !void {
     while (self.q.next()) |task| switch (task) {
         .ch => |ch| {
             std.debug.assert(self.connection_state == .connecting);
@@ -398,7 +458,7 @@ pub fn update(self: *Client) void {
             const offset = vec.angBetween(boost_dir, rotated_dir);
             if (offset >= std.math.pi / 2.5) continue;
 
-            const emit_pos = ent.pos + rotated_dir * vec.splat(-ent.radius * 0.8);
+            const emit_pos = ent.pos + rotated_dir * vec.splat(-ent.stats.radius * 0.8);
             const intensity = 15 * (1 - std.math.pow(f32, offset / (std.math.pi / 2.0), 2));
 
             for (0..3) |_| {
@@ -417,18 +477,7 @@ pub fn update(self: *Client) void {
 
     for (self.sim.ents.slots.items) |ent| {
         if (!ent.isAlive()) continue;
-        switch (ent.kind) {
-            .bullet => {
-                self.particles.appendBounded(.{
-                    .pos = ent.pos,
-                    .vel = vec.zero,
-                    .radius = 10,
-                    .lifetime = 0.5,
-                    .color = rl.SKYBLUE,
-                }) catch {};
-            },
-            .player => {},
-        }
+        self.stats[ent.stats.id(&self.sim)].cbs.trail(self, ent);
     }
 }
 
@@ -458,32 +507,47 @@ pub fn draw(self: *Client) void {
     for (self.sim.ents.slots.items, ent_to_conn_table) |ent, _| {
         if (!ent.isAlive()) continue;
 
-        const rot = switch (ent.kind) {
-            .bullet => vec.ang(ent.vel),
-            .player => ent.rot,
-        };
+        const stats = &self.stats[ent.stats.id(&self.sim)];
 
-        const region = switch (ent.kind) {
-            .bullet => sheet_rects.bullet,
-            .player => sheet_rects.player,
+        const rot = switch (stats.rotation_derived_from) {
+            .vel => vec.ang(ent.vel),
+            .rot => ent.rot,
         };
 
         rl.DrawTexturePro(
             self.sheet,
-            region,
+            stats.sprite,
             .{
                 .x = ent.pos[0],
                 .y = ent.pos[1],
-                .width = ent.radius * 2,
-                .height = ent.radius * 2,
+                .width = ent.stats.radius * 2,
+                .height = ent.stats.radius * 2,
             },
             .{
-                .x = ent.radius,
-                .y = ent.radius,
+                .x = ent.stats.radius,
+                .y = ent.stats.radius,
             },
             rot / rl.PI / 2 * 360,
             rl.WHITE,
         );
+
+        if (ent.stats.max_health > 0) {
+            const perc = 1 - @as(f32, @floatFromInt(ent.missing_health)) /
+                @as(f32, @floatFromInt(ent.stats.max_health));
+
+            const start = rot - rl.PI * perc;
+            const end = rot + rl.PI * perc;
+
+            rl.DrawRing(
+                @bitCast(ent.pos),
+                ent.stats.radius + 10,
+                ent.stats.radius + 15,
+                start / rl.PI / 2 * 360,
+                end / rl.PI / 2 * 360,
+                @intFromFloat(100 * perc),
+                rl.GREEN,
+            );
+        }
     }
 }
 
@@ -522,8 +586,11 @@ pub fn init() !Client {
         gam.proto.message_queue_size,
     );
     self.reader = .{ .listen_buf = self.pool.arena.alloc(u8, 1 << 16) };
-    self.particles = self.pool.arena.makeArrayList(Particle, 256);
-    self.conns = self.pool.arena.makeArrayList(gam.proto.Packet.ConnSync, 32);
+    self.particles = self.pool.arena.makeArrayList(Particle, max_particles);
+    self.conns = self.pool.arena.makeArrayList(
+        gam.proto.Packet.ConnSync,
+        gam.proto.max_conns,
+    );
 
     return self;
 }
@@ -577,22 +644,9 @@ pub fn main() !void {
         for (0..10) |_| {
             try self.loop.run(.no_wait);
             try self.handlePackets();
-            try self.handleTask();
+            try self.handleTasks();
         }
 
         self.frame_counter += 1;
     }
-}
-
-pub fn smoothAngle(current: f32, target: f32, dt: f32, speed: f32) f32 {
-    const tau = 2.0 * std.math.pi;
-
-    const a = @mod(current, tau);
-    const b = @mod(target, tau);
-
-    const diff = @mod(b - a + std.math.pi, tau) - std.math.pi;
-    const factor = 1.0 - std.math.exp(-speed * dt);
-    const new_angle = a + diff * factor;
-
-    return @mod(new_angle, tau);
 }

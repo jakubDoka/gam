@@ -8,6 +8,7 @@ const vec = gam.vec;
 const Id = sim.Id;
 
 pub const sps = 20;
+pub const max_conns = 32;
 
 pub const message_queue_size = 8;
 

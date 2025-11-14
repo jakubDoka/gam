@@ -19,6 +19,35 @@ pub fn get_now() std.time.Instant {
     return std.time.Instant.now() catch unreachable;
 }
 
+pool: utils.SclassPool,
+loop: xev.Loop,
+reader: gam.UdpReader,
+
+free_conns: gam.List(Connection) = .{},
+free_oneoffs: gam.List(gam.OneOffPacket) = .{},
+
+pong_tick: gam.Sleep = .{},
+frame: Frame = .{},
+
+q: gam.Queue(union(enum) {
+    sh: *ServerHandshake,
+    one_off: *gam.OneOffPacket,
+    const_one_off: *gam.OneOffPacket,
+    pong: *gam.Sleep,
+}) = .{},
+
+conns: std.ArrayHashMapUnmanaged(std.net.Address, *Connection, *AddrCtx, false) =
+    .empty,
+
+sim: Sim,
+
+state_seq: u32 = 1,
+
+rng: std.Random,
+hash_ctx: AddrCtx,
+sock: xev.UDP,
+kp: gam.auth.KeyPair,
+
 pub const SendMode = enum { relyable, unrelyable };
 
 pub const Connection = struct {
@@ -158,35 +187,6 @@ pub const Frame = struct {
         self.tps_counter += 1;
     }
 };
-
-pool: utils.SclassPool,
-loop: xev.Loop,
-reader: gam.UdpReader,
-
-free_conns: gam.List(Connection) = .{},
-free_oneoffs: gam.List(gam.OneOffPacket) = .{},
-
-pong_tick: gam.Sleep = .{},
-frame: Frame = .{},
-
-q: gam.Queue(union(enum) {
-    sh: *ServerHandshake,
-    one_off: *gam.OneOffPacket,
-    const_one_off: *gam.OneOffPacket,
-    pong: *gam.Sleep,
-}) = .{},
-
-conns: std.ArrayHashMapUnmanaged(std.net.Address, *Connection, *AddrCtx, false) =
-    .empty,
-
-sim: Sim,
-
-state_seq: u32 = 1,
-
-rng: std.Random,
-hash_ctx: AddrCtx,
-sock: xev.UDP,
-kp: gam.auth.KeyPair,
 
 pub fn schedule(self: *Server) void {
     self.reader.schedule(&self.loop, self.sock);
@@ -404,11 +404,8 @@ pub fn handlePackets(self: *Server) void {
             continue;
         };
 
-        ent.kind = .player;
+        ent.stats = &self.sim.stats[0];
         ent.pos = .{ 100, 100 };
-        ent.friction = 1;
-        ent.radius = 32;
-        ent.health = 100;
 
         conn.* = .{
             .handshake = ServerHandshake{ .kp = &self.kp },
@@ -466,7 +463,7 @@ pub fn init(port: u16) !Server {
     self.reader = .{ .listen_buf = self.pool.arena.alloc(u8, 1 << 16) };
     try self.conns.ensureTotalCapacityContext(
         tmp_alloc.allocator(),
-        max_conns,
+        gam.proto.max_conns,
         &self.hash_ctx,
     );
 
@@ -490,12 +487,20 @@ pub fn sync(self: *Server) void {
         slot.* = .{ .id = conn.id, .ent = conn.ent, .input = conn.input };
     }
 
+    for (self.sim.ents.slots.items) |*ent| {
+        if (ent.isAlive()) ent.localize(&self.sim);
+    }
+
     self.broadcast(.unrelyable, .{ .state = .{
         .seq = self.state_seq,
         .conns = conns,
         .ents = self.sim.ents.slots.items,
     } });
     self.state_seq += 1;
+
+    for (self.sim.ents.slots.items) |*ent| {
+        if (ent.isAlive()) ent.globalize(&self.sim);
+    }
 }
 
 pub fn handleInput(self: *Server) void {

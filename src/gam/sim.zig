@@ -7,9 +7,33 @@ const vec = gam.vec;
 const Sim = @This();
 
 pub const max_ents = 256;
-pub const reload_period = 0.5;
 
 pub const no_coll_id = std.math.maxInt(u32);
+
+ents: SlotMap,
+stats: []const Stats = &.{ .{
+    .friction = 1,
+    .radius = 32,
+    .max_health = 100,
+    .reload_period = 0.1,
+    .cbs = .init(opaque {
+        pub const bullet_speed = 1000;
+
+        pub fn shoot(self: *Sim, ent: Ent, dir: vec.T) void {
+            const slot = self.ents.add() catch return;
+
+            slot.pos = ent.pos;
+            slot.vel = dir * vec.splat(bullet_speed);
+            slot.owner = ent.id;
+            slot.stats = &self.stats[1];
+        }
+    }),
+}, .{
+    .lifetime = 0.5,
+    .radius = 15,
+    .damage = 25,
+    .cbs = .init(opaque {}),
+} },
 
 pub const SlotMap = struct {
     slots: std.ArrayList(Ent),
@@ -50,7 +74,7 @@ pub const SlotMap = struct {
         const slot = self.get(id) orelse return false;
         slot.id.gen += 1;
         slot.next_free = self.free;
-        self.free = slot.next_free;
+        self.free = slot;
         return true;
     }
 
@@ -62,17 +86,11 @@ pub const SlotMap = struct {
 };
 
 pub const Ent = struct {
-    kind: enum { bullet, player } = undefined,
-
-    // mostly static
-    friction: f32 = 0.0,
-    radius: f32 = 0.0,
-    mass_mult: f32 = 1.0,
-    damage: u32 = 0,
+    stats: *const Stats = undefined,
 
     reload: f32 = 0.0,
-    lifetime: f32 = 0.0,
-    health: u32 = 0,
+    age: f32 = 0.0,
+    missing_health: u32 = 0,
 
     owner: Id = .invalid,
 
@@ -82,11 +100,60 @@ pub const Ent = struct {
 
     coll_id: u32 = no_coll_id,
 
+    // TODO: make this relative to the slot map (index)
     next_free: ?*Ent = null,
     id: Id,
 
     pub fn isAlive(self: Ent) bool {
         return self.id.gen % 2 == 0;
+    }
+
+    pub fn localize(self: *Ent, sim: *const Sim) void {
+        self.stats = @ptrFromInt((self.stats.id(sim) + 1) * @alignOf(Stats));
+    }
+
+    pub fn globalize(self: *Ent, sim: *const Sim) void {
+        self.stats = &sim.stats[@intFromPtr(self.stats) / @alignOf(Stats) - 1];
+    }
+};
+
+pub const Stats = struct {
+    friction: f32 = 0.0,
+    radius: f32 = 0.0,
+    mass_mult: f32 = 1.0,
+    damage: u32 = 0,
+    max_health: u32 = 0,
+    lifetime: f32 = 0.0,
+    reload_period: f32 = 0.0,
+
+    cbs: Callbacks = .{},
+
+    pub const Callbacks = struct {
+        shoot: *const fn (self: *Sim, ent: Ent, dir: vec.T) void = default.shoot,
+
+        const default = opaque {
+            pub fn shoot(self: *Sim, ent: Ent, dir: vec.T) void {
+                _ = self;
+                _ = ent;
+                _ = dir;
+            }
+        };
+
+        pub fn init(comptime cbs: type) Callbacks {
+            var self = Callbacks{};
+
+            for (std.meta.fields(Callbacks)) |f| {
+                if (@hasDecl(cbs, f.name)) @field(self, f.name) = &@field(cbs, f.name);
+            }
+
+            return self;
+        }
+    };
+
+    pub const Id = enum(u16) { _ };
+
+    pub fn id(self: *const Stats, sim: *const Sim) usize {
+        return (@intFromPtr(self) - @intFromPtr(sim.stats.ptr)) / @sizeOf(Stats);
     }
 };
 
@@ -100,8 +167,6 @@ pub const Id = packed struct(u64) {
 pub const Ctx = struct {
     delta: f32,
 };
-
-ents: SlotMap,
 
 pub fn init(scratch: *utils.Arena, ent_cap: usize) !Sim {
     return .{
@@ -139,22 +204,12 @@ pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     ent.vel += dir * vec.splat(player_acc * ctx.delta);
 
     const look_dir = vec.norm(input.mouse_pos - ent.pos);
-    const bullet_lifetime = 0.5;
-    const bullet_speed = 1000;
 
     ent.reload -= ctx.delta;
     if (input.key_mask.shoot) {
-        if (ent.reload <= 0) b: {
-            const slot = self.ents.add() catch break :b;
-            ent.reload = reload_period;
-
-            slot.kind = .bullet;
-            slot.pos = ent.pos;
-            slot.vel = look_dir * vec.splat(bullet_speed);
-            slot.owner = ent_id;
-            slot.lifetime = bullet_lifetime;
-            slot.radius = 15;
-            slot.damage = 25;
+        if (ent.reload <= 0) {
+            ent.reload = ent.stats.reload_period;
+            ent.stats.cbs.shoot(self, ent.*, look_dir);
         }
     }
 }
@@ -171,19 +226,19 @@ pub fn simulate(self: *Sim, ctx: Ctx) void {
     for (self.ents.slots.items) |*ent| {
         if (!ent.isAlive()) continue;
 
-        ent.vel *= vec.splat(1 - (ent.friction * ctx.delta));
+        ent.vel *= vec.splat(1 - (ent.stats.friction * ctx.delta));
         ent.pos += ent.vel * vec.splat(ctx.delta);
 
         collect_colls: for (self.ents.slots.items) |*oent| {
             if (!oent.isAlive() or oent == ent) continue;
             if (oent.owner == ent.id or ent.owner == oent.id) continue;
 
-            const min_dist = ent.radius + oent.radius;
+            const min_dist = ent.stats.radius + oent.stats.radius;
             const dist = vec.dist2(ent.pos, oent.pos);
 
             // get rid of overlaps
             if (min_dist * min_dist > dist) {
-                if (ent.radius > oent.radius) {
+                if (ent.stats.radius > oent.stats.radius) {
                     oent.pos = ent.pos + vec.norm(oent.pos - ent.pos) *
                         vec.splat(min_dist);
                 } else {
@@ -226,11 +281,12 @@ pub fn simulate(self: *Sim, ctx: Ctx) void {
             );
         }
 
-        const prev_lt = ent.lifetime;
-        ent.lifetime -= ctx.delta;
-        if (ent.lifetime <= 0 and prev_lt > 0) {
-            _ = self.ents.remove(ent.id);
-            continue;
+        ent.age += ctx.delta;
+        if (ent.stats.lifetime > 0) {
+            if (ent.age >= ent.stats.lifetime) {
+                _ = self.ents.remove(ent.id);
+                continue;
+            }
         }
     }
 
@@ -249,8 +305,8 @@ pub fn simulate(self: *Sim, ctx: Ctx) void {
         aent.pos += aent.vel * vec.splat(col.t);
         bent.pos += bent.vel * vec.splat(col.t);
 
-        const amass = aent.radius * aent.mass_mult;
-        const bmass = bent.radius * bent.mass_mult;
+        const amass = aent.stats.radius * aent.stats.mass_mult;
+        const bmass = bent.stats.radius * bent.stats.mass_mult;
 
         const dist = vec.dist(aent.pos, bent.pos);
         const norm = (bent.pos - aent.pos) / vec.splat(dist);
@@ -265,9 +321,9 @@ pub fn simulate(self: *Sim, ctx: Ctx) void {
         for ([_]*Ent{ aent, bent }, [_]*Ent{ bent, aent }) |a, b| {
             // NOTE: we dont die twice, but also, invincible objects start with
             // health 0
-            if (a.health == 0) continue;
-            a.health -|= b.damage;
-            if (a.health == 0) {
+            if (a.stats.max_health == 0) continue;
+            a.missing_health += b.stats.damage;
+            if (a.stats.max_health -| a.missing_health == 0) {
                 _ = self.ents.remove(a.id);
             }
         }
