@@ -7,16 +7,20 @@ pub fn build(b: *std.Build) !void {
     const version = b.option([]const u8, "version", "version to tag") orelse
         "unknown-release";
 
-    const release_targets = [_]struct { []const u8, std.Build.ResolvedTarget }{ .{
-        "x86_64-windows",
-        b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }),
-    }, .{
-        "x86_64-linux",
-        b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .glibc_version = .{ .major = 2, .minor = 35, .patch = 0 } }),
-    }, .{
-        "x86_64-linux-popos",
-        b.graph.host,
-    } };
+    const release_targets = [_]struct { []const u8, std.Build.ResolvedTarget }{
+        .{
+            "x86_64-windows",
+            b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }),
+        },
+        //.{
+        //    "x86_64-linux",
+        //    b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .glibc_version = .{ .major = 2, .minor = 35, .patch = 0 } }),
+        //},
+        .{
+            "x86_64-linux",
+            b.graph.host,
+        },
+    };
 
     const tag_release = b.addSystemCommand(&.{
         git,
