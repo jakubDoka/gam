@@ -4,10 +4,6 @@
     .fingerprint = 0xfd3c43b48af9806f,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        .utils = .{
-            .path = "git+https://github.com/jakubDoka/utils.git#a1498c4295130797ecaf16de7f219362cfc2e5fa",
-        },
-        .libxev = .{ .path = "git+https://github.com/jakubDoka/libxev.git#a86bdc692b384f692a99047466ec89c3705d861c", },
         .raylib = .{
             .url = "git+https://github.com/raysan5/raylib.git#12ce106661bc9c8f74ea3f3069291e5fc4e7d50a",
             .hash = "raylib-5.6.0-dev-whq8uECwAAUfjtGTyP_uENUua4I_wf8r_-k3p0Wq3Bah",
@@ -15,6 +11,14 @@
         .raygui = .{
             .url = "git+https://github.com/raysan5/raygui.git#b9971133b2f7b7513904770d565b683a93fb3624",
             .hash = "N-V-__8AAIccbwB-BNriehZxfWJ62ImYbayrk3QR9NBSxsU_",
+        },
+        .libxev = .{
+            .url = "git+https://github.com/jakubDoka/libxev.git#a86bdc692b384f692a99047466ec89c3705d861c",
+            .hash = "libxev-0.0.0-86vtcz8bEwB9PLXxMMckZwulRxoKleuLsrffobuUv993",
+        },
+        .utils = .{
+            .url = "git+https://github.com/jakubDoka/utils.git#a1498c4295130797ecaf16de7f219362cfc2e5fa",
+            .hash = "utils-0.0.0-whqoYxzFAACXon1GJ4fwz2_j0-i46bFak-SSpd8afpvp",
         },
     },
     .paths = .{
