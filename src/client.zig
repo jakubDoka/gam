@@ -636,9 +636,7 @@ pub fn handleTasks(self: *Client) !void {
         .close => {
             self.connection_state = .disconnected;
         },
-        .some_sleep => {
-            std.debug.print("some sleep\n", .{});
-        },
+        .some_sleep => {},
     };
 }
 

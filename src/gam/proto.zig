@@ -117,7 +117,6 @@ pub const Packet = union(enum) {
             .player_input,
             .spawn,
             => |t| {
-                std.debug.print("{}\n", .{t});
                 return @unionInit(
                     Packet,
                     @tagName(t),

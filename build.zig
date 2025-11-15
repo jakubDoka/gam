@@ -4,8 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    std.debug.print("{}\n", .{target});
-
     const utils = b.dependency("utils", .{
         .target = target,
         .optimize = optimize,

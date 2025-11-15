@@ -13,8 +13,8 @@
             .hash = "N-V-__8AAIccbwB-BNriehZxfWJ62ImYbayrk3QR9NBSxsU_",
         },
         .libxev = .{
-            .url = "git+https://github.com/jakubDoka/libxev.git#a86bdc692b384f692a99047466ec89c3705d861c",
-            .hash = "libxev-0.0.0-86vtcz8bEwB9PLXxMMckZwulRxoKleuLsrffobuUv993",
+            .url = "git+https://github.com/jakubDoka/libxev.git?branch#ac07fb03f9f0e83382308560ae515745b70284ba",
+            .hash = "libxev-0.0.0-86vtc04fEwCEKdm7Gs9oNFNbtwK15bnXKTawC1t1uAvc",
         },
         .utils = .{
             .url = "git+https://github.com/jakubDoka/utils.git#a1498c4295130797ecaf16de7f219362cfc2e5fa",
