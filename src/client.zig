@@ -560,10 +560,6 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
                         }
                     }
                 }
-
-                for (self.conns.items) |*conn| {
-                    self.sim.initInput(conn.ent, conn.input);
-                }
             }
         },
         .player_input, .spawn => unreachable,
@@ -674,8 +670,7 @@ pub fn update(self: *Client) void {
             if (k) boost_dir -= d;
         }
 
-        const dir = conn.input.mouse_pos - ent.pos;
-        const ang = vec.ang(dir);
+        const ang = ent.rot;
 
         if (boost_dir[0] != 0 or boost_dir[1] != 0) for (vec.dirs) |d| {
             const rotated_dir = vec.unit(vec.ang(d) + ang);
@@ -775,8 +770,10 @@ pub fn draw(self: *Client) void {
     }
 }
 
-pub fn input(self: *Client) void {
+pub fn input(self: *Client, ent: Sim.Ent) void {
     if (self.frame_counter % 3 != 0) return;
+
+    const mouse_pos: vec.T = @bitCast(rl.GetScreenToWorld2D(rl.GetMousePosition(), self.camera));
 
     self.send(.unrelyable, .{ .player_input = .{
         .seq = self.input_seq,
@@ -787,10 +784,7 @@ pub fn input(self: *Client) void {
             .right = rl.IsKeyDown(rl.KEY_D),
             .shoot = rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT),
         },
-        .mouse_pos = @bitCast(rl.GetScreenToWorld2D(
-            rl.GetMousePosition(),
-            self.camera,
-        )),
+        .look_dir = vec.ang(mouse_pos - ent.pos),
     } }) catch {};
     self.input_seq += 1;
 }
@@ -961,7 +955,7 @@ pub fn main() !void {
                 });
             }
 
-            self.input();
+            if (our_ent) |e| self.input(e.*);
 
             self.update();
             self.sim.simulate(.{ .delta = rl.GetFrameTime() });

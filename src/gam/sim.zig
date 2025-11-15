@@ -294,7 +294,7 @@ pub const InputState = extern struct {
         shoot: bool = false,
         _padd: u3 = 0,
     } = .{},
-    mouse_pos: vec.Packed = @splat(0),
+    look_dir: f32 = 0,
 };
 
 pub fn init(scratch: *utils.Arena, ent_cap: usize) !Sim {
@@ -308,13 +308,10 @@ pub fn reset(self: *Sim) void {
     self.ents.slots.items.len = 1;
 }
 
-pub fn initInput(self: *Sim, ent_id: Id, input: InputState) void {
-    const ent = self.ents.get(ent_id) orelse return;
-    ent.rot = vec.ang(input.mouse_pos - ent.pos);
-}
-
 pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     const ent = self.ents.get(ent_id) orelse return;
+
+    ent.rot = input.look_dir;
 
     var dir = vec.zero;
     if (input.key_mask.up) dir += .{ 0, -1 };

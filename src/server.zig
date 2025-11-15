@@ -374,7 +374,6 @@ pub fn handleConnPacket(
             .player_input => |inp| {
                 if (inp.seq > conn.input.seq) {
                     conn.input = inp;
-                    self.sim.initInput(conn.ent, conn.input);
                 }
             },
             .spawn => |r| b: {
