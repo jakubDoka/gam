@@ -91,6 +91,9 @@ sim: Sim,
 particles: std.ArrayList(Particle) = undefined,
 
 sheet: rl.Texture2D = undefined,
+camera: rl.Camera2D = .{ .zoom = 1 },
+
+map: TileMap,
 
 stats: []const Stats = &.{ .{
     .sprite = sheet_rects.player,
@@ -171,6 +174,128 @@ pub const common = opaque {
                 .color = rl.SKYBLUE,
             }) catch {};
         }
+    }
+};
+
+const Spec = struct {
+    pub const tile_sheet = [_]rl.Rectangle{
+        sheet_rects.tile_full,
+    };
+
+    pub const weng_tiles = [_]rl.Rectangle{
+        sheet_rects.tile_corner,
+        sheet_rects.tile_side,
+    };
+
+    pub const world_size_pow = 11;
+};
+
+pub const TileMap = struct {
+    const Tile = std.math.IntFittingRange(0, Spec.tile_sheet.len);
+    pub const no_tile = std.math.maxInt(Tile);
+    pub const tile_size: u32 = @intFromFloat(Spec.tile_sheet[0].width * 2);
+    pub const stride = (@as(u32, 1) << Spec.world_size_pow) / tile_size;
+    const size = stride * stride;
+
+    tiles: *[size]Tile,
+    pub fn init(scratch: *utils.Arena) TileMap {
+        const self = TileMap{ .tiles = scratch.create([size]Tile) };
+        @memset(self.tiles, no_tile);
+        return self;
+    }
+
+    inline fn project(v: f32) u32 {
+        return @intCast(std.math.clamp(@as(i32, @intFromFloat(v / tile_size)), 0, @as(i32, @intCast(stride - 1))));
+    }
+
+    pub inline fn get(self: *@This(), x: usize, y: usize) Tile {
+        return self.tiles[y * stride + x];
+    }
+
+    pub inline fn set(self: *@This(), x: usize, y: usize, tile: Tile) void {
+        self.tiles[y * stride + x] = tile;
+    }
+
+    pub fn draw(self: *@This(), view_port: rl.Rectangle) void {
+        const client: *Client = @fieldParentPtr("map", self);
+
+        const minx = project(view_port.x);
+        const miny = project(view_port.y);
+        const maxx = project(view_port.x + view_port.width + tile_size);
+        const maxy = project(view_port.y + view_port.height + tile_size);
+
+        const color = rl.WHITE;
+        for (miny..maxy) |y| for (minx..maxx) |x| {
+            const tile = self.tiles[y * stride + x];
+            const pos = vec.T{ vec.tof(x * tile_size), vec.tof(y * tile_size) } + vec.splat(tile_size / 2);
+
+            if (tile != no_tile) {
+                rl.DrawTexturePro(client.sheet, Spec.tile_sheet[tile], .{
+                    .x = pos[0],
+                    .y = pos[1],
+                    .width = tile_size,
+                    .height = tile_size,
+                }, .{ .x = tile_size / 2, .y = tile_size / 2 }, 0, color);
+                continue;
+            }
+
+            const utls = struct {
+                pub inline fn sideMask(side: u2, value: bool) u8 {
+                    return ([_]u8{ 0b111, 0b1_1_100, 0b111_0_000, 0b110_0_000_1 })[side] * @intFromBool(value);
+                }
+
+                pub inline fn cornerMask(side: u2, value: bool) u8 {
+                    return ([_]u8{ 0b1, 0b100, 0b1_0_000, 0b0_100_0_000 })[side] * @intFromBool(value);
+                }
+            };
+
+            const s = stride - 1;
+            const bitset: u8 =
+                utls.sideMask(0, y != 0 and self.get(x, y - 1) == 0) |
+                utls.sideMask(1, x != s and self.get(x + 1, y) == 0) |
+                utls.sideMask(2, y != s and self.get(x, y + 1) == 0) |
+                utls.sideMask(3, x != 0 and self.get(x - 1, y) == 0) |
+                utls.cornerMask(0, x != 0 and y != 0 and self.get(x - 1, y - 1) == 0) |
+                utls.cornerMask(1, x != s and y != 0 and self.get(x + 1, y - 1) == 0) |
+                utls.cornerMask(2, x != s and y != s and self.get(x + 1, y + 1) == 0) |
+                utls.cornerMask(3, x != 0 and y != s and self.get(x - 1, y + 1) == 0);
+
+            for (0..8) |i| {
+                if (i % 2 == 0 and bitset & (@as(u8, 1) << @intCast(i)) != 0) {
+                    rl.DrawTexturePro(
+                        client.sheet,
+                        Spec.weng_tiles[0],
+                        .{
+                            .x = pos[0],
+                            .y = pos[1],
+                            .width = tile_size,
+                            .height = tile_size,
+                        },
+                        .{ .x = tile_size / 2, .y = tile_size / 2 },
+                        (std.math.tau / 4.0) * vec.tof(i / 2) / std.math.tau * 360,
+                        color,
+                    );
+                }
+            }
+
+            for (0..8) |i| {
+                if (i % 2 == 1 and bitset & (@as(u8, 1) << @intCast(i)) != 0) {
+                    rl.DrawTexturePro(
+                        client.sheet,
+                        Spec.weng_tiles[1],
+                        .{
+                            .x = pos[0],
+                            .y = pos[1],
+                            .width = tile_size,
+                            .height = tile_size,
+                        },
+                        .{ .x = tile_size / 2, .y = tile_size / 2 },
+                        (std.math.tau / 4.0) * vec.tof(i / 2) / std.math.tau * 360,
+                        color,
+                    );
+                }
+            }
+        };
     }
 };
 
@@ -600,7 +725,10 @@ pub fn input(self: *Client) void {
             .right = rl.IsKeyDown(rl.KEY_D),
             .shoot = rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT),
         },
-        .mouse_pos = @bitCast(rl.GetMousePosition()),
+        .mouse_pos = @bitCast(rl.GetScreenToWorld2D(
+            rl.GetMousePosition(),
+            self.camera,
+        )),
     } }) catch {};
     self.input_seq += 1;
 }
@@ -611,10 +739,18 @@ pub fn init() !Client {
         .kp = gam.auth.KeyPair.generate(),
         .loop = try xev.Loop.init(.{}),
         .sim = undefined,
+        .map = undefined,
     };
 
     self.sim = try .init(&self.pool.arena, Sim.max_ents);
     self.sim.ents.dont_modify = true;
+
+    self.map = .init(&self.pool.arena);
+    const s = TileMap.stride;
+    for (1..s - 1) |y| for (1..s - 1) |x| {
+        const coff = 1 - vec.dist(.{ vec.tof(x), vec.tof(y) }, .{ s / 2, s / 2 }) / (s / 2);
+        if (self.prng.random().float(f32) < coff) self.map.set(x, y, 0);
+    };
 
     self.chat.messages = self.pool.arena.makeArrayList(u8, 1 << 16);
     self.stream = .init(
@@ -632,6 +768,69 @@ pub fn init() !Client {
     std.debug.assert(self.sim.stats.len == self.stats.len);
 
     return self;
+}
+
+pub fn shipSelection(self: *Client) void {
+    if (self.connection_state != .connected) return;
+
+    const display_size = 100.0;
+    const padding = 10.0;
+    const hover_scale_up = padding / 2;
+
+    var count: usize = 0;
+    for (self.stats) |s| {
+        count += @intFromBool(s.playable);
+    }
+
+    const choice_count: f32 = @floatFromInt(count);
+    const width = display_size * choice_count + (padding * (choice_count - 1));
+
+    const size = vec.T{
+        @floatFromInt(rl.GetScreenWidth()),
+        @floatFromInt(rl.GetScreenHeight()),
+    };
+
+    var cursor = (size - vec.T{ width, display_size }) / vec.splat(2);
+
+    const pressed = rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT);
+
+    for (self.stats, 0..) |s, i| {
+        if (!s.playable) continue;
+
+        const hovered = InRect(
+            .{
+                .x = cursor[0],
+                .y = cursor[1],
+                .height = display_size,
+                .width = display_size,
+            },
+            rl.GetMousePosition(),
+        );
+
+        const scale_up: f32 = if (hovered and !pressed)
+            hover_scale_up
+        else
+            0;
+
+        // TODO: rotate this
+        rl.DrawTexturePro(self.sheet, s.sprite, .{
+            .x = cursor[0] - scale_up,
+            .y = cursor[1] - scale_up,
+            .width = display_size + scale_up * 2,
+            .height = display_size + scale_up * 2,
+        }, .{}, 0, rl.WHITE);
+
+        cursor[0] += display_size + padding;
+
+        if (hovered and pressed) {
+            self.send(
+                .relyable,
+                .{ .spawn = .{ .content_id = i } },
+            ) catch |err| {
+                std.log.err("server is overloaded: {}", .{err});
+            };
+        }
+    }
 }
 
 pub fn main() !void {
@@ -655,79 +854,44 @@ pub fn main() !void {
 
         const now = try std.time.Instant.now();
 
-        if (self.connection_state == .connected) b: {
+        const our_ent = for (self.conns.items) |conn| {
+            if (std.mem.eql(u8, &conn.id.bytes, &self.kp.public_key.bytes) and
+                self.sim.ents.get(conn.ent) != null)
+            {
+                break self.sim.ents.get(conn.ent).?;
+            }
+        } else null;
+
+        if (our_ent) |o| {
+            self.camera.target = @bitCast(o.pos);
+        }
+
+        rl.BeginMode2D(self.camera);
+
+        if (self.connection_state == .connected) {
             if (now.since(self.last_server_ping) > stale_connection_period) {
                 self.connection_menu.ip_error = error.@"server is unresponsive";
                 self.disconnect();
             }
 
-            for (self.conns.items) |conn| {
-                if (std.mem.eql(u8, &conn.id.bytes, &self.kp.public_key.bytes) and
-                    self.sim.ents.get(conn.ent) != null)
-                {
-                    break;
-                }
-            } else {
-                const display_size = 100.0;
-                const padding = 10.0;
-                const hover_scale_up = padding / 2;
+            {
+                const tl = rl.GetScreenToWorld2D(.{}, self.camera);
+                const r = vec.tof(rl.GetScreenWidth());
+                const b = vec.tof(rl.GetScreenHeight());
 
-                var count: usize = 0;
-                for (self.stats) |s| {
-                    count += @intFromBool(s.playable);
-                }
+                self.camera.offset = .{ .x = r / 2, .y = b / 2 };
 
-                const choice_count: f32 = @floatFromInt(count);
-                const width = display_size * choice_count + (padding * (choice_count - 1));
+                const size = rl.Vector2Subtract(rl.GetScreenToWorld2D(
+                    .{ .x = r, .y = b },
+                    self.camera,
+                ), tl);
 
-                const size = vec.T{
-                    @floatFromInt(rl.GetScreenWidth()),
-                    @floatFromInt(rl.GetScreenHeight()),
-                };
-
-                var cursor = (size - vec.T{ width, display_size }) / vec.splat(2);
-
-                const pressed = rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT);
-
-                for (self.stats, 0..) |s, i| {
-                    if (!s.playable) continue;
-
-                    const hovered = InRect(
-                        .{
-                            .x = cursor[0],
-                            .y = cursor[1],
-                            .height = display_size,
-                            .width = display_size,
-                        },
-                        rl.GetMousePosition(),
-                    );
-
-                    const scale_up: f32 = if (hovered and !pressed)
-                        hover_scale_up
-                    else
-                        0;
-
-                    // TODO: rotate this
-                    rl.DrawTexturePro(self.sheet, s.sprite, .{
-                        .x = cursor[0] - scale_up,
-                        .y = cursor[1] - scale_up,
-                        .width = display_size + scale_up * 2,
-                        .height = display_size + scale_up * 2,
-                    }, .{}, 0, rl.WHITE);
-
-                    cursor[0] += display_size + padding;
-
-                    if (hovered and pressed) {
-                        self.send(
-                            .relyable,
-                            .{ .spawn = .{ .content_id = i } },
-                        ) catch |err| {
-                            std.log.err("server is overloaded: {}", .{err});
-                        };
-                    }
-                }
-
-                break :b;
+                self.map.draw(.{
+                    .x = tl.x,
+                    .y = tl.y,
+                    .width = size.x,
+                    .height = size.y,
+                });
             }
 
             self.input();
@@ -744,6 +908,12 @@ pub fn main() !void {
             }
 
             self.draw();
+        }
+
+        rl.EndMode2D();
+
+        if (our_ent == null) {
+            self.shipSelection();
         }
 
         self.connection_menu.render();

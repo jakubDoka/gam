@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const T = @Vector(2, f32);
 
+pub const Packed = [2]f32;
+
 pub const zero = T{ 0, 0 };
 
 pub const dirs = [_]T{ .{ 0, -1 }, .{ -1, 0 }, .{ 0, 1 }, .{ 1, 0 } };

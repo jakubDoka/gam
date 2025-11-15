@@ -141,6 +141,29 @@ pub const Ent = struct {
     next_free: ?*Ent = null,
     id: Id,
 
+    // TODO: serialize the entity list into this when sending it
+    pub const Compact = struct {
+        stats: u32,
+        reload: f32,
+        age: f32,
+        missing_health: u32,
+
+        owner: Id = .invalid,
+
+        vel: vec.Packed,
+        pos: vec.Packed,
+        rot: f32 = 0.0,
+
+        gen: u32,
+    };
+
+    comptime {
+        //@compileError(std.fmt.comptimePrint(
+        //    "{} {}",
+        //    .{ @sizeOf(Compact), @alignOf(Compact) },
+        //));
+    }
+
     pub fn isAlive(self: Ent) bool {
         return self.id.gen % 2 == 0;
     }
