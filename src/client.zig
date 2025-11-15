@@ -560,6 +560,10 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
                         }
                     }
                 }
+
+                for (self.conns.items) |*conn| {
+                    self.sim.initInput(conn.ent, conn.input);
+                }
             }
         },
         .player_input, .spawn => unreachable,

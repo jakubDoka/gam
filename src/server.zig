@@ -96,6 +96,8 @@ pub const ServerHandshake = struct {
         if (!std.mem.eql(u8, &client_hello.kw, gam.auth.ClientHello.keyword))
             return error.KeywordMismatch;
 
+        std.log.debug("recvd client hello from: {f}", .{packet.from.toStd()});
+
         self.ch = client_hello.*;
         self.sh = gam.auth.ServerHello.init(rng, self.kp.*, self.ch);
         self.interop.send(
@@ -116,6 +118,8 @@ pub const ServerHandshake = struct {
     ) xev.CallbackAction {
         const self: *ServerHandshake = @fieldParentPtr("interop", ud);
 
+        std.log.debug("sent server hello", .{});
+
         const written = r catch |err| return self.task.ret(err);
         std.debug.assert(written == @sizeOf(gam.auth.ServerHello));
 
@@ -129,6 +133,10 @@ pub const ServerHandshake = struct {
         if (packet.body.len != @sizeOf(gam.auth.Finished))
             return error.IncompleteFinished;
         var finished: *const gam.auth.Finished = @ptrCast(packet.body.ptr);
+
+        std.log.debug("recvd finished from: {f}", .{packet.from.toStd()});
+
+        errdefer |err| std.log.debug("failed to verify: {}", .{err});
 
         return try finished.verify(self.kp.*, self.ch, self.sh);
     }
@@ -254,7 +262,12 @@ pub fn sendRaw(
 
 pub fn handleTask(self: *Server) void {
     while (self.q.next()) |task| switch (task) {
-        .sh => {},
+        .sh => |sh| {
+            std.log.debug("handshake task finished", .{});
+            sh.task.res catch |err| {
+                std.log.debug("handshake task finished with error: {}", .{err});
+            };
+        },
         .one_off => |oo| {
             self.pool.allocator().free(oo.task.res[1]);
             self.free_oneoffs.push(oo);
@@ -307,7 +320,9 @@ pub fn handleConnPacket(
 
             std.log.debug("authenticated a connection", .{});
             killed = false;
-        } else |_| {}
+        } else |err| {
+            std.log.debug("failed to handshake: {}", .{err});
+        }
 
         return;
     }
@@ -359,6 +374,7 @@ pub fn handleConnPacket(
             .player_input => |inp| {
                 if (inp.seq > conn.input.seq) {
                     conn.input = inp;
+                    self.sim.initInput(conn.ent, conn.input);
                 }
             },
             .spawn => |r| b: {
@@ -428,7 +444,9 @@ pub fn handlePackets(self: *Server) void {
             slot.value_ptr.* = conn;
 
             continue;
-        } else |_| {
+        } else |err| {
+            std.log.debug("failed to handshake: {}", .{err});
+
             self.free_conns.push(conn);
             self.sendRaw(p.from.toStd(), .constant, "garbou");
         }

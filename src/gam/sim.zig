@@ -308,10 +308,13 @@ pub fn reset(self: *Sim) void {
     self.ents.slots.items.len = 1;
 }
 
+pub fn initInput(self: *Sim, ent_id: Id, input: InputState) void {
+    const ent = self.ents.get(ent_id) orelse return;
+    ent.rot = vec.ang(input.mouse_pos - ent.pos);
+}
+
 pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     const ent = self.ents.get(ent_id) orelse return;
-
-    ent.rot = vec.ang(input.mouse_pos - ent.pos);
 
     var dir = vec.zero;
     if (input.key_mask.up) dir += .{ 0, -1 };
@@ -322,7 +325,7 @@ pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
 
     ent.vel += dir * vec.splat(ent.stats.speed * ctx.delta);
 
-    const look_dir = vec.norm(input.mouse_pos - ent.pos);
+    const look_dir = vec.unit(ent.rot);
 
     ent.reload -= ctx.delta;
     if (input.key_mask.shoot) {
