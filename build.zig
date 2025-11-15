@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
     gen_sheet.root_module.addImport("resources", resources);
 
     const gen_sheet_run = b.addRunArtifact(gen_sheet);
+    gen_sheet_run.has_side_effects = false;
     gen_sheet_run.addDirectoryArg(b.path("assets/textures"));
     const sheet_png = gen_sheet_run.addOutputFileArg("sheet.png");
     const sheet_zig = gen_sheet_run.addOutputFileArg("sheet.zig");

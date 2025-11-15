@@ -11,29 +11,62 @@ pub const max_ents = 256;
 pub const no_coll_id = std.math.maxInt(u32);
 
 ents: SlotMap,
-stats: []const Stats = &.{ .{
-    .friction = 1,
-    .radius = 32,
-    .max_health = 100,
-    .reload_period = 0.1,
-    .cbs = .init(opaque {
-        pub const bullet_speed = 1000;
-
-        pub fn shoot(self: *Sim, ent: Ent, dir: vec.T) void {
-            const slot = self.ents.add() catch return;
-
-            slot.pos = ent.pos;
-            slot.vel = dir * vec.splat(bullet_speed);
-            slot.owner = ent.id;
-            slot.stats = &self.stats[1];
-        }
-    }),
-}, .{
-    .lifetime = 0.5,
-    .radius = 15,
-    .damage = 25,
-    .cbs = .init(opaque {}),
-} },
+rng: std.Random.DefaultPrng = .init(0),
+stats: []const Stats = &.{
+    .{
+        .friction = 1,
+        .radius = 32,
+        .max_health = 100,
+        .reload_period = 0.4,
+        .speed = 500,
+        .cbs = .init(opaque {
+            pub const bullet_speed = 1000;
+            pub fn shoot(self: *Sim, ent: *Ent, dir: vec.T) void {
+                const slot = self.ents.add() catch return;
+                slot.pos = ent.pos;
+                slot.vel = dir * vec.splat(self.stats[1].speed);
+                slot.owner = ent.id;
+                slot.stats = &self.stats[1];
+            }
+        }),
+    },
+    .{
+        .lifetime = 0.5,
+        .radius = 15,
+        .damage = 20,
+        .speed = 1000,
+        .cbs = .init(opaque {}),
+    },
+    .{
+        .friction = 1,
+        .radius = 32,
+        .max_health = 150,
+        .reload_period = 0.8,
+        .speed = 600,
+        .cbs = .init(opaque {
+            pub fn shoot(self: *Sim, ent: *Ent, dir: vec.T) void {
+                const rng = self.rng.random();
+                for (0..10) |_| {
+                    const slot = self.ents.add() catch return;
+                    slot.pos = ent.pos + vec.unit(rng.float(f32) * std.math.tau) *
+                        vec.splat(10);
+                    slot.vel = vec.unit(vec.ang(dir) + rng.float(f32) * 0.1 - 0.05) *
+                        vec.splat(self.stats[3].speed);
+                    slot.owner = ent.id;
+                    slot.stats = &self.stats[3];
+                }
+                ent.vel -= dir * vec.splat(350);
+            }
+        }),
+    },
+    .{
+        .lifetime = 0.25,
+        .radius = 8,
+        .damage = 15,
+        .speed = 1000,
+        .cbs = .init(opaque {}),
+    },
+},
 
 pub const SlotMap = struct {
     slots: std.ArrayList(Ent),
@@ -41,9 +74,13 @@ pub const SlotMap = struct {
     dont_modify: bool = false,
 
     pub fn init(scratch: *utils.Arena, cap: usize) !SlotMap {
-        return .{
+        var self = SlotMap{
             .slots = try .initCapacity(scratch.allocator(), cap),
         };
+
+        _ = self.remove((self.add() catch unreachable).id);
+
+        return self;
     }
 
     pub fn add(self: *SlotMap) !*Ent {
@@ -125,14 +162,15 @@ pub const Stats = struct {
     max_health: u32 = 0,
     lifetime: f32 = 0.0,
     reload_period: f32 = 0.0,
+    speed: f32 = 0.0,
 
     cbs: Callbacks = .{},
 
     pub const Callbacks = struct {
-        shoot: *const fn (self: *Sim, ent: Ent, dir: vec.T) void = default.shoot,
+        shoot: *const fn (self: *Sim, ent: *Ent, dir: vec.T) void = default.shoot,
 
         const default = opaque {
-            pub fn shoot(self: *Sim, ent: Ent, dir: vec.T) void {
+            pub fn shoot(self: *Sim, ent: *Ent, dir: vec.T) void {
                 _ = self;
                 _ = ent;
                 _ = dir;
@@ -168,12 +206,6 @@ pub const Ctx = struct {
     delta: f32,
 };
 
-pub fn init(scratch: *utils.Arena, ent_cap: usize) !Sim {
-    return .{
-        .ents = try .init(scratch, ent_cap),
-    };
-}
-
 pub const InputState = extern struct {
     seq: u32 = 0,
     key_mask: packed struct(u8) {
@@ -187,6 +219,17 @@ pub const InputState = extern struct {
     mouse_pos: vec.T = vec.zero,
 };
 
+pub fn init(scratch: *utils.Arena, ent_cap: usize) !Sim {
+    return .{
+        .ents = try .init(scratch, ent_cap),
+    };
+}
+
+// TODO: move to SlotMap
+pub fn reset(self: *Sim) void {
+    self.ents.slots.items.len = 1;
+}
+
 pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     const ent = self.ents.get(ent_id) orelse return;
 
@@ -199,9 +242,7 @@ pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     if (input.key_mask.right) dir += .{ 1, 0 };
     dir = vec.norm(dir);
 
-    const player_acc = 500;
-
-    ent.vel += dir * vec.splat(player_acc * ctx.delta);
+    ent.vel += dir * vec.splat(ent.stats.speed * ctx.delta);
 
     const look_dir = vec.norm(input.mouse_pos - ent.pos);
 
@@ -209,7 +250,7 @@ pub fn handleInput(self: *Sim, ctx: Ctx, ent_id: Id, input: InputState) void {
     if (input.key_mask.shoot) {
         if (ent.reload <= 0) {
             ent.reload = ent.stats.reload_period;
-            ent.stats.cbs.shoot(self, ent.*, look_dir);
+            ent.stats.cbs.shoot(self, ent, look_dir);
         }
     }
 }

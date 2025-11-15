@@ -58,7 +58,7 @@ pub const Connection = struct {
     negotiated: bool = false,
 
     input: Sim.InputState,
-    ent: Id,
+    ent: Id = .invalid,
 };
 
 pub const AddrCtx = struct {
@@ -361,7 +361,19 @@ pub fn handleConnPacket(
                     conn.input = inp;
                 }
             },
+            .spawn => |r| b: {
+                if (self.sim.ents.get(conn.ent) != null) break :b;
 
+                const ent = self.sim.ents.add() catch {
+                    self.sendRaw(p.from.toStd(), .constant, gam.auth.max_conns_reached);
+                    continue;
+                };
+
+                ent.stats = &self.sim.stats[r.content_id];
+                ent.pos = .{ 100, 100 };
+
+                conn.ent = ent.id;
+            },
             .state => {
                 std.log.warn("server only packet {}", .{packet});
                 return;
@@ -399,20 +411,11 @@ pub fn handlePackets(self: *Server) void {
             break :b slot;
         };
 
-        const ent = self.sim.ents.add() catch {
-            self.sendRaw(p.from.toStd(), .constant, gam.auth.max_conns_reached);
-            continue;
-        };
-
-        ent.stats = &self.sim.stats[0];
-        ent.pos = .{ 100, 100 };
-
         conn.* = .{
             .handshake = ServerHandshake{ .kp = &self.kp },
             .last_packet = get_now(),
             .stream = conn.stream,
             .input = .{},
-            .ent = ent.id,
         };
 
         if (conn.handshake.init(&self.loop, self.sock, self.rng, p)) |_| {

@@ -94,21 +94,9 @@ sheet: rl.Texture2D = undefined,
 
 stats: []const Stats = &.{ .{
     .sprite = sheet_rects.player,
-    .rotation_derived_from = .rot,
+    .playable = true,
     .cbs = .init(opaque {
-        pub fn explode(self: *Client, a: Sim.Ent) void {
-            for (0..30) |_| {
-                const rng = self.prng.random();
-                self.particles.appendBounded(.{
-                    .pos = a.pos,
-                    .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
-                        vec.splat(rng.float(f32) * 200 + 30),
-                    .lifetime = 0.3 + rng.float(f32) * 0.2,
-                    .radius = 20 + rng.float(f32) * 10,
-                    .color = rl.SKYBLUE,
-                }) catch {};
-            }
-        }
+        pub const explode = common.explodeShip;
     }),
 }, .{
     .sprite = sheet_rects.bullet,
@@ -136,7 +124,55 @@ stats: []const Stats = &.{ .{
             }) catch {};
         }
     }),
+}, .{
+    .sprite = sheet_rects.player2,
+    .playable = true,
+    .cbs = .init(opaque {
+        pub const explode = common.explodeShip;
+    }),
+}, .{
+    .sprite = sheet_rects.bullet,
+    .cbs = .init(opaque {
+        pub fn explode(self: *Client, a: Sim.Ent) void {
+            for (0..10) |_| {
+                const rng = self.prng.random();
+                self.particles.appendBounded(.{
+                    .pos = a.pos,
+                    .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                        vec.splat(rng.float(f32) * 50 + 10),
+                    .lifetime = 0.2 + rng.float(f32) * 0.1,
+                    .radius = 5 + rng.float(f32) * 5,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            }
+        }
+        pub fn trail(self: *Client, ent: Sim.Ent) void {
+            self.particles.appendBounded(.{
+                .pos = ent.pos,
+                .vel = vec.zero,
+                .radius = 8,
+                .lifetime = 0.5,
+                .color = rl.SKYBLUE,
+            }) catch {};
+        }
+    }),
 } },
+
+pub const common = opaque {
+    pub fn explodeShip(self: *Client, a: Sim.Ent) void {
+        for (0..30) |_| {
+            const rng = self.prng.random();
+            self.particles.appendBounded(.{
+                .pos = a.pos,
+                .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                    vec.splat(rng.float(f32) * 200 + 30),
+                .lifetime = 0.3 + rng.float(f32) * 0.2,
+                .radius = 20 + rng.float(f32) * 10,
+                .color = rl.SKYBLUE,
+            }) catch {};
+        }
+    }
+};
 
 pub const Particle = struct {
     pos: vec.T,
@@ -148,9 +184,9 @@ pub const Particle = struct {
 };
 
 pub const Stats = struct {
-    rotation_derived_from: enum { rot, vel } = .vel,
+    playable: bool = false,
     sprite: rl.Rectangle,
-    cbs: Callbacks,
+    cbs: Callbacks = .{},
 };
 
 pub const Callbacks = struct {
@@ -200,14 +236,15 @@ pub fn startHandshake(self: *Client, ip: std.net.Address) !void {
         return error.@"cant bind the socket";
     };
 
-    self.stream.sock = sock; // HACK: we read this from ther on retry
+    self.stream.sock = sock; // HACK: we read this from there on retry
 
     try self.handshake.schedule(&self.loop, sock);
     self.q.queue(.{ .ch = &self.handshake });
 
     self.chat.messages.items.len = 0;
     self.chat.message_timeouts = @splat(0);
-    self.sim.ents.slots.items.len = 0;
+    self.sim.reset();
+    self.conns.items.len = 0;
 }
 
 pub fn disconnect(self: *Client) void {
@@ -343,7 +380,7 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
                 }
             }
         },
-        .player_input => unreachable,
+        .player_input, .spawn => unreachable,
     }
 }
 
@@ -509,9 +546,9 @@ pub fn draw(self: *Client) void {
 
         const stats = &self.stats[ent.stats.id(&self.sim)];
 
-        const rot = switch (stats.rotation_derived_from) {
-            .vel => vec.ang(ent.vel),
-            .rot => ent.rot,
+        const rot = switch (stats.playable) {
+            false => vec.ang(ent.vel),
+            true => ent.rot,
         };
 
         rl.DrawTexturePro(
@@ -592,6 +629,8 @@ pub fn init() !Client {
         gam.proto.max_conns,
     );
 
+    std.debug.assert(self.sim.stats.len == self.stats.len);
+
     return self;
 }
 
@@ -616,10 +655,79 @@ pub fn main() !void {
 
         const now = try std.time.Instant.now();
 
-        if (self.connection_state == .connected) {
+        if (self.connection_state == .connected) b: {
             if (now.since(self.last_server_ping) > stale_connection_period) {
                 self.connection_menu.ip_error = error.@"server is unresponsive";
                 self.disconnect();
+            }
+
+            for (self.conns.items) |conn| {
+                if (std.mem.eql(u8, &conn.id.bytes, &self.kp.public_key.bytes) and
+                    self.sim.ents.get(conn.ent) != null)
+                {
+                    break;
+                }
+            } else {
+                const display_size = 100.0;
+                const padding = 10.0;
+                const hover_scale_up = padding / 2;
+
+                var count: usize = 0;
+                for (self.stats) |s| {
+                    count += @intFromBool(s.playable);
+                }
+
+                const choice_count: f32 = @floatFromInt(count);
+                const width = display_size * choice_count + (padding * (choice_count - 1));
+
+                const size = vec.T{
+                    @floatFromInt(rl.GetScreenWidth()),
+                    @floatFromInt(rl.GetScreenHeight()),
+                };
+
+                var cursor = (size - vec.T{ width, display_size }) / vec.splat(2);
+
+                const pressed = rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT);
+
+                for (self.stats, 0..) |s, i| {
+                    if (!s.playable) continue;
+
+                    const hovered = InRect(
+                        .{
+                            .x = cursor[0],
+                            .y = cursor[1],
+                            .height = display_size,
+                            .width = display_size,
+                        },
+                        rl.GetMousePosition(),
+                    );
+
+                    const scale_up: f32 = if (hovered and !pressed)
+                        hover_scale_up
+                    else
+                        0;
+
+                    // TODO: rotate this
+                    rl.DrawTexturePro(self.sheet, s.sprite, .{
+                        .x = cursor[0] - scale_up,
+                        .y = cursor[1] - scale_up,
+                        .width = display_size + scale_up * 2,
+                        .height = display_size + scale_up * 2,
+                    }, .{}, 0, rl.WHITE);
+
+                    cursor[0] += display_size + padding;
+
+                    if (hovered and pressed) {
+                        self.send(
+                            .relyable,
+                            .{ .spawn = .{ .content_id = i } },
+                        ) catch |err| {
+                            std.log.err("server is overloaded: {}", .{err});
+                        };
+                    }
+                }
+
+                break :b;
             }
 
             self.input();

@@ -60,6 +60,9 @@ pub const Packet = union(enum) {
         ents: []align(1) sim.Ent,
     },
     player_input: sim.InputState,
+    spawn: extern struct {
+        content_id: usize,
+    },
 
     pub const ConnSync = struct {
         id: gam.auth.Identity,
@@ -85,7 +88,11 @@ pub const Packet = union(enum) {
     pub fn encode(self: Packet, writer: *std.Io.Writer) !void {
         try writer.writeByte(@intFromEnum(self));
         switch (self) {
-            inline .ping, .pong, .player_input => |p| try writer.writeStruct(p, .little),
+            inline .ping,
+            .pong,
+            .player_input,
+            .spawn,
+            => |p| try writer.writeStruct(p, .little),
             .chat_message => |c| {
                 try writer.writeAll(std.mem.asBytes(&c.id));
                 try writer.writeAll(c.content);
@@ -102,7 +109,11 @@ pub const Packet = union(enum) {
     pub fn decode(reader: *std.Io.Reader) !Packet {
         const tag: u8 = try reader.takeByte();
         switch (try std.meta.intToEnum(std.meta.Tag(Packet), tag)) {
-            inline .ping, .pong, .player_input => |t| return @unionInit(
+            inline .ping,
+            .pong,
+            .player_input,
+            .spawn,
+            => |t| return @unionInit(
                 Packet,
                 @tagName(t),
                 try reader.takeStruct(std.meta.TagPayload(Packet, t), .little),
@@ -325,10 +336,15 @@ pub const Stream = struct {
     pub fn cancelDriver(
         ud: *gam.Timeout,
         _: *xev.Loop,
-        _: xev.Timer.CancelError!void,
+        wut: xev.Timer.CancelError!void,
     ) xev.CallbackAction {
+        wut catch {
+            if (ud.comp.state() == .active) return .disarm;
+        };
+
         const self: *Stream = @fieldParentPtr("ping_timeout", ud);
         self.schedule_lock.unlock();
+
         return .disarm;
     }
 
