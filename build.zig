@@ -90,8 +90,8 @@ pub fn build(b: *std.Build) void {
     const raylib_build = @import("raylib");
 
     const lib = raylib.artifact("raylib");
-    lib.addIncludePath(b.path("assets/include/"));
-    lib.addLibraryPath(b.path("assets/lib/"));
+    //lib.addIncludePath(b.path("assets/include/"));
+    //lib.addLibraryPath(b.path("assets/lib/"));
 
     raylib_build.addRaygui(b, lib, raygui, .{});
 
@@ -108,8 +108,8 @@ pub fn build(b: *std.Build) void {
     client.root_module.addImport("xev", xev.module("xev"));
     client.root_module.addImport("utils", utils.module("utils"));
     client.linkLibrary(lib);
-    client.root_module.addIncludePath(b.path("assets/include/"));
-    client.root_module.addLibraryPath(b.path("assets/lib/"));
+    //client.root_module.addIncludePath(b.path("assets/include/"));
+    //client.root_module.addLibraryPath(b.path("assets/lib/"));
     client.root_module.addAnonymousImport("sheet_png", .{
         .root_source_file = sheet_png,
     });
