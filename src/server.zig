@@ -344,8 +344,8 @@ pub fn handleConnPacket(
         };
 
         const packet = gam.proto.unbufferPacket(packet_data) catch |err| {
-            std.log.debug("failed to decode packet: {}", .{err});
-            return;
+            std.log.debug("failed to decode packet: {} {x}", .{ err, packet_data });
+            unreachable;
         };
 
         switch (packet) {
@@ -490,20 +490,26 @@ pub fn sync(self: *Server) void {
         slot.* = .{ .id = conn.id, .ent = conn.ent, .input = conn.input };
     }
 
-    for (self.sim.ents.slots.items) |*ent| {
-        if (ent.isAlive()) ent.localize(&self.sim);
+    var set = try std.DynamicBitSetUnmanaged.initEmpty(
+        tmp.arena.allocator(),
+        self.sim.ents.slots.items.len,
+    );
+    var ents = tmp.arena.makeArrayList(Sim.Ent.Compact, self.sim.ents.slots.items.len);
+
+    for (self.sim.ents.slots.items, 0..) |*ent, i| {
+        if (ent.isAlive()) {
+            ents.appendAssumeCapacity(ent.compact(&self.sim));
+            set.set(i);
+        }
     }
 
     self.broadcast(.unrelyable, .{ .state = .{
         .seq = self.state_seq,
         .conns = conns,
-        .ents = self.sim.ents.slots.items,
+        .present = set.masks[0 .. std.mem.alignForward(usize, set.bit_length, 64) / 64],
+        .ents = ents.items,
     } });
     self.state_seq += 1;
-
-    for (self.sim.ents.slots.items) |*ent| {
-        if (ent.isAlive()) ent.globalize(&self.sim);
-    }
 }
 
 pub fn handleInput(self: *Server) void {

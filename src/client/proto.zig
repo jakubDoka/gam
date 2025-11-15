@@ -25,6 +25,8 @@ pub const ClientHandshake = struct {
     ) !void {
         self.ch = gam.auth.ClientHello.init(self.rng, self.kp.public_key);
 
+        std.log.debug("scheduling handshake", .{});
+
         self.interop.send(
             loop,
             sock,
@@ -42,7 +44,12 @@ pub const ClientHandshake = struct {
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const self: *ClientHandshake = @fieldParentPtr("interop", ud);
-        const written = r catch |err| return self.task.ret(err);
+        const written = r catch |err| {
+            std.log.debug("error: {}", .{err});
+            return self.task.ret(err);
+        };
+
+        std.log.debug("sent hello", .{});
 
         std.debug.assert(written == @sizeOf(gam.auth.ClientHello));
         self.interop.recv(loop, sock, std.mem.asBytes(&self.sh), recvdHello);
@@ -58,6 +65,7 @@ pub const ClientHandshake = struct {
     ) xev.CallbackAction {
         _ = r catch {};
         const self: *ClientHandshake = @fieldParentPtr("hello_timeout", ud);
+        std.log.debug("timed out", .{});
         return self.task.ret(error.Timeout);
     }
 
@@ -69,6 +77,8 @@ pub const ClientHandshake = struct {
         r: xev.ReadError!usize,
     ) xev.CallbackAction {
         const self: *ClientHandshake = @fieldParentPtr("interop", ud);
+
+        std.log.debug("recvd hello", .{});
 
         const read = r catch |err| switch (err) {
             error.Canceled => return self.task.end(),
@@ -127,6 +137,8 @@ pub const ClientHandshake = struct {
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const self: *ClientHandshake = @fieldParentPtr("interop", ud);
+
+        std.log.debug("finalized", .{});
 
         const written = r catch |err| return self.task.ret(err);
         std.debug.assert(written == @sizeOf(gam.auth.Finished));

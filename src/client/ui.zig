@@ -68,6 +68,8 @@ pub const ConnectionMenu = struct {
 
                 self.ip_error = null;
 
+                std.log.debug("starting handshake", .{});
+
                 client.startHandshake(server_ip) catch |err| {
                     self.ip_error = err;
                 };

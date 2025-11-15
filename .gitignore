@@ -2,3 +2,4 @@
 **/zig-out
 **/core.*
 !**/core.png
+/wine-test

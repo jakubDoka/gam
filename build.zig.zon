@@ -4,8 +4,10 @@
     .fingerprint = 0xfd3c43b48af9806f,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        .utils = .{ .path = "../utils" },
-        .libxev = .{ .path = "../libxev/" },
+        .utils = .{
+            .path = "git+https://github.com/jakubDoka/utils.git#a1498c4295130797ecaf16de7f219362cfc2e5fa",
+        },
+        .libxev = .{ .path = "git+https://github.com/jakubDoka/libxev.git#a86bdc692b384f692a99047466ec89c3705d861c", },
         .raylib = .{
             .url = "git+https://github.com/raysan5/raylib.git#12ce106661bc9c8f74ea3f3069291e5fc4e7d50a",
             .hash = "raylib-5.6.0-dev-whq8uECwAAUfjtGTyP_uENUua4I_wf8r_-k3p0Wq3Bah",

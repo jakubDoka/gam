@@ -17,7 +17,7 @@ stats: []const Stats = &.{
         .friction = 1,
         .radius = 32,
         .max_health = 100,
-        .reload_period = 0.4,
+        .reload_period = 0.6,
         .speed = 500,
         .cbs = .init(opaque {
             pub const bullet_speed = 1000;
@@ -27,6 +27,7 @@ stats: []const Stats = &.{
                 slot.vel = dir * vec.splat(self.stats[1].speed);
                 slot.owner = ent.id;
                 slot.stats = &self.stats[1];
+                ent.vel += dir * vec.splat(100);
             }
         }),
     },
@@ -41,7 +42,8 @@ stats: []const Stats = &.{
         .friction = 1,
         .radius = 32,
         .max_health = 150,
-        .reload_period = 0.8,
+        .reload_period = 0.6,
+        .mass_mult = 2,
         .speed = 600,
         .cbs = .init(opaque {
             pub fn shoot(self: *Sim, ent: *Ent, dir: vec.T) void {
@@ -64,6 +66,40 @@ stats: []const Stats = &.{
         .radius = 8,
         .damage = 15,
         .speed = 1000,
+        .cbs = .init(opaque {}),
+    },
+    .{
+        .friction = 1,
+        .radius = 32,
+        .max_health = 80,
+        .reload_period = 0.8,
+        .speed = 550,
+        .cbs = .init(opaque {
+            pub fn shoot(self: *Sim, ent: *Ent, dir: vec.T) void {
+                if (ent.counter != 0) {
+                    ent.reload = 0.1;
+                    ent.counter -= 1;
+                } else {
+                    ent.counter = 5;
+                }
+                const rng = self.rng.random();
+                const slot = self.ents.add() catch return;
+                slot.pos = ent.pos + vec.unit(rng.float(f32) * std.math.tau) *
+                    vec.splat(5);
+                slot.vel = vec.unit(vec.ang(dir) + rng.float(f32) * 0.02 - 0.01) *
+                    vec.splat(self.stats[5].speed);
+                slot.owner = ent.id;
+                slot.stats = &self.stats[5];
+                ent.vel += dir * vec.splat(50);
+            }
+        }),
+    },
+    .{
+        .lifetime = 0.5,
+        .radius = 8,
+        .damage = 15,
+        .mass_mult = 0.1,
+        .speed = 1200,
         .cbs = .init(opaque {}),
     },
 },
@@ -128,6 +164,7 @@ pub const Ent = struct {
     reload: f32 = 0.0,
     age: f32 = 0.0,
     missing_health: u32 = 0,
+    counter: u32 = 0,
 
     owner: Id = .invalid,
 
@@ -144,6 +181,8 @@ pub const Ent = struct {
     // TODO: serialize the entity list into this when sending it
     pub const Compact = struct {
         stats: u32,
+        gen: u32,
+
         reload: f32,
         age: f32,
         missing_health: u32,
@@ -154,8 +193,19 @@ pub const Ent = struct {
         pos: vec.Packed,
         rot: f32 = 0.0,
 
-        gen: u32,
+        pub fn expand(self: Compact, sim: *const Sim, idx: usize) Ent {
+            var e: Ent = .{ .id = .{ .index = @intCast(idx), .gen = self.gen } };
+            e.stats = &sim.stats[@intCast(self.stats)];
+
+            inline for (std.meta.fields(Compact)[custom_init_count..]) |f| {
+                @field(e, f.name) = @field(self, f.name);
+            }
+
+            return e;
+        }
     };
+
+    const custom_init_count = 2;
 
     comptime {
         //@compileError(std.fmt.comptimePrint(
@@ -164,16 +214,20 @@ pub const Ent = struct {
         //));
     }
 
+    pub fn compact(self: Ent, sim: *const Sim) Compact {
+        var c: Compact = undefined;
+        inline for (std.meta.fields(Compact)[custom_init_count..]) |f| {
+            @field(c, f.name) = @field(self, f.name);
+        }
+
+        c.stats = self.stats.id(sim);
+        c.gen = self.id.gen;
+
+        return c;
+    }
+
     pub fn isAlive(self: Ent) bool {
         return self.id.gen % 2 == 0;
-    }
-
-    pub fn localize(self: *Ent, sim: *const Sim) void {
-        self.stats = @ptrFromInt((self.stats.id(sim) + 1) * @alignOf(Stats));
-    }
-
-    pub fn globalize(self: *Ent, sim: *const Sim) void {
-        self.stats = &sim.stats[@intFromPtr(self.stats) / @alignOf(Stats) - 1];
     }
 };
 
@@ -213,8 +267,9 @@ pub const Stats = struct {
 
     pub const Id = enum(u16) { _ };
 
-    pub fn id(self: *const Stats, sim: *const Sim) usize {
-        return (@intFromPtr(self) - @intFromPtr(sim.stats.ptr)) / @sizeOf(Stats);
+    pub fn id(self: *const Stats, sim: *const Sim) u32 {
+        return @intCast((@intFromPtr(self) - @intFromPtr(sim.stats.ptr)) /
+            @sizeOf(Stats));
     }
 };
 
@@ -239,7 +294,7 @@ pub const InputState = extern struct {
         shoot: bool = false,
         _padd: u3 = 0,
     } = .{},
-    mouse_pos: vec.T = vec.zero,
+    mouse_pos: vec.Packed = @splat(0),
 };
 
 pub fn init(scratch: *utils.Arena, ent_cap: usize) !Sim {

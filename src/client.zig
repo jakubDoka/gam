@@ -17,6 +17,10 @@ pub const rl = @cImport({
     @cInclude("raygui.h");
 });
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+};
+
 const sheet_rects = @import("sheet_zig");
 
 const ping_interval = 300;
@@ -46,6 +50,7 @@ q: gam.Queue(union(enum) {
     retry_handshake: *gam.Sleep,
     ping_interval: *gam.Sleep,
     close: *gam.proto.Stream.Closer,
+    some_sleep: *gam.Sleep,
 }) = .{},
 
 kp: gam.auth.KeyPair,
@@ -129,6 +134,38 @@ stats: []const Stats = &.{ .{
     }),
 }, .{
     .sprite = sheet_rects.player2,
+    .playable = true,
+    .cbs = .init(opaque {
+        pub const explode = common.explodeShip;
+    }),
+}, .{
+    .sprite = sheet_rects.bullet,
+    .cbs = .init(opaque {
+        pub fn explode(self: *Client, a: Sim.Ent) void {
+            for (0..10) |_| {
+                const rng = self.prng.random();
+                self.particles.appendBounded(.{
+                    .pos = a.pos,
+                    .vel = vec.unit(rng.float(f32) * 2 * rl.PI) *
+                        vec.splat(rng.float(f32) * 50 + 10),
+                    .lifetime = 0.2 + rng.float(f32) * 0.1,
+                    .radius = 5 + rng.float(f32) * 5,
+                    .color = rl.SKYBLUE,
+                }) catch {};
+            }
+        }
+        pub fn trail(self: *Client, ent: Sim.Ent) void {
+            self.particles.appendBounded(.{
+                .pos = ent.pos,
+                .vel = vec.zero,
+                .radius = 8,
+                .lifetime = 0.5,
+                .color = rl.SKYBLUE,
+            }) catch {};
+        }
+    }),
+}, .{
+    .sprite = sheet_rects.player3,
     .playable = true,
     .cbs = .init(opaque {
         pub const explode = common.explodeShip;
@@ -484,24 +521,44 @@ pub fn handlePacket(self: *Client, packet: gam.proto.Packet) !void {
             if (s.seq > self.state_seq) {
                 self.state_seq = s.seq;
 
-                const ents = self.sim.ents.slots.items;
-
-                for (ents, s.ents[0..ents.len]) |a, b| {
-                    if (a.id != b.id) {
-                        if (a.isAlive()) {
-                            self.stats[a.stats.id(&self.sim)].cbs.explode(self, a);
-                        }
-                    }
-                }
-
                 self.conns.items.len = s.conns.len;
                 @memcpy(self.conns.items, s.conns);
 
-                self.sim.ents.slots.items.len = s.ents.len;
-                @memcpy(self.sim.ents.slots.items, s.ents);
+                var tmp = utils.Arena.scrath(null);
+                defer tmp.deinit();
 
-                for (self.sim.ents.slots.items) |*ent| {
-                    if (ent.isAlive()) ent.globalize(&self.sim);
+                const dupe_present = tmp.arena.alloc(u64, s.present.len);
+                @memcpy(dupe_present, s.present);
+
+                var present = std.DynamicBitSetUnmanaged{
+                    .bit_length = s.present.len * 64,
+                    .masks = dupe_present.ptr,
+                };
+
+                const prev_len = self.sim.ents.slots.items.len;
+                self.sim.ents.slots.items.len = present.bit_length;
+
+                for (self.sim.ents.slots.items[prev_len..], prev_len..) |*ent, i| {
+                    ent.* = .{ .id = .{ .index = @intCast(i), .gen = 1 } };
+                }
+
+                var cursor: usize = 0;
+                for (self.sim.ents.slots.items, 0..) |*ent, i| {
+                    const prev_id = ent.id;
+                    const prev_alive = ent.isAlive();
+                    if (present.isSet(i)) {
+                        ent.* = s.ents[cursor].expand(&self.sim, i);
+                        cursor += 1;
+                    } else {
+                        ent.id = .{ .index = @intCast(i), .gen = 1 };
+                    }
+
+                    if (prev_alive) {
+                        if (ent.id != prev_id) {
+                            self.stats[ent.stats.id(&self.sim)]
+                                .cbs.explode(self, ent.*);
+                        }
+                    }
                 }
             }
         },
@@ -578,6 +635,9 @@ pub fn handleTasks(self: *Client) !void {
         },
         .close => {
             self.connection_state = .disconnected;
+        },
+        .some_sleep => {
+            std.debug.print("some sleep\n", .{});
         },
     };
 }
@@ -845,6 +905,11 @@ pub fn main() !void {
 
     const sheet = @embedFile("sheet_png");
     self.sheet = rl.LoadTextureFromImage(rl.LoadImageFromMemory(".png", sheet.ptr, sheet.len));
+
+    var some_sleep = gam.Sleep{};
+
+    some_sleep.schedule(&self.loop, 100);
+    self.q.queue(.{ .some_sleep = &some_sleep });
 
     while (!rl.WindowShouldClose()) {
         rl.BeginDrawing();

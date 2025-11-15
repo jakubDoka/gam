@@ -12,6 +12,9 @@ pub fn build(b: *std.Build) !void {
         b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows }),
     }, .{
         "x86_64-linux",
+        b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .glibc_version = .{ .major = 2, .minor = 35, .patch = 0 } }),
+    }, .{
+        "x86_64-linux-popos",
         b.graph.host,
     } };
 

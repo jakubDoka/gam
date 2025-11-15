@@ -57,7 +57,8 @@ pub const Packet = union(enum) {
     state: struct {
         seq: u32,
         conns: []align(1) ConnSync,
-        ents: []align(1) sim.Ent,
+        present: []align(1) std.DynamicBitSetUnmanaged.MaskInt,
+        ents: []align(1) sim.Ent.Compact,
     },
     player_input: sim.InputState,
     spawn: extern struct {
@@ -101,6 +102,8 @@ pub const Packet = union(enum) {
                 try writer.writeInt(u32, ps.seq, .little);
                 try writer.writeInt(u16, @intCast(ps.conns.len), .little);
                 try writer.writeAll(@ptrCast(ps.conns));
+                try writer.writeInt(u16, @intCast(ps.present.len), .little);
+                try writer.writeAll(@ptrCast(ps.present));
                 try writer.writeAll(@ptrCast(ps.ents));
             },
         }
@@ -113,11 +116,14 @@ pub const Packet = union(enum) {
             .pong,
             .player_input,
             .spawn,
-            => |t| return @unionInit(
-                Packet,
-                @tagName(t),
-                try reader.takeStruct(std.meta.TagPayload(Packet, t), .little),
-            ),
+            => |t| {
+                std.debug.print("{}\n", .{t});
+                return @unionInit(
+                    Packet,
+                    @tagName(t),
+                    try reader.takeStruct(std.meta.TagPayload(Packet, t), .little),
+                );
+            },
             .chat_message => return .{ .chat_message = .{
                 .id = .{
                     .bytes = (try reader.takeArray(@sizeOf(gam.auth.Identity))).*,
@@ -136,8 +142,18 @@ pub const Packet = union(enum) {
                     defer reader.seek += len;
                     break :b @ptrCast(reader.buffered()[0..len]);
                 },
+                .present = b: {
+                    const len = try reader.takeInt(u16, .little) *
+                        @sizeOf(std.DynamicBitSetUnmanaged.MaskInt);
+                    if (reader.buffered().len < len) {
+                        return error.ReadFailed;
+                    }
+
+                    defer reader.seek += len;
+                    break :b @ptrCast(reader.buffered()[0..len]);
+                },
                 .ents = b: {
-                    if (reader.buffered().len % @sizeOf(sim.Ent) != 0) {
+                    if (reader.buffered().len % @sizeOf(sim.Ent.Compact) != 0) {
                         return error.ReadFailed;
                     }
 
