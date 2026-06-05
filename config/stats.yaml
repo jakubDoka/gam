@@ -1,0 +1,86 @@
+core:
+  can_spawn_player: true
+  physics:
+    radius: 64
+    sprite: core
+  health:
+    energy: 100
+    energy_drain: -3
+    recharge_speed: 2
+    bind_range: 500
+snipa:
+  playable: true
+  kind: Unit
+  physics:
+    speed: 1000
+    friction: 2
+    radius: 32
+    sprite_factor_minus_one: 0.2
+    sprite: blah
+  attack:
+    bullet: snip-shot
+  turret:
+    aim_speed: 8.2799997
+    reload: 0.3
+  health:
+    energy: 30
+    energy_drain: 1
+    recharge_speed: 3
+snip-shot:
+  kind: Bullet
+  physics:
+    speed: 1000
+    lifetime: 1
+    radius: 8
+    sprite_factor_minus_one: 0.3
+    body_damage: 1
+    lifetime_multiplier: 1
+  trail:
+    quantity_per_tick: 1
+    particle:
+      lifetime: 0.3
+node:
+  placable: true
+  physics:
+    radius: 32
+    sprite: node
+  health:
+    energy: 15
+    recharge_speed: 1
+    bind_range: 400
+turret:
+  placable: true
+  physics:
+    radius: 64
+    sprite: turret
+  attack:
+    innaccuracy: 0.2
+    bullet: snip-shot
+  turret:
+    cannon: turrnat
+    aim_speed: 6.28
+    range: 500
+    reload: 0.4
+  health:
+    energy: 30
+    energy_drain: 1
+    recharge_speed: 2
+drill:
+  placable: true
+  physics:
+    radius: 32
+    sprite: drill
+    spin: 3.14
+  health:
+    energy: 30
+    energy_drain: -2
+spawner:
+  placable: true
+  spawn_unit: snipa
+  physics:
+    radius: 32
+    sprite: spawner
+    spin: 1.65999997
+  health:
+    energy: 11
+    recharge_speed: 2

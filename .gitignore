@@ -1,0 +1,6 @@
+*.bin
+*.ll
+*.db*
+#/config
+/tmp
+profile.json.gz

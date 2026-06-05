@@ -1,0 +1,274 @@
+package arna
+
+import "base:runtime"
+import "core:math"
+import "core:mem"
+import "core:mem/virtual"
+import "core:testing"
+
+@(thread_local)
+scratch: [2]Allocator
+
+Allocator :: struct {
+	ptr:      [^]u8,
+	pos:      uint,
+	commited: uint,
+	reserved: uint,
+}
+
+init :: proc "contextless" (
+	slot: ^Allocator,
+	size: int,
+) -> runtime.Allocator_Error {
+	mem := virtual.reserve(uint(size)) or_return
+	slot^ = {raw_data(mem), 0, 0, uint(size)}
+	return .None
+}
+
+init_from_buffer :: proc(buf: []u8) -> Allocator {
+	return {
+		ptr = raw_data(buf),
+		pos = 0,
+		commited = len(buf) + 1,
+		reserved = len(buf),
+	}
+}
+
+destroy :: proc(slot: ^Allocator) {
+	if slot.commited > slot.reserved {
+		delete(slot.ptr[:slot.reserved])
+	} else {
+		virtual.release(slot.ptr, slot.reserved)
+	}
+}
+
+reset :: proc(arena: ^Allocator, decommit: bool = true) {
+	if arena.commited <= arena.reserved && decommit {
+		virtual.decommit(arena.ptr, arena.commited)
+		arena.commited = 0
+	}
+	arena.pos = 0
+}
+
+init_scratch :: proc(size: int) {
+	init(&scratch[0], size)
+	init(&scratch[1], size)
+}
+
+deinit_scratch :: proc() {
+	destroy(&scratch[0])
+	destroy(&scratch[1])
+}
+
+scrath :: proc {
+	scrath_with_clobber,
+	scrath_no_clobber,
+}
+
+@(deferred_out = scrath_end)
+scrath_no_clobber :: proc() -> (runtime.Allocator, uint) {
+	return allocator(&scratch[0]), scratch[0].pos
+}
+
+@(deferred_out = scrath_end)
+scrath_with_clobber :: proc(
+	clobber: runtime.Allocator,
+) -> (
+	runtime.Allocator,
+	uint,
+) {
+	if &scratch[0] == clobber.data {
+		return allocator(&scratch[1]), scratch[1].pos
+	}
+	return allocator(&scratch[0]), scratch[0].pos
+}
+
+scrath_end :: proc(arena: runtime.Allocator, pos: uint) {
+	(^Allocator)(arena.data).pos = pos
+}
+
+@(require_results)
+bulk_init :: proc "contextless" (
+	slots: ..^Allocator,
+) -> runtime.Allocator_Error {
+	total: uint = 0
+	for slot in slots {
+		total += slot.reserved
+	}
+
+	mem := virtual.reserve(total) or_return
+	for slot in slots {
+		slot.ptr = raw_data(mem)
+		slot.pos = 0
+		slot.commited = 0
+		mem = mem[slot.reserved:]
+	}
+
+	return nil
+}
+
+bulk_destroy :: proc(slots: ..^Allocator) {
+	min_ptr := ~uintptr(0)
+	size: uint = 0
+	for slot in slots {
+		min_ptr = min(min_ptr, uintptr(slot.ptr))
+		size += slot.reserved
+	}
+
+	for slot in slots {
+		rel_offset := uintptr(slot.ptr) - min_ptr
+		assert(rel_offset + uintptr(slot.reserved) <= uintptr(size))
+	}
+
+	virtual.release(rawptr(min_ptr), size)
+}
+
+alloc :: proc(
+	arena: ^Allocator,
+	size: uint,
+	alignemnt: uint,
+	zeroed := false,
+) -> (
+	b: []u8,
+	e: runtime.Allocator_Error,
+) {
+	assert(math.is_power_of_two(int(alignemnt)))
+	assert(alignemnt <= mem.DEFAULT_PAGE_SIZE)
+
+	base := mem.align_forward_uint(arena.pos, alignemnt)
+	end := base + size
+
+	if end > arena.reserved {
+		return {}, .Out_Of_Memory
+	}
+
+	if end > arena.commited {
+		commit_chunk: uint = 1024 * 1024
+		commit_chunk = max(
+			min(commit_chunk, arena.reserved - arena.commited),
+			size,
+		)
+		commit_chunk = mem.align_forward_uint(
+			commit_chunk,
+			mem.DEFAULT_PAGE_SIZE,
+		)
+		commit_pos := uintptr(arena.ptr) + uintptr(arena.commited)
+		virtual.commit(rawptr(commit_pos), commit_chunk) or_return
+		arena.commited += commit_chunk
+		assert(arena.commited <= arena.reserved)
+		assert(end <= arena.commited)
+	}
+
+	arena.pos = end
+
+	slc := arena.ptr[base:][:size]
+	if zeroed do mem.zero_slice(slc)
+
+	return slc, .None
+}
+
+allocator :: proc(arena: ^Allocator) -> runtime.Allocator {
+	return {procedure = allocator_proc, data = arena}
+}
+
+allocator_proc :: proc(
+	allocator_data: rawptr,
+	mode: runtime.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	location := #caller_location,
+) -> (
+	b: []u8,
+	e: runtime.Allocator_Error,
+) {
+	arena := (^Allocator)(allocator_data)
+	switch (mode) {
+	case .Alloc, .Alloc_Non_Zeroed:
+		bytes := alloc(
+			arena,
+			uint(size),
+			uint(alignment),
+			mode == .Alloc,
+		) or_return
+		return bytes, nil
+	case .Free:
+		if uintptr(old_memory) - uintptr(arena.ptr) ==
+		   uintptr(arena.pos) - uintptr(old_size) {
+			arena.pos -= uint(old_size)
+		}
+		return {}, nil
+	case .Free_All:
+		reset(arena, decommit = false)
+		return {}, nil
+	case .Resize, .Resize_Non_Zeroed:
+		if uintptr(old_memory) - uintptr(arena.ptr) !=
+		   uintptr(arena.pos) - uintptr(old_size) {
+			bytes := alloc(
+				arena,
+				uint(size),
+				uint(alignment),
+				mode == .Resize,
+			) or_return
+			mem.copy_non_overlapping(
+				raw_data(bytes),
+				old_memory,
+				min(old_size, size),
+			)
+			return bytes, nil
+		}
+
+		if size < old_size {
+			arena.pos -= uint(old_size - size)
+		} else {
+			extra_size := size - old_size
+			_ = alloc(arena, uint(extra_size), 1, mode == .Resize) or_return
+		}
+		return ([^]u8)(old_memory)[:size], nil
+	case .Query_Features, .Query_Info:
+	case:
+	}
+	return {}, .Mode_Not_Implemented
+}
+
+@(test)
+test_arena_sanity :: proc(t: ^testing.T) {
+	buf: [1024]u8
+	arena := init_from_buffer(buf[:])
+	context.allocator = allocator(&arena)
+
+	bf, err := make([]u8, 1024)
+	assert(err == nil)
+	delete(bf)
+
+	bf, err = make([]u8, 1024)
+	assert(err == nil)
+	delete(bf)
+
+	bfa: [dynamic]u8
+	for _ in 0 ..< 256 {
+		_, err = append(&bfa, 0)
+		assert(err == nil)
+	}
+
+	resize(&bfa, 16)
+	shrink(&bfa, 16)
+
+	bf, err = make([]u8, 1024 - 16)
+	assert(err == nil)
+	delete(bf)
+
+	s := new(u8)
+	s^ = 1
+
+	append(&bfa, 0)
+
+	testing.expect_value(t, s^, 1)
+
+	init(&arena, 1024 * 1024)
+
+	bf, err = make([]u8, 1024 * 1024 / 2)
+	assert(err == nil)
+	bf, err = make([]u8, 1024 * 1024 / 2)
+	assert(err == nil)
+}

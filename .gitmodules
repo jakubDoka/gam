@@ -1,0 +1,3 @@
+[submodule "vendored/orui"]
+	path = vendored/orui
+	url = https://github.com/jakubDoka/orui.git

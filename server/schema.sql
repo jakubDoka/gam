@@ -1,0 +1,35 @@
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+
+CREATE TABLE IF NOT EXISTS user (
+	id INTEGER PRIMARY KEY,
+	pk BLOB NOT NULL UNIQUE,
+	name TEXT NOT NULL DEFAULT '',
+	permissions INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS user_name ON user (name);
+CREATE INDEX IF NOT EXISTS user_pk ON user (pk);
+
+CREATE TABLE IF NOT EXISTS ip_sighting (
+	user_id INTEGER NOT NULL,
+	ip_lo INTEGER NOT NULL,
+	ip_hi INTEGER NOT NULL,
+
+	PRIMARY KEY (user_id, ip_lo, ip_hi),
+
+	FOREIGN KEY (user_id) REFERENCES user (id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS asset (
+	id INTEGER NOT NULL PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE,
+	hash BLOB NOT NULL UNIQUE,
+	size INTEGER NOT NULL,
+	type INTEGER NOT NULL,
+	visited INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS asset_name ON asset (name);
+
+UPDATE asset SET visited = 0;
