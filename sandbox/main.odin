@@ -525,6 +525,7 @@ eliminate_overlap :: proc(ents: ^Ents, ent: ^Ent) {
 
 		oent.pos = contact_point + normal * (oradius + DIST_ESP)
 		ent.pos = contact_point - normal * (radius + DIST_ESP)
+
 	}
 
 	min_tile := sim.map_vec_to_pos(ent.pos - radius)

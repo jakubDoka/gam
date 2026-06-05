@@ -4,7 +4,7 @@ import "base:intrinsics"
 import rt "base:runtime"
 import "core:log"
 import "core:math"
-import la "core:math/linalg"
+import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import str "core:strings"
@@ -203,7 +203,7 @@ next_pos_along_normal :: proc(pos: Vec, normal: Map_Pos) -> Vec {
 map_clamp_to_tile :: proc(pos: Vec, tile: Map_Pos) -> Vec {
 	tile_min := Vec{f32(tile.x * TILE_SIZE), f32(tile.y * TILE_SIZE)}
 	tile_max := next_pos_along_normal(tile_min + TILE_SIZE, {-1, -1})
-	return la.clamp(pos, tile_min, tile_max)
+	return linalg.clamp(pos, tile_min, tile_max)
 }
 
 map_wall_collision :: proc(
@@ -226,7 +226,7 @@ map_wall_collision :: proc(
 	step_x := int(math.sign(vel.x))
 	step_y := int(math.sign(vel.y))
 
-	tile_min := la.floor(pos * TILE_RECIPRO) * TILE_SIZE
+	tile_min := linalg.floor(pos * TILE_RECIPRO) * TILE_SIZE
 	tile_max := tile_min + TILE_SIZE
 
 	next_boundary_x := tile_max.x if step_x >= 0 else tile_min.x
@@ -316,6 +316,98 @@ benchmark_and_fuzz :: proc(t: ^testing.T) {
 
 	log.debug("took: ", options.duration)
 	log.debug("per unit: ", options.duration / time.Duration(options.count))
+}
+
+map_tile_collide :: proc(
+	ents: ^Map,
+	tile: Map_Pos,
+	pos: Vec,
+	radius: f32,
+) -> (
+	normal: Vec,
+	contact_point: Vec,
+) {
+	origin_tile := map_vec_to_pos(pos)
+
+	x, y := tile.x, tile.y
+
+	tile_min := Vec{f32(x), f32(y)} * TILE_SIZE
+	tile_max := tile_min + TILE_SIZE
+
+	corners := [?]Vec {
+		tile_min,
+		{tile_max.x, tile_min.y},
+		tile_max,
+		{tile_min.x, tile_max.y},
+	}
+
+	out := true
+
+	if map_tile_is_solid(ents, {x, y}) {
+		origin_tile_pos := map_pos_to_vec({x, y})
+
+		out = origin_tile.x != x && origin_tile.y != y
+
+		if !out {
+			rel_pos := pos - origin_tile_pos
+			if abs(rel_pos.x) > abs(rel_pos.y) {
+				normal = {math.sign(rel_pos.x), 0}
+				if rel_pos.x > 0 {
+					contact_point = {tile_max.x, pos.y}
+				} else {
+					contact_point = {tile_min.x, pos.y}
+				}
+			} else {
+				normal = {0, math.sign(rel_pos.y)}
+				if rel_pos.y > 0 {
+					contact_point = {pos.x, tile_max.y}
+				} else {
+					contact_point = {pos.x, tile_min.y}
+				}
+			}
+		}
+
+		if out {
+			min_dist := math.inf_f32(1)
+			min_idx := 0
+
+			for c, i in corners {
+				dist := linalg.length2(pos - c)
+				if dist < min_dist {
+					min_dist = dist
+					min_idx = i
+				}
+			}
+
+			out &= min_dist > radius * radius
+
+			if !out {
+				normal = linalg.normalize0(pos - corners[min_idx])
+				contact_point = corners[min_idx]
+			}
+		}
+	}
+
+	return
+}
+
+map_tile_find_empty :: proc(ents: ^Ents, origin: Map_Pos) -> Map_Pos {
+	dirs := [?]Map_Pos{{1, -1}, {1, 1}, {-1, 1}, {-1, -1}}
+
+	search: for radius in 1 ..< 100 {
+		cursor := Map_Pos{origin.x - radius, origin.y}
+		for d in dirs {
+			for _ in 0 ..< radius {
+				if !map_tile_is_solid(ents, cursor) {
+					return cursor
+				}
+				cursor += d
+			}
+		}
+		assert(cursor == {origin.x - radius, origin.y})
+	}
+
+	return {}
 }
 
 @(test)
