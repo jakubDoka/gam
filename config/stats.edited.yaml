@@ -19,6 +19,14 @@ snipa:
     sprite: blah
   attack:
     bullet: snip-shot
+  parry:
+    invincibility: 0.3
+    duration: 1
+    cooldown: 1
+    attack:
+      bullets_per_shot_minus_one: 9
+      innaccuracy: 1
+      bullet: snip-shot
   turret:
     aim_speed: 8.1999998
     reload: 1

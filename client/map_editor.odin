@@ -510,7 +510,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		CAMERA_SPEED :: 500
 
 		client.camera.target +=
-			sim.input_movement_dir(client.input.keys) *
+			sim.input_movement_dir(client.applied_input.keys) *
 			(CAMERA_SPEED / client.camera.zoom * client.ents.delta)
 
 		client.camera.target = la.clamp(

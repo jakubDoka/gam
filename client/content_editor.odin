@@ -6,7 +6,9 @@ import "../util/packer"
 import orui "../vendored/orui/src"
 import rt "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
+import "core:os"
 import "core:reflect"
 import "core:strconv"
 import "core:strings"
@@ -199,6 +201,154 @@ ui_content_editor :: proc(client: ^Client) {
 			},
 		)
 	}
+
+	{
+		area_id := id("drop-sprite-area")
+
+		rect := orui.bounding_rect()
+		hovered := rl.CheckCollisionPointRec(rl.GetMousePosition(), rect)
+
+		if hovered {
+			load: if rl.IsFileDropped() {
+				ctx.upload_error = ""
+
+				raw_files := rl.LoadDroppedFiles()
+				defer rl.UnloadDroppedFiles(raw_files)
+				files := raw_files.paths[:raw_files.capacity]
+
+				resize(&ctx.dropped_assets, len(files))
+
+				for file, i in files {
+					entry := &ctx.dropped_assets[i]
+
+					filename := os.base(string(file))
+
+					mtype: Maybe(sim.Asset_Type)
+					for ext, i in sim.EXT_BY_TYPE {
+						if strings.ends_with(filename, ext) {
+							mtype = i
+						}
+					}
+
+					entry.issue = "Invalid file extension."
+					type := mtype.? or_continue
+
+					filename = filename[:len(filename) -
+					len(sim.EXT_BY_TYPE[type])]
+
+					entry.issue = "Name is too long."
+					entry.base.type = type
+					entry.base.name = nm.from_str(filename) or_continue
+
+					entry.issue = "Cant load the file for some reason!"
+					bytes, err := os.read_entire_file(
+						string(file),
+						context.temp_allocator,
+					)
+					if err != nil {
+						log.info("Failed to open a file at", file, ":", err)
+						continue
+					}
+
+					sim.hash(bytes, &entry.base.hash)
+					entry.base.size = len(bytes)
+
+					entry.issue = ""
+				}
+
+			} else if rl.IsMouseButtonDown(.LEFT) {
+				ctx.upload_error = "Clicking this will do nothing..."
+			}
+		}
+
+		box(
+			area_id,
+			{
+				border = orui.border(1),
+				border_color = ui_color(.PRIMARY),
+				background_color = ui_color(
+					hovered && len(ctx.dropped_assets) == 0 ? .SECONDARY : .PRIMARY_FAINT,
+				),
+				width = orui.grow(),
+				height = orui.fixed(200),
+				scroll = orui.scroll(.Vertical),
+				clip = {.Intersect, {}},
+				padding = orui.padding(PADDING),
+				gap = PADDING,
+				direction = .TopToBottom,
+			},
+		)
+
+		if len(ctx.dropped_assets) == 0 {
+			msg := "Drag and drop file here to upload to\n the server (*.png)"
+
+			ui_label(
+				id("drop-asset-area-text"),
+				{
+					label = len(ctx.upload_error) != 0 ? ctx.upload_error : msg,
+					background = .NONE,
+					width = orui.grow(),
+					height = orui.grow(),
+				},
+			)
+		} else {
+			files := rl.LoadDroppedFiles()
+
+			{box(
+					id("drop-assets-upload-spacer"),
+					{
+						height = orui.grow(),
+						width = orui.grow(),
+						direction = .TopToBottom,
+						layout = .Grid,
+						cols = 4,
+						rows = i32(len(ctx.dropped_assets)),
+					},
+				)
+
+				for &asset, i in ctx.dropped_assets {
+					if asset.issue != "" {
+						ui_label(id("issue-idk", i), {label = asset.issue})
+						continue
+					}
+
+					ui_label(
+						id("dropped-file-name"),
+						{label = nm.str(&asset.base.name)},
+					)
+				}
+			}
+
+			box(
+				id("drop-assets-upload-spacer"),
+				{
+					height = orui.grow(),
+					width = orui.grow(),
+					direction = .TopToBottom,
+				},
+			)
+
+			{box(
+					id("drop-assets-shift"),
+					{height = orui.grow(), width = orui.grow()},
+				)}
+
+			if ui_button(
+				id("drop-assets-upload-button"),
+				{
+					label = "upload",
+					width = orui.grow(),
+					background = .SECONDARY,
+					focused_color = .PRIMARY,
+				},
+			) {
+				//client_upload_assets(client, files.paths[:files.capacity])
+			}
+		}
+	}
+}
+
+ui_upload_assets :: proc(client: ^Client, files: []cstring) {
 }
 
 ui_sprite_select :: proc(

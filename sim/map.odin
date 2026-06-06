@@ -2,14 +2,12 @@ package sim
 
 import "base:intrinsics"
 import rt "base:runtime"
-import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import str "core:strings"
 import "core:testing"
-import "core:time"
 
 FILE_ALIGNMENT :: size_of(int)
 MASK_SIZE :: size_of(int) * 8
@@ -259,63 +257,6 @@ map_wall_collision :: proc(
 	t = min(t, 1)
 
 	return
-}
-
-map_move :: proc(
-	mapa: ^Map,
-	pos: ^Vec,
-	vel: ^Vec,
-	delta: f32,
-) -> (
-	bounces: int,
-) {
-	t: f32
-	for t < 1 {
-		tm, normal, new_tile := map_wall_collision(mapa, pos^, (vel^ * delta))
-
-		if tm == 0 do break
-
-		pos^ += vel^ * delta * min(tm, (1 - t))
-		pos^ = map_clamp_to_tile(pos^, new_tile)
-		if tm != 1 {
-			vel^ *= normal
-			bounces += 1
-		}
-		t += tm
-	}
-
-	return
-}
-
-@(test)
-benchmark_and_fuzz :: proc(t: ^testing.T) {
-	mapa: Map
-	mapa.width = 4
-	mapa.height = 4
-	mapa.tiles = []int{0b1000_0000_1000_1111}
-
-	options: time.Benchmark_Options
-	options.user_data = &mapa
-	options.count = 1_000_000
-	options.bench = proc(
-		b: ^time.Benchmark_Options,
-		a: rt.Allocator,
-	) -> time.Benchmark_Error {
-		mapa := (^Map)(b.user_data)
-		pos := map_pos_to_vec({2, 2})
-		vel := Vec{50.0, 100.0}
-
-		for _ in 0 ..< b.count {
-			map_move(mapa, &pos, &vel, 1)
-		}
-
-		return nil
-	}
-
-	time.benchmark(&options)
-
-	log.debug("took: ", options.duration)
-	log.debug("per unit: ", options.duration / time.Duration(options.count))
 }
 
 map_tile_collide :: proc(

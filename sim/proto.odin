@@ -77,9 +77,10 @@ Content_Action_Kind :: enum {
 
 Client_Input :: struct {
 	seq:                int,
-	keys:               Client_Input_Keys,
 	relative_mouse_pos: [2]f32,
-	net_seq:            u32,
+	using state:        struct {
+		keys: Client_Input_Keys,
+	},
 }
 
 Client_Input_Keys :: bit_set[Client_Input_Key]
@@ -94,6 +95,7 @@ Client_Input_Key :: enum {
 }
 
 Client_Cmd_Kind :: enum i32 {
+	Abandon,
 	Build,
 	Delete,
 	Rewire,
@@ -176,6 +178,44 @@ client_asset_request_body_decode :: proc(
 		true
 }
 
+Client_Asset_Upload :: struct {
+	token:   Hash,
+	using _: struct #raw_union {
+		using body: Client_Asset_Upload_Body,
+		packed:     []u8,
+	},
+}
+
+client_asset_upload_body_encode :: proc(
+	req: Client_Asset_Upload_Body,
+	e: ^Encoder,
+) -> bool {
+	encode(e, len(req.metas)) or_return
+	encode_slice(e, req.metas) or_return
+
+	return true
+}
+
+client_asset_Upload_body_decode :: proc(
+	d: ^Decoder,
+) -> (
+	b: Client_Asset_Upload_Body,
+	ok: bool,
+) {
+	return {
+			metas = decode_aligned_slice(
+				d,
+				Asset,
+				decode(d, u32) or_return,
+			) or_return,
+		},
+		true
+}
+
+Client_Asset_Upload_Body :: struct {
+	metas: []Asset,
+}
+
 Client_Packet_Tag :: enum u8 {
 	Client_Input,
 	Client_Cmd,
@@ -184,6 +224,7 @@ Client_Packet_Tag :: enum u8 {
 	Client_Content_Action,
 	Client_Map_Edit,
 	Client_Asset_Request,
+	Client_Asset_Upload,
 	Broadcast_Packet,
 }
 
@@ -195,6 +236,7 @@ Client_Packet :: union #no_nil {
 	Client_Content_Action,
 	Client_Map_Edit,
 	Client_Asset_Request,
+	Client_Asset_Upload,
 	Broadcast_Packet,
 }
 
@@ -223,6 +265,7 @@ compute_next_ping_tag :: proc(
 }
 
 Server_State :: struct {
+	tps:              int,
 	you:              Ent_Net_ID,
 	your_next_net_id: Ent_Net_ID,
 	ctx:              ^Ents,
@@ -280,6 +323,7 @@ Server_Cold_State :: struct {
 Server_Cmd_Kind :: enum int {
 	Laser,
 	Token,
+	Ack,
 }
 
 Server_Cmd :: struct {
@@ -609,6 +653,10 @@ client_packet_encode_to_encoder :: proc(
 		encode_kind(e, .Client_Asset_Request) or_return
 		encode(e, p.inverted) or_return
 		client_asset_request_body_encode(p.body, e) or_return
+	case Client_Asset_Upload:
+		encode_kind(e, .Client_Asset_Upload) or_return
+		encode(e, p.token) or_return
+		client_asset_upload_body_encode(p.body, e) or_return
 	case Broadcast_Packet:
 		encode_kind(e, .Broadcast_Packet) or_return
 		broadcast_packet_encode(p, e) or_return
@@ -640,6 +688,12 @@ client_packet_decode :: proc(d: ^Decoder) -> (res: Client_Packet, ok: bool) {
 	case .Client_Asset_Request:
 		return Client_Asset_Request {
 				inverted = decode(d, bool) or_return,
+				packed = d.remining,
+			},
+			true
+	case .Client_Asset_Upload:
+		return Client_Asset_Upload {
+				token = decode(d, Hash) or_return,
 				packed = d.remining,
 			},
 			true
@@ -681,6 +735,7 @@ server_packet_encode_to_encoder :: proc(
 		encode(e, p) or_return
 	case Server_State:
 		encode_kind(e, .Server_State) or_return
+		encode(e, p.tps)
 		encode(e, p.you)
 		encode(e, p.your_next_net_id)
 
@@ -746,6 +801,7 @@ server_packet_decode :: proc(buf: []u8) -> (res: Server_Packet, ok: bool) {
 		return decode(&d, Server_Ping)
 	case .Server_State:
 		return Server_State {
+				tps = decode(&d, int) or_return,
 				you = decode(&d, Ent_Net_ID) or_return,
 				your_next_net_id = decode(&d, Ent_Net_ID) or_return,
 				packed = d.remining,
@@ -805,8 +861,12 @@ ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 
 	encode(e, ent.age) or_return
 
-	if s.bullet.id != 0 {
+	if s.bullet.id != 0 && field_presence_set(&presence, ent.reload > 0) {
 		encode(e, ent.reload) or_return
+	}
+
+	if field_presence_set(&presence, ent.parry_progress > 0) {
+		encode(e, ent.parry_progress) or_return
 	}
 
 	if field_presence_set(&presence, ent.rot != 0) {
@@ -824,7 +884,7 @@ ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 		encode_leb128(e, ent.counter) or_return
 	}
 
-	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 11)
+	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 12)
 	assert(presence.cursor <= ENT_SYNCED_PRESENCE_CAP)
 
 	copy(set_slot, mem.slice_data_cast([]u8, slots[:]))
@@ -865,8 +925,12 @@ ent_synced_decode :: proc(
 
 	ent.age = decode(d, f32) or_return
 
-	if s.bullet.id != 0 {
+	if s.bullet.id != 0 && field_presence_get(&presence) {
 		ent.reload = decode(d, f32) or_return
+	}
+
+	if field_presence_get(&presence) {
+		ent.parry_progress = decode(d, f32) or_return
 	}
 
 	if field_presence_get(&presence) {
@@ -883,7 +947,7 @@ ent_synced_decode :: proc(
 		ent.counter = decode_leb128(d, int) or_return
 	}
 
-	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 11)
+	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 12)
 	assert(presence.cursor <= ENT_SYNCED_PRESENCE_CAP)
 
 	ok = true

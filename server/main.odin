@@ -23,6 +23,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:time"
+import "core:unicode/utf8"
 
 FUZZING :: #config(FUZZING, false)
 
@@ -122,6 +123,12 @@ Connection_Request_State :: struct {
 	sent_sprites:      int,
 	buf:               []u8,
 	last_info:         sim.Server_Info,
+	assets:            []sim.Asset,
+	rcvd_assets:       int,
+	written:           int,
+	recvd:             int,
+	write_file:        nbio.Handle,
+	file_hash_ctx:     blake2s.Context,
 }
 
 Game :: struct {
@@ -248,6 +255,11 @@ Banned_Ip_Entry :: struct {
 	violation_count: int,
 }
 
+Asset_Request_Kind :: enum {
+	Download,
+	Upload,
+}
+
 Asset_Request :: struct {
 	payload: []u8,
 }
@@ -363,6 +375,7 @@ server_handle_packet :: proc(
 			server->udp_send(
 				from,
 				sim.Server_State {
+					tps = server.tps,
 					you = e.net_id,
 					your_next_net_id = from.input.next_net_id,
 					ctx = &game.ents,
@@ -375,6 +388,8 @@ server_handle_packet :: proc(
 		}
 	case sim.Client_Cmd:
 		switch p.kind {
+		case .Abandon:
+			sim.ents_queue_remove(&game.ents, from.ent)
 		case .Build:
 			parent := game_ent_by_net_id(game, p.parent)
 
@@ -569,7 +584,7 @@ server_handle_packet :: proc(
 
 			io.close(edited_stream)
 
-			refresh_bundle(server)
+			server_bundle_refresh(server)
 
 			game.clean_stats_hash = game.last_stats_hash
 		}
@@ -614,13 +629,14 @@ server_handle_packet :: proc(
 
 		game_set_map(game, buf)
 
-		refresh_bundle(server)
+		server_bundle_refresh(server)
 	case sim.Client_Asset_Request:
 		token: sim.Hash
 		crypto.rand_bytes(token[:])
 
 		payload, _ := mem.alloc_bytes(len(p.packed), 4)
 		copy(payload, p.packed)
+		defer if !ok do delete(payload)
 
 		d := sim.Decoder{payload}
 
@@ -689,6 +705,26 @@ server_handle_packet :: proc(
 				global_hash = global_hash,
 				count = count,
 			},
+		)
+	case sim.Client_Asset_Upload:
+		payload, _ := mem.alloc_bytes(len(p.packed), 8)
+		copy(payload, p.packed)
+		defer if !ok do delete(payload)
+
+		d := sim.Decoder{payload}
+
+		req := sim.client_asset_Upload_body_decode(&d) or_return
+
+		lru.set(
+			&server.asset_requests,
+			p.token,
+			Asset_Request{payload = payload},
+		)
+
+		server_tcp_send(
+			server,
+			from,
+			sim.Server_Cmd{kind = .Ack, token = p.token},
 		)
 	case sim.Broadcast_Packet:
 		for _, c in server.connections {
@@ -981,6 +1017,7 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 			.Download_Content  = send_content,
 			.Play              = boot_player,
 			.Watch_Server_Info = stream_server_info,
+			.Upload_Content    = recv_content,
 		}
 
 		if len(handlers) <= int(request.kind) {
@@ -1060,12 +1097,8 @@ send_content :: proc(
 
 	conn.request_state.payload = payload
 
-	len := sim.decode(&d, u32) or_return
-	conn.request_state.sprites = sim.decode_aligned_slice(
-		&d,
-		sim.Asset_ID,
-		len,
-	) or_return
+	body := sim.client_asset_request_body_decode(&d) or_return
+	conn.request_state.sprites = body.assets
 	conn.request_state.buf = make([]u8, 4096)
 
 	do_progress(conn)
@@ -1117,15 +1150,7 @@ send_content :: proc(
 			asset, ok := server_get_asset(server, s)
 			assert(ok)
 
-			dir := sim.DIR_BY_TYPE[asset.type]
-			ext := sim.EXT_BY_TYPE[asset.type]
-
-			name := strings.join(
-				{nm.str(&asset.name), ext},
-				"",
-				context.temp_allocator,
-			)
-			path, _ := os.join_path({dir, name}, context.allocator)
+			path := asset_path(&asset)
 
 			nbio.open_poly(path, conn, on_open, l = server.hr.l)
 
@@ -1137,6 +1162,7 @@ send_content :: proc(
 
 	on_open :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+		state := &conn.request_state
 
 		kill := true
 		defer if kill do conn.hctx->on_fail(server)
@@ -1154,6 +1180,8 @@ send_content :: proc(
 			on_file_sent,
 			l = op.l,
 		)
+
+		state.write_file = op.open.handle
 
 		kill = false
 	}
@@ -1188,6 +1216,186 @@ send_content :: proc(
 	}
 }
 
+recv_content :: proc(
+	server: ^Server,
+	conn: ^Connection,
+	request: ^sim.Client_Request_Header,
+) -> bool {
+	conn.hctx.tcp.timeout = 5 * time.Second
+
+	token: sim.Hash
+	copy(token[:], request.inline_body[:])
+
+	ass_req := server.asset_requests.entries[token] or_return
+	// TODO: ratelimit this
+
+	payload := ass_req.value.payload
+	ass_req.value.payload = {}
+
+	d := sim.Decoder{payload}
+
+	conn.request_state.payload = payload
+	body := sim.client_asset_Upload_body_decode(&d) or_return
+	conn.request_state.assets = body.metas
+	conn.request_state.buf = make([]u8, size_of(sim.Tag) + 4096)
+
+	do_progress(conn)
+
+	return true
+
+	do_progress :: proc(conn: ^Connection) -> bool {
+		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+
+		state := &conn.request_state
+
+		for state.rcvd_assets < len(state.assets) {
+			curr := &state.assets[state.rcvd_assets]
+
+			remining := curr.size - state.written
+
+			if remining == 0 {
+				hash: sim.Hash
+				blake2s.final(&state.file_hash_ctx, hash[:])
+
+				if hash != curr.hash {
+					log.error(
+						"got corrupted file, considering we" +
+						" are encrypting, this is a bug",
+					)
+					return false
+				}
+
+				nbio.close(state.write_file, l = server.hr.l)
+				state.write_file = 0
+				state.written = 0
+				state.rcvd_assets += 1
+				continue
+			}
+
+			if state.write_file == 0 {
+				blake2s.init(&state.file_hash_ctx)
+				path := asset_path(curr)
+				nbio.open_poly(
+					path,
+					conn,
+					on_open,
+					{.Write, .Create, .Trunc},
+					l = server.hr.l,
+				)
+				return true
+			}
+
+			if state.recvd > 0 {
+				source := state.buf[size_of(sim.Tag):state.recvd]
+
+				ok := sim.decrypt(
+					&conn.tcp.secret,
+					(^sim.Tag)(raw_data(state.buf)),
+					source,
+				)
+				if !ok {
+					log.warn(
+						"received corrupted file chunk, deleting the file",
+					)
+					err := os.remove(asset_path(curr))
+					if err != nil {
+						log.error("failed to delete the corrupt file")
+					}
+					return false
+				}
+
+				blake2s.update(&state.file_hash_ctx, source)
+
+				nbio.write_poly(
+					state.write_file,
+					state.written,
+					source,
+					conn,
+					on_write,
+					all = true,
+					l = server.hr.l,
+				)
+				return true
+			}
+
+			nbio.recv_poly(
+				conn.tcp.sock,
+				{state.buf[:min(remining + size_of(sim.Tag), len(state.buf))]},
+				conn,
+				on_recv,
+				all = true,
+				l = server.hr.l,
+			)
+			return true
+		}
+
+		return false
+	}
+
+	on_open :: proc(op: ^nbio.Operation, conn: ^Connection) {
+		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+
+		kill := true
+		defer if kill do conn.hctx->on_fail(server)
+		defer delete(op.open.path)
+
+		if op.open.err != nil {
+			log.warn("failed to create", op.open.path, ":", op.open.err)
+			return
+		}
+
+		conn.request_state.write_file = op.open.handle
+		kill = !do_progress(conn)
+	}
+
+	on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
+		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+
+		kill := true
+		defer if kill do conn.hctx->on_fail(server)
+
+		if op.recv.err != nil {
+			log.warn("failed to recv from client:", op.recv.err)
+			return
+		}
+
+		conn.request_state.recvd = len(op.recv.bufs[0])
+		kill = !do_progress(conn)
+	}
+
+	on_write :: proc(op: ^nbio.Operation, conn: ^Connection) {
+		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+
+		kill := true
+		defer if kill do conn.hctx->on_fail(server)
+
+		if op.write.err != nil {
+			log.warn("failed to write to disk:", op.write.err)
+			return
+		}
+
+		conn.request_state.recvd = 0
+		conn.request_state.written += len(op.write.buf)
+		kill = !do_progress(conn)
+	}
+}
+
+asset_path :: proc(asset: ^sim.Asset) -> string {
+	name_str := nm.str(&asset.name)
+
+	// NOTE: it suffices to return null value since subsequent file operations
+	// will fail on this
+	if strings.contains(name_str, ".") do return ""
+	if !utf8.valid_string(name_str) do return ""
+
+	dir := sim.DIR_BY_TYPE[asset.type]
+	ext := sim.EXT_BY_TYPE[asset.type]
+
+	name := strings.join({name_str, ext}, "", context.temp_allocator)
+	path, _ := os.join_path({dir, name}, context.allocator)
+	return path
+}
+
 server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
 	server := (^Server)(conn.host.asoc_data)
 	conn := (^Connection)(conn)
@@ -1206,6 +1414,7 @@ server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
 
 	delete(conn.request_state.payload)
 	delete(conn.request_state.buf)
+	nbio.close(conn.request_state.write_file, l = l)
 
 	log.debug("killed the connection")
 }
@@ -1330,7 +1539,7 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 	free_all(context.temp_allocator)
 }
 
-refresh_bundle :: proc(server: ^Server) {
+server_bundle_refresh :: proc(server: ^Server) {
 	cwd, cwd_err := os.get_working_directory(context.temp_allocator)
 	log.assertf(cwd_err == nil, "failed to get working directory: %v", cwd_err)
 
@@ -1564,7 +1773,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			copy(server.pk[:], bytes)
 		}
 
-		refresh_bundle(server)
+		server_bundle_refresh(server)
 
 		if _, err := os.stat(sim.MAP_DIR, context.temp_allocator); err != nil {
 			create_dir_err := os.make_directory_all(sim.MAP_DIR)
@@ -1771,7 +1980,7 @@ server_on_udp_ping :: proc(
 		slot.stage = .Sent
 		return
 	case .Sent:
-		rtts := time.since(slot.arrival)
+		rtts := time.since(slot.arrival) + sim.LATENCY
 		rtt.update(&slot.conn.rtt, rtts)
 		slot.stage = .Recvd
 		ok = false

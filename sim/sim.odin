@@ -80,6 +80,17 @@ Ent_Kind :: enum u8 {
 	Shell,
 }
 
+Ent_Stats_Attack :: struct {
+	shots_per_reload_minus_one: int,
+	bullets_per_shot_minus_one: int,
+	shot_spacing:               f32 `gam:"round2"`,
+	spread:                     f32 `gam:"round2"`,
+	innaccuracy:                f32 `gam:"round2"`,
+	recoil:                     f32 `gam:"round"`,
+	bullet:                     Ent_Stats_Ref,
+	unwind:                     f32 `gam:"round2"`,
+}
+
 Ent_Stats :: struct {
 	name:             Ent_Stats_Name `gam:"hidden"`,
 	id:               Ent_Stats_ID `gam:"hidden"`,
@@ -103,21 +114,18 @@ Ent_Stats :: struct {
 		lifetime_multiplier:     f32 `gam:"round1"`,
 		bounce_age_reduction:    f32 `gam:"round1"`,
 	},
-	using attack:     struct {
-		shots_per_reload_minus_one: int,
-		bullets_per_shot_minus_one: int,
-		shot_spacing:               f32 `gam:"round2"`,
-		spread:                     f32 `gam:"round2"`,
-		innaccuracy:                f32 `gam:"round2"`,
-		recoil:                     f32 `gam:"round"`,
-		bullet:                     Ent_Stats_Ref,
+	using attack:     Ent_Stats_Attack,
+	parry:            struct {
+		invincibility: f32 `gam:"round1"`,
+		duration:      f32,
+		cooldown:      f32,
+		attack:        Ent_Stats_Attack,
 	},
 	using turret:     struct {
 		cannon:    Asset_Ref,
 		aim_speed: f32 `gam:"round1"`,
 		range:     f32 `gam:"round"`,
 		reload:    f32 `gam:"round2"`,
-		unwind:    f32 `gam:"round2"`,
 	},
 	using health:     struct {
 		energy:         f32 `gam:"round"`,
@@ -355,6 +363,7 @@ Ent_Synced :: struct {
 	vel:             Vec,
 	age:             f32,
 	reload:          f32,
+	parry_progress:  f32,
 	rot:             f32,
 	team:            Ent_Team_ID,
 	energy_consumed: f32,
@@ -371,16 +380,14 @@ Ent_Objective :: struct {
 Ent :: struct {
 	id:            Ent_ID,
 	queued_remove: bool,
+	parried:       bool,
 	using _:       struct #raw_union {
 		next_queued_remove: ^Ent,
 		next_free:          ^Ent,
 	},
-	quad:          Quad_Ent,
-	spatial:       Spatial_Ent,
 	parent:        Ent_ID,
 	turret_rot:    f32,
 	objective:     Ent_Objective,
-	coll_id:       int,
 	using synced:  Ent_Synced,
 }
 
@@ -404,7 +411,7 @@ Input_State :: struct {
 	next_net_id: Ent_Net_ID,
 }
 
-Physics_State :: struct {
+PState :: struct {
 	fuel:             f32,
 	no_change_streak: u32,
 	quad:             Quad_Ent,
@@ -415,7 +422,7 @@ Physics_State :: struct {
 Ents :: struct {
 	slots:         []Ent,
 	len:           int,
-	pstate:        []Physics_State,
+	pstate:        []PState,
 	queued_remove: ^Ent,
 	free:          ^Ent,
 	delta:         f32,
@@ -499,26 +506,29 @@ ents_integrate_input :: proc(
 		rtt,
 		&input.next_net_id,
 	)
+
+	ents_parry(
+		ents,
+		e.id,
+		e.pos + input.relative_mouse_pos,
+		.Click_Right in input.keys,
+		rtt,
+		&input.next_net_id,
+	)
 }
 
-ents_attack :: proc(
+ents_attack_low :: proc(
 	ents: ^Ents,
 	e: Ent_ID,
+	s: Ent_Stats_Attack,
 	pos: Vec,
-	shooting: bool,
-	rtt: f32,
 	next_net_id: ^Ent_Net_ID,
 ) {
 	e := ents_get(ents, e)
-	s := ents_stats_get(ents, e.stats)
+
+	e.vel -= linalg.normalize(pos - e.pos) * s.recoil
 
 	if next_net_id == nil do return
-
-	if e.reload < 0 && shooting {
-		e.reload = s.reload + max(0, s.unwind - rtt)
-	}
-
-	if !step_crosses(e.reload, ents.delta, s.reload) do return
 
 	if s.shots_per_reload_minus_one > e.counter {
 		e.reload = s.shot_spacing
@@ -573,8 +583,63 @@ ents_attack :: proc(
 			be.vel = vec_of(dir) * bs.speed
 		}
 	}
+}
 
-	e.vel -= linalg.normalize(pos - e.pos) * s.recoil
+ents_parry :: proc(
+	ents: ^Ents,
+	e: Ent_ID,
+	pos: Vec,
+	parrying: bool,
+	rtt: f32,
+	next_net_id: ^Ent_Net_ID,
+) {
+	e := ents_get(ents, e)
+	s := ents_stats_get(ents, e.stats)
+
+	if e.parry_progress < 0 && parrying {
+		e.parry_progress =
+			s.parry.cooldown +
+			s.parry.duration +
+			s.parry.attack.unwind +
+			s.parry.invincibility
+	}
+
+	if step_crosses(
+		e.parry_progress,
+		ents.delta,
+		s.parry.cooldown + s.parry.duration + s.parry.attack.unwind,
+	) {
+		e.parry_progress = s.parry.cooldown - ESP
+	}
+
+	if step_crosses(e.parry_progress, ents.delta, s.parry.cooldown) {
+		e.parry_progress = -ESP
+	}
+
+	if e.parried {
+		e.parried = false
+		ents_attack_low(ents, e.id, s.parry.attack, pos, next_net_id)
+	}
+}
+
+ents_attack :: proc(
+	ents: ^Ents,
+	e: Ent_ID,
+	pos: Vec,
+	shooting: bool,
+	rtt: f32,
+	next_net_id: ^Ent_Net_ID,
+) {
+	e := ents_get(ents, e)
+	s := ents_stats_get(ents, e.stats)
+
+	if e.reload < 0 && shooting {
+		e.reload = s.reload + max(0, s.unwind - rtt)
+	}
+
+	if step_crosses(e.reload, ents.delta, s.reload) {
+		ents_attack_low(ents, e.id, s.attack, pos, next_net_id)
+	}
 }
 
 Laser_Iter :: struct {
@@ -612,19 +677,6 @@ laser_iter_next :: proc(
 
 	ok = true
 	return
-}
-
-ents_move :: proc(ents: ^Ents, e: ^Ent_Synced, delta: f32) {
-	s := ents_stats_get(ents, e.stats)
-	if s.kind not_in COLLIDES_WITH_WALLS {
-		e.pos += e.vel * delta
-		return
-	}
-
-	bounces := map_move(ents, &e.pos, &e.vel, delta)
-	if s.bounce_multiplier > 0 do e.counter += bounces
-	e.age -= f32(bounces) * s.bounce_age_reduction / f32(e.counter + 1)
-	e.age = max(e.age, 0)
 }
 
 ents_step :: proc(ents: ^Ents, e: ^Ent) {
@@ -752,7 +804,21 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	iter := ents_query(ents, e.pos + vel_estimate / 2, movement_range)
 	for oent in ents_query_next(&iter) {
 		if oent == e do continue
-		t := circle_collision(e.pos, oent.pos, e.vel, oent.vel, radius, radius)
+		oradius := ents_radius(ents, oent.id)
+
+		min_dist := radius + oradius
+		if linalg.length2(e.pos - oent.pos) < min_dist * min_dist - 1 {
+			continue
+		}
+
+		t := circle_collision(
+			e.pos,
+			oent.pos,
+			e.vel,
+			oent.vel,
+			radius,
+			oradius,
+		)
 
 		opstate := ents.pstate[oent.id.index]
 
@@ -789,52 +855,73 @@ ents_trade_forces :: proc(ents: ^Ents, e: ^Ent, ce: ^Ent) {
 	s := ents_stats_get(ents, e.stats)
 	cs := ents_stats_get(ents, ce.stats)
 
-	norm := linalg.normalize(e.pos - ce.pos)
+	norm := linalg.normalize(ce.pos - e.pos)
 
-	cradius := ents_radius(ents, ce.id)
-	radius := ents_radius(ents, e.id)
+	if s.kind == .Building {
+		ce.vel = linalg.reflect(ce.vel, norm)
+	} else if cs.kind == .Building {
+		e.vel = linalg.reflect(e.vel, norm)
+	} else {
+		cradius := ents_radius(ents, ce.id)
+		radius := ents_radius(ents, e.id)
 
-	amass := radius * radius * math.PI * (1 + s.mass_mult_minus_one)
-	bmass := cradius * cradius * math.PI * (1 + s.mass_mult_minus_one)
+		amass := radius * radius * math.PI * (1 + s.mass_mult_minus_one)
+		bmass := cradius * cradius * math.PI * (1 + s.mass_mult_minus_one)
 
-	p :=
-		2.0 *
-		(linalg.dot(e.vel, norm) - linalg.dot(ce.vel, norm)) /
-		(amass + bmass)
+		p :=
+			2.0 *
+			(linalg.dot(e.vel, norm) - linalg.dot(ce.vel, norm)) /
+			(amass + bmass)
 
-	ap := p * bmass * (1 - s.absorbtion)
-	bp := p * amass * (1 - cs.absorbtion)
+		ap := p * bmass * (1 - s.absorbtion)
+		bp := p * amass * (1 - cs.absorbtion)
 
-	e.vel -= ap * norm
-	ce.vel += ap * norm
+		e.vel -= ap * norm
+		ce.vel += bp * norm
+	}
+
+	ents_collision(ents, e, ce)
+	ents_collision(ents, ce, e)
 }
 
-ents_move_ :: proc(ents: ^Ents, delta: f32) {
+ents_move :: proc(ents: ^Ents, delta: f32) {
 	worklist: queue.Queue(^Ent)
 	{context.allocator = context.temp_allocator
 		ents.quad_tree = {}
 		spatial_map_init(&ents.spatial_map, ents.width, ents.height)
-		ents.pstate = make([]Physics_State, len(ents.slots))
+		ents.pstate = make([]PState, len(ents.slots))
+		ents.buildings = make([]u32, ents.width * ents.height)
 		queue.init(&worklist, len(ents.slots))
 
 		config := Quad_Config {
 			quad_size = i32(map_quad_size(&ents.mapa)),
 		}
 
-		for &ent, i in ents.slots {
-			pstate := &ents.pstate[i]
+		index_iter := ents_iter(ents)
+		for e in ents_iter_next(&index_iter) {
+			s := ents_stats_get(ents, e.stats)
+			pstate := &ents.pstate[e.id.index]
 			pstate^ = {
 				fuel = delta,
-				ent  = &ent,
+				ent  = e,
 			}
 
-			radius := ents_radius(ents, ent.id)
-			pstate.quad.rect = quad_rect_square(ent.pos, radius)
+			radius := ents_radius(ents, e.id)
+			pstate.quad.rect = quad_rect_square(e.pos, radius)
 			quad_tree_add(&ents.quad_tree, &pstate.quad, config)
-			pos := map_vec_to_pos(ent.pos)
+			pos := map_vec_to_pos(e.pos)
 			spatial_map_insert(&ents.spatial_map, pos, &pstate.spatial)
 
-			queue.append(&worklist, &ent)
+			queue.append(&worklist, e)
+
+			if s.kind == .Building {
+				pos := map_vec_to_pos(e.pos)
+				if pos.x < 0 || pos.x >= ents.width do continue
+				if pos.y < 0 || pos.y >= ents.height do continue
+				slot := &ents.buildings[pos.x + pos.y * ents.width]
+				ents_queue_remove(ents, ents.slots[slot^].id)
+				slot^ = e.id.index
+			}
 		}
 	}
 
@@ -850,42 +937,54 @@ ents_move_ :: proc(ents: ^Ents, delta: f32) {
 			queue.append(&worklist, ent)
 		}
 	}
+
+	OVERLA_ELIM_ROUNDS :: 4
+
+	for _ in 0 ..< OVERLA_ELIM_ROUNDS {
+		iter := ents_iter(ents)
+		for e in ents_iter_next(&iter) {
+			eliminate_overlap(ents, e)
+		}
+	}
 }
 
-eliminate_overlap :: proc(ents: ^Ents, ent: ^Ent) {
-	radius := ents_radius(ents, ent.id)
+eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
+	s := ents_stats_get(ents, e.stats)
+	radius := ents_radius(ents, e.id)
 
-	iter := ents_query(ents, ent.pos, radius)
+	iter := ents_query(ents, e.pos, radius)
 	for oent in ents_query_next(&iter) {
-		if ent == oent do continue
+		if e == oent do continue
+		os := ents_stats_get(ents, oent.stats)
 
-		oradius := ents_radius(ents, ent.id)
+		oradius := ents_radius(ents, oent.id)
 
 		min_dist := oradius + radius
 
-		if linalg.length2(ent.pos - oent.pos) > min_dist * min_dist {
+		if linalg.length2(e.pos - oent.pos) > min_dist * min_dist {
 			continue
 		}
 
 		normal: Vec
-		if oent.pos == ent.pos {
-			normal = vec_of(
-				f32((int(oent.id.index) << 32) | int(ent.id.index)),
-			)
+		if oent.pos == e.pos {
+			normal = vec_of(f32((int(oent.id.index) << 32) | int(e.id.index)))
 		} else {
-			normal = linalg.normalize(oent.pos - ent.pos)
+			normal = linalg.normalize(oent.pos - e.pos)
 		}
 
-		contact_point := (oent.pos + ent.pos) / 2
+		contact_point := (oent.pos + e.pos) / 2
 
-		oent.pos = contact_point + normal * (oradius + DIST_ESP)
-		ent.pos = contact_point - normal * (radius + DIST_ESP)
+		if (radius > oradius || s.kind == .Building) && os.kind != .Building {
+			oent.pos = e.pos + normal * (oradius + radius + DIST_ESP)
+		} else {
+			e.pos = oent.pos - normal * (radius + oradius + DIST_ESP)
+		}
 
-		ents_trade_forces(ents, ent, oent)
+		//ents_trade_forces(ents, e, oent)
 	}
 
-	min_tile := map_vec_to_pos(ent.pos - radius)
-	max_tile := map_vec_to_pos(ent.pos + radius)
+	min_tile := map_vec_to_pos(e.pos - radius)
+	max_tile := map_vec_to_pos(e.pos + radius)
 
 	best_normal: Vec
 	best_contact_point: Vec
@@ -895,12 +994,12 @@ eliminate_overlap :: proc(ents: ^Ents, ent: ^Ent) {
 			normal, contact_point := map_tile_collide(
 				ents,
 				{x, y},
-				ent.pos,
+				e.pos,
 				radius,
 			)
 
-			if linalg.length2(ent.pos - contact_point) <
-			   linalg.length2(ent.pos - best_contact_point) {
+			if linalg.length2(e.pos - contact_point) <
+			   linalg.length2(e.pos - best_contact_point) {
 				best_contact_point = contact_point
 				best_normal = normal
 			}
@@ -908,11 +1007,11 @@ eliminate_overlap :: proc(ents: ^Ents, ent: ^Ent) {
 	}
 
 	if best_contact_point != {} {
-		ent.pos = best_contact_point + best_normal * (radius + DIST_ESP)
-		ent.vel = linalg.reflect(ent.vel, best_normal)
+		e.pos = best_contact_point + best_normal * (radius + DIST_ESP)
+		e.vel = linalg.reflect(e.vel, best_normal)
 	}
 
-	tile := map_vec_to_pos(ent.pos)
+	tile := map_vec_to_pos(e.pos)
 
 	if map_tile_is_solid(ents, tile) {
 		tile := map_tile_find_empty(ents, tile)
@@ -920,44 +1019,12 @@ eliminate_overlap :: proc(ents: ^Ents, ent: ^Ent) {
 		tile_min := Vec{f32(tile.x), f32(tile.y)} * TILE_SIZE
 		tile_max := tile_min + TILE_SIZE
 
-		ent.pos = linalg.clamp(ent.pos, tile_min + 1, tile_max - 1)
+		e.pos = linalg.clamp(e.pos, tile_min + 1, tile_max - 1)
 	}
 }
 
 ents_update :: proc(ents: ^Ents) {
-	quad_config := Quad_Config {
-		quad_size = i32(map_quad_size(&ents.mapa)),
-	}
-	ents.quad_tree = {}
-
-	{context.allocator = context.temp_allocator
-		spatial_map_init(&ents.spatial_map, ents.mapa.width, ents.mapa.height)
-		ents.buildings = make([]u32, ents.mapa.width * ents.mapa.height)
-	}
-
-	index_iter := ents_iter(ents)
-	for e in ents_iter_next(&index_iter) {
-		s := ents_stats_get(ents, e.stats)
-
-		{context.allocator = context.temp_allocator
-			radius :=
-				ents_radius(ents, e.id) + linalg.length(e.vel * ents.delta)
-			e.quad.rect = quad_rect_square(e.pos, radius)
-			quad_tree_add(&ents.quad_tree, &e.quad, quad_config)
-		}
-
-		pos := map_vec_to_pos(e.pos)
-		spatial_map_insert(&ents.spatial_map, pos, &e.spatial)
-
-		if s.kind == .Building {
-			pos := map_vec_to_pos(e.pos)
-			if pos.x < 0 || pos.x >= ents.width do continue
-			if pos.y < 0 || pos.y >= ents.height do continue
-			slot := &ents.buildings[pos.x + pos.y * ents.width]
-			ents_queue_remove(ents, ents.slots[slot^].id)
-			slot^ = e.id.index
-		}
-	}
+	ents_move(ents, ents.delta)
 
 	for &e in ents_iter(ents) {
 		s := ents_stats_get(ents, e.stats)
@@ -966,6 +1033,7 @@ ents_update :: proc(ents: ^Ents) {
 		if abs(e.vel.x) + abs(e.vel.y) < 0.1 do e.vel = {}
 		e.age += ents.delta
 		e.reload -= ents.delta
+		e.parry_progress -= ents.delta
 		e.parent_net_id = ents_get(ents, e.parent).net_id
 		e.rot += ents.delta * s.spin
 	}
@@ -975,8 +1043,6 @@ ents_update :: proc(ents: ^Ents) {
 		a, b: ^Ent,
 	}
 
-	collisions := make([dynamic]Coll, context.temp_allocator)
-	append(&collisions, Coll{t = ents.delta})
 	update_iter := ents_iter(ents)
 	for e in ents_iter_next(&update_iter) {
 		s := ents_stats_get(ents, e.stats)
@@ -1004,60 +1070,6 @@ ents_update :: proc(ents: ^Ents) {
 				   e.team == oe.team &&
 				   oe_coff == 1 {
 					oe.parent = e.id
-				}
-			}
-		}
-
-		repell_iter := ents_query(
-			ents,
-			e.pos,
-			sradius + linalg.length(e.vel * ents.delta),
-		)
-		if s.kind not_in COLLIDES_WITH_OTHERS do repell_iter = {}
-		for oe in ents_query_next(&repell_iter) {
-			os := ents_stats_get(ents, oe.stats)
-
-			if oe.id == e.id do continue
-			if os.kind not_in COLLIDES_WITH_OTHERS do continue
-
-			dist := linalg.length2(oe.pos - e.pos)
-			osradius := ents_radius(ents, oe.id)
-			min_distance := sradius + osradius
-
-			if dist > (min_distance * min_distance) {
-				t := circle_collision(
-					e.pos,
-					oe.pos,
-					e.vel,
-					oe.vel,
-					sradius,
-					osradius,
-				)
-
-				if t > 0 &&
-				   t < collisions[e.coll_id].t &&
-				   collisions[oe.coll_id].b != e {
-
-					if e.coll_id == 0 {
-						e.coll_id = len(collisions)
-						append(&collisions, Coll{})
-					}
-
-					collisions[e.coll_id] = {t, e, oe}
-				}
-			}
-
-			repel_units: {
-				force := -(min_distance * min_distance) + dist
-
-				if force > 0 {
-					break repel_units
-				}
-
-				if os.kind in REPELS && s.kind in REPELS {
-					norm := linalg.normalize0(oe.pos - e.pos)
-					oe.vel -= norm * ents.delta * force
-					e.vel += norm * ents.delta * force
 				}
 			}
 		}
@@ -1208,72 +1220,6 @@ ents_update :: proc(ents: ^Ents) {
 		if s.lifetime > 0 && e.age > s.lifetime {
 			ents_queue_remove(ents, e.id)
 		}
-	}
-
-	for c in collisions[1:] {
-		if c.t == ents.delta do continue
-
-		ae, be := c.a, c.b
-		as, bs :=
-			ents_stats_get(ents, ae.stats), ents_stats_get(ents, be.stats)
-		aradius, bradius := ents_radius(ents, ae.id), ents_radius(ents, be.id)
-		amass, bmass :=
-			aradius *
-			aradius *
-			math.PI *
-			(1 + as.mass_mult_minus_one),
-			bradius *
-			bradius *
-			math.PI *
-			(1 + bs.mass_mult_minus_one)
-
-		dist := linalg.distance(ae.pos, be.pos)
-
-		if dist <= 0.0001 {
-			continue
-		}
-
-		norm := (be.pos - ae.pos) / dist
-
-		p :=
-			2.0 *
-			(linalg.dot(ae.vel, norm) - linalg.dot(be.vel, norm)) /
-			(amass + bmass)
-
-		assert(!math.is_nan(ae.vel[0]))
-		assert(!math.is_nan(be.vel[0]))
-
-		reflect_vec :: proc(v, n: Vec) -> Vec {
-			return v - n * 2.0 * linalg.dot(v, n)
-		}
-
-		if as.kind == .Building {
-			be.vel = reflect_vec(be.vel, norm)
-		} else if bs.kind == .Building {
-			ae.vel = reflect_vec(ae.vel, norm)
-		} else {
-			ap := p * bmass * (1.0 - as.absorbtion)
-			bp := p * amass * (1.0 - as.absorbtion)
-			ae.vel -= ap * norm
-			be.vel += bp * norm
-		}
-
-		ents_move(ents, ae, c.t)
-		ents_move(ents, be, c.t)
-
-		assert(!math.is_nan(ae.vel[0]))
-		assert(!math.is_nan(be.vel[0]))
-
-		ents_collision(ents, ae, be)
-		ents_collision(ents, be, ae)
-	}
-
-	collisions[0].t = 0
-
-	move_iter := ents_iter(ents)
-	for e in ents_iter_next(&move_iter) {
-		ents_move(ents, e, ents.delta - collisions[e.coll_id].t)
-		e.coll_id = 0
 	}
 
 	flow_energy: if ents_is_authoritative(ents) {
@@ -1480,11 +1426,25 @@ ents_collision :: proc(
 	if target == NIL_ENT do return
 
 	s := ents_stats_get(ents, e.stats)
+	ts := ents_stats_get(ents, target.stats)
 
 	apply_damage: {
 		sbody_damage := ents_damage(ents, e.id) * damage_mult
 		if sbody_damage == 0 do break apply_damage
 		if e.team == target.team do break apply_damage
+
+		if target.parry_progress >
+		   ts.parry.cooldown + ts.parry.duration + ts.parry.attack.unwind {
+			target.parry_progress =
+				ts.parry.cooldown +
+				ts.parry.duration +
+				ts.parry.attack.unwind -
+				ESP
+			e.team = target.team
+			target.parried = true
+
+			break apply_damage
+		}
 
 		if ents_is_authoritative(ents) {
 			target.energy_consumed += sbody_damage
@@ -1518,14 +1478,14 @@ ents_query :: proc(ents: ^Ents, pos: Vec, radius: f32) -> Ents_Query {
 	return quad_iter(&ents.quad_tree, quad_rect_square(pos, radius), config)
 }
 
-ents_query_next :: proc(query: ^Ents_Query) -> (^Ent, bool) {
+ents_query_next :: proc(query: ^Ents_Query) -> (e: ^Ent, ok: bool) {
 	switch &q in query^ {
 	case Quad_Iter:
-		ent, ok := quad_iter_next(&q)
-		return (^Ent)(uintptr(ent) - offset_of(Ent, quad)), ok
+		ent := quad_iter_next(&q) or_return
+		return (^PState)(uintptr(ent) - offset_of(PState, quad)).ent, true
 	case Spatial_Iter:
-		ent, ok := spatial_iter_next(&q)
-		return (^Ent)(uintptr(ent) - offset_of(Ent, spatial)), ok
+		ent := spatial_iter_next(&q) or_return
+		return (^PState)(uintptr(ent) - offset_of(PState, spatial)).ent, true
 	case:
 		return nil, false
 	}

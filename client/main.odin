@@ -10,7 +10,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math"
-import la "core:math/linalg"
+import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:mem/tlsf"
@@ -140,6 +140,7 @@ Lasers :: Retained_Array(Laser)
 
 Client :: struct {
 	using hctx:            Handshake,
+	last_inpulse:          time.Time,
 	data_dir:              string,
 	udp:                   sim.UDP_Connection,
 	connection_stage:      Connection_State,
@@ -152,8 +153,8 @@ Client :: struct {
 	ents:                  sim.Ents,
 	ent_extra:             []Ent_Extra,
 	ent:                   sim.Ent_ID,
-	current_input_state:   sim.Input_State,
-	input:                 sim.Input_State,
+	current_input:         sim.Input_State,
+	applied_input:         sim.Input_State,
 	camera:                rl.Camera2D,
 	map_buf:               []u8,
 	players:               [dynamic]Player,
@@ -248,8 +249,9 @@ client_selection_rect :: proc(client: ^Client) -> rl.Rectangle {
 	if client.ui.control_selection_pivot == {} do return {}
 
 	mouse_pos := client_mouse_pos(client)
-	area_min := la.min(client.ui.control_selection_pivot, mouse_pos)
-	area_max := la.max(client.ui.control_selection_pivot, mouse_pos) - area_min
+	area_min := linalg.min(client.ui.control_selection_pivot, mouse_pos)
+	area_max :=
+		linalg.max(client.ui.control_selection_pivot, mouse_pos) - area_min
 	return {area_min.x, area_min.y, area_max.x, area_max.y}
 }
 
@@ -338,7 +340,7 @@ client_init_data_dir :: proc(client: ^Client) {
 }
 
 client_draw_input :: proc(client: ^Client) {
-	input := client.current_input_state
+	input := client.current_input
 
 	mouse_pos := client_mouse_pos(client)
 
@@ -425,7 +427,8 @@ client_draw_input :: proc(client: ^Client) {
 }
 
 client_compute_input :: proc(client: ^Client) {
-	input := &client.current_input_state
+	prev_input := client.current_input
+	input := &client.current_input
 	input.inner = {
 		seq = input.seq + 1,
 	}
@@ -443,6 +446,11 @@ client_compute_input :: proc(client: ^Client) {
 
 	input.relative_mouse_pos =
 		mouse_pos - sim.ents_get(&client.ents, client.ent).pos
+
+	if prev_input.inner.state != client.current_input.inner.state {
+		client_udp_send(client, client.current_input.inner)
+		client.current_input.inner.seq += 1
+	}
 
 	return
 }
@@ -514,7 +522,7 @@ has_valid_bs :: proc(client: ^Client) -> bool {
 	tile := sim.map_vec_to_pos(pos)
 	snapped_pos := sim.map_pos_to_vec(tile)
 
-	if la.distance(snapped_pos, se.pos) > ss.bind_range do return false
+	if linalg.distance(snapped_pos, se.pos) > ss.bind_range do return false
 
 	t, _, _ := sim.map_wall_collision(
 		&client.ents,
@@ -555,8 +563,8 @@ client_handle_playable_ent :: proc(client: ^Client, e: ^sim.Ent) {
 	hx := client_ent_extra_get(client, he.id)
 	hpos := he.pos + hx.pos_smoothing
 
-	if la.distance(hpos, mouse_pos) < hsradius &&
-	   la.distance(e.pos, he.pos) <= s.bind_range {
+	if linalg.distance(hpos, mouse_pos) < hsradius &&
+	   linalg.distance(e.pos, he.pos) <= s.bind_range {
 		target_pos = he.pos
 	}
 }
@@ -575,7 +583,7 @@ client_find_hovered_ent :: proc(client: ^Client, pos: sim.Vec) -> ^sim.Ent {
 		s := sim.ents_stats_get(&client.ents, e.stats)
 		sradius := sim.ents_radius(&client.ents, e.id)
 		x := client_ent_extra_get(client, e.id)
-		if la.distance(e.pos + x.pos_smoothing, pos) <= sradius {
+		if linalg.distance(e.pos + x.pos_smoothing, pos) <= sradius {
 			return e
 		}
 	}
@@ -737,7 +745,7 @@ client_on_ping :: proc(client: ^Client) {
 
 client_on_tick :: proc(client: ^Client) {
 	if client.connection_stage != .Connected do return
-	client_udp_send(client, client.current_input_state.inner)
+	client_udp_send(client, client.current_input.inner)
 }
 
 refresh_sheet :: proc(client: ^Client) {
@@ -805,6 +813,7 @@ client_update :: proc(client: ^Client) {
 	mouse_pos := client_mouse_pos(client)
 
 	sim.ents_update(&client.ents)
+
 	ui_map_editor_sync(client)
 
 	iter: Retained_Iter_State
@@ -852,7 +861,7 @@ client_update :: proc(client: ^Client) {
 
 	input_slot := client.free_deffered_inputs
 	if input_slot != nil {
-		input_slot.inner = client.current_input_state
+		input_slot.inner = client.current_input
 		client.free_deffered_inputs = input_slot.next_free
 		nbio.timeout_poly2(
 			auto_cast (f64(client.rtt) * f64(time.Second)),
@@ -867,23 +876,32 @@ client_update :: proc(client: ^Client) {
 			client: ^Client,
 			input: ^Deffered_Client_Input,
 		) {
-			client.input.inner = input.inner
+			client.applied_input.inner = input.inner
 			input.next_free = client.free_deffered_inputs
 			client.free_deffered_inputs = input
 		}
 	}
 
 	input_integration: {
-		look_dir := sim.angle_of(client.input.relative_mouse_pos)
+		look_dir := sim.angle_of(client.applied_input.relative_mouse_pos)
 		x := client_ent_extra_get(client, client.ent)
 		if x == NIL_ENT_EXTRA do break input_integration
 
+		if is_key_pressed(client, .V) {
+			tcp_send(client, sim.Client_Cmd{kind = .Abandon})
+		}
+
+		prev_vel := sim.ents_get(&client.ents, client.ent).vel
 		sim.ents_integrate_input(
 			&client.ents,
 			client.ent,
 			client.rtt,
-			&client.input,
+			&client.applied_input,
 		)
+		curr_vel := sim.ents_get(&client.ents, client.ent).vel
+		if linalg.distance(prev_vel, curr_vel) > 100 {
+			client.last_inpulse = time.now()
+		}
 	}
 
 	for &x, i in client.ent_extra {
@@ -943,7 +961,7 @@ client_update :: proc(client: ^Client) {
 			for d in dirs {
 				rotated_dir := sim.vec_of(sim.angle_of(d) + ang)
 
-				offset := la.angle_between(boost_dir, rotated_dir)
+				offset := linalg.angle_between(boost_dir, rotated_dir)
 
 				if offset >= math.PI / 2.5 {
 					continue
@@ -1140,6 +1158,39 @@ client_update :: proc(client: ^Client) {
 					invert_color(get_color(t.color)),
 				)
 			}
+		}
+
+		if e.parry_progress >= 0 {
+			coff: f32
+			color: rl.Color
+			if e.parry_progress < s.parry.cooldown {
+				coff = e.parry_progress / s.parry.cooldown
+				color = rl.RED
+			} else if e.parry_progress <
+			   s.parry.cooldown + s.parry.duration + s.parry.attack.unwind {
+				coff =
+					(e.parry_progress - s.parry.cooldown) /
+					(s.parry.duration + s.parry.attack.unwind)
+				color = rl.WHITE
+			} else {
+				coff =
+					(e.parry_progress -
+						s.parry.cooldown -
+						s.parry.duration -
+						s.parry.attack.unwind) /
+					s.parry.invincibility
+				color = rl.ORANGE
+			}
+
+			rl.DrawRing(
+				pos,
+				sradius + 15,
+				sradius + 20,
+				0,
+				coff * 360,
+				i32(coff * 100),
+				color,
+			)
 		}
 	}
 
@@ -1372,10 +1423,10 @@ main_proc :: proc() {
 	for !rl.WindowShouldClose() {
 		_ = hot.reload(&hr, {module_name = "client"})
 
-		hot.update(&hr)
-
 		runerr := nbio.tick(0)
 		assert(runerr == nil)
+
+		hot.update(&hr)
 
 		free_all(context.temp_allocator)
 	}

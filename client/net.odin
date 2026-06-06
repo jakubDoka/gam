@@ -63,6 +63,8 @@ client_handle_packet :: proc(
 	case sim.Server_State:
 		d: sim.Decoder = {p.packed}
 
+		client.tps = p.tps
+
 		ln := sim.decode(&d, u16) or_return
 		assert(int(ln) < len(client.ents.slots))
 
@@ -104,9 +106,25 @@ client_handle_packet :: proc(
 			}
 
 			packer.bit_set_set(present, int(ne.id.index))
-			synced.reload -= client.rtt
-			if synced.reload < 0 && ne.reload > 0 {
-				synced.reload = ne.reload
+
+			normalize_timer :: proc(
+				client: ^Client,
+				sync: ^f32,
+				current: f32,
+			) {
+				sync^ -= client.rtt
+				if sync^ < 0 && current > 0 {
+					sync^ = current
+				}
+			}
+
+			normalize_timer(client, &synced.reload, ne.reload)
+			synced.parry_progress -= client.rtt
+
+			if synced.net_id == p.you &&
+			   f32(f64(time.since(client.last_inpulse)) / f64(time.Second)) <
+				   client.rtt * 3 {
+				synced.vel = ne.vel
 			}
 
 			x := client_ent_extra_get(client, ne.id)
@@ -135,13 +153,43 @@ client_handle_packet :: proc(
 		}
 
 		client.ent = (net_id_to_ent[p.you] or_else sim.NIL_ENT).id
-		client.input.next_net_id = p.your_next_net_id
+		client.applied_input.next_net_id = p.your_next_net_id
 
 		player_count := sim.decode(&d, u16) or_return
 		for i in 0 ..< min(int(player_count), len(client.players)) {
 			p := &client.players[i]
 			p.input = sim.decode(&d, sim.Client_Input_Keys) or_return
 			p.ent = (net_id_to_ent[p.net_ent] or_else sim.NIL_ENT).id
+		}
+
+		buf := make([]sim.Vec, len(client.ents.slots), context.temp_allocator)
+		marks := make(
+			[dynamic]^sim.Ent,
+			0,
+			len(client.ents.slots),
+			context.temp_allocator,
+		)
+
+		for &e, i in client.ents.slots {
+			buf[i] = e.pos
+			client.ent_extra[i].pos_smoothing += e.pos
+
+			if !packer.bit_set_contains(present, i) {
+				if sim.ent_is_alive(&e) {
+					append(&marks, &e)
+					e.id.gen += 1
+				}
+			}
+		}
+
+		sim.ents_move(&client.ents, client.rtt)
+
+		for m in marks {
+			m.id.gen -= 1
+		}
+
+		for e, i in client.ents.slots {
+			client.ent_extra[i].pos_smoothing -= e.pos
 		}
 	case sim.Server_Map:
 		delete(client.map_buf)
@@ -236,6 +284,8 @@ client_handle_packet :: proc(
 			l.lifetime = ls.lifetime
 		case .Token:
 			fetch_assets(client, &p)
+		case .Ack:
+			panic("TODO")
 		}
 	case sim.Broadcast_Packet:
 		switch &p in p {

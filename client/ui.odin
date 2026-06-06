@@ -268,6 +268,11 @@ UI_Content_Editor :: struct {
 	edit_name:        strings.Builder,
 	create_stat:      bool,
 	create_stat_name: strings.Builder,
+	upload_error:     string,
+	dropped_assets:   #soa[dynamic]struct {
+		base:  sim.Asset,
+		issue: string,
+	},
 }
 
 Stat_Editor_State :: struct {
