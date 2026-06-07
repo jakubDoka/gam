@@ -172,6 +172,7 @@ Client :: struct {
 	bs:                    Client_Build_State,
 	input_display_texture: rl.RenderTexture2D,
 	asset_loader:          ^Req,
+	asset_uploader:        ^Req,
 }
 
 @(rodata)
@@ -641,6 +642,9 @@ client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
 	client.lasers.slots = make([]Laser, MAX_LASERS)
 	client.ent_extra = make([]Ent_Extra, sim.MAX_ENTS_PER_GAME)
 	client.config_allocator = arna.init_from_buffer(make([]u8, 1 << 16))
+	client.content_editing.upload_arena = arna.init_from_buffer(
+		make([]u8, 1 << 14),
+	)
 
 	client.input_pool = make([]Deffered_Client_Input, 64)
 	for &ci in client.input_pool {
@@ -1418,15 +1422,17 @@ main_proc :: proc() {
 
 	rl.SetConfigFlags({.WINDOW_RESIZABLE})
 	rl.InitWindow(800, 600, "gam")
-	rl.SetTargetFPS(60)
+	rl.SetTargetFPS(0)
+
+	core_time: Core_Time
+	core_time.target = 1.0 / 60
 
 	for !rl.WindowShouldClose() {
 		_ = hot.reload(&hr, {module_name = "client"})
 
-		runerr := nbio.tick(0)
-		assert(runerr == nil)
-
 		hot.update(&hr)
+
+		frame_end(&core_time)
 
 		free_all(context.temp_allocator)
 	}
@@ -1440,5 +1446,33 @@ main_proc :: proc() {
 		when sim.TRACK_ALLOCATIONS do sim.tracking_allocator_destroy(&track)
 		hot.unload_libraries(&hr)
 		arna.bulk_destroy(&temp_arna, &global_arna, &init_arna)
+	}
+}
+
+// Mirrors raylib's internal CORE.Time. All values are in seconds.
+Core_Time :: struct {
+	current:  f64, // current time measure
+	previous: f64, // previous time measure
+	frame:    f64, // total frame time (update + draw + wait)
+	target:   f64, // desired frame time; 0 means uncapped
+}
+
+// Frame time control system
+frame_end :: proc(t: ^Core_Time) {
+	t.current = rl.GetTime()
+	wait_time := t.current - t.previous
+	t.previous = t.current
+	t.frame = wait_time
+
+	for t.frame < t.target {
+		runerr := nbio.tick(
+			time.Duration((t.target - t.frame) * f64(time.Second)),
+		)
+		assert(runerr == nil)
+
+		t.current = rl.GetTime()
+		wait_time := t.current - t.previous
+		t.previous = t.current
+		t.frame += wait_time
 	}
 }

@@ -126,14 +126,14 @@ pack :: proc(
 			width := texture.width / unit.x
 			height := texture.height / unit.y
 
-			for y in 0 ..< bitset_dims.y - height + 1 {
-				search: for x in 0 ..< bitset_dims.x - width + 1 {
+			for y in 0 ..= bitset_dims.y - height {
+				search: for x in 0 ..= bitset_dims.x - width {
 
 					for dy in 0 ..< height {
 						for dx in 0 ..< width {
 							taken := bit_set_contains(
 								bitset,
-								(x + dx) + (y + dy) * bitset_dims.y,
+								(x + dx) + (y + dy) * bitset_dims.x,
 							)
 							if taken do continue search
 						}
@@ -143,7 +143,7 @@ pack :: proc(
 						for dx in 0 ..< width {
 							bit_set_set(
 								bitset,
-								(x + dx) + (y + dy) * bitset_dims.y,
+								(x + dx) + (y + dy) * bitset_dims.x,
 							)
 						}
 					}

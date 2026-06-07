@@ -196,8 +196,9 @@ client_asset_upload_body_encode :: proc(
 	return true
 }
 
-client_asset_Upload_body_decode :: proc(
+client_asset_upload_body_decode :: proc(
 	d: ^Decoder,
+	loc := #caller_location,
 ) -> (
 	b: Client_Asset_Upload_Body,
 	ok: bool,
@@ -206,7 +207,8 @@ client_asset_Upload_body_decode :: proc(
 			metas = decode_aligned_slice(
 				d,
 				Asset,
-				decode(d, u32) or_return,
+				decode(d, int, loc = loc) or_return,
+				loc = loc,
 			) or_return,
 		},
 		true
@@ -320,6 +322,7 @@ Server_Cold_State :: struct {
 	},
 }
 
+// TODO: the naming is lacking
 Server_Cmd_Kind :: enum int {
 	Laser,
 	Token,

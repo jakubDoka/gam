@@ -636,7 +636,7 @@ server_handle_packet :: proc(
 
 		payload, _ := mem.alloc_bytes(len(p.packed), 4)
 		copy(payload, p.packed)
-		defer if !ok do delete(payload)
+		defer delete(payload)
 
 		d := sim.Decoder{payload}
 
@@ -695,6 +695,7 @@ server_handle_packet :: proc(
 				Asset_Request{payload = payload},
 			)
 		}
+		payload = {}
 
 		server_tcp_send(
 			server,
@@ -709,17 +710,18 @@ server_handle_packet :: proc(
 	case sim.Client_Asset_Upload:
 		payload, _ := mem.alloc_bytes(len(p.packed), 8)
 		copy(payload, p.packed)
-		defer if !ok do delete(payload)
+		defer delete(payload)
 
 		d := sim.Decoder{payload}
 
-		req := sim.client_asset_Upload_body_decode(&d) or_return
+		req := sim.client_asset_upload_body_decode(&d) or_return
 
 		lru.set(
 			&server.asset_requests,
 			p.token,
 			Asset_Request{payload = payload},
 		)
+		payload = {}
 
 		server_tcp_send(
 			server,
@@ -864,6 +866,8 @@ hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
 		kill := true
 		defer if kill do hctx->on_fail(server)
 
+		assert(hctx.sock != 0)
+
 		if op.recv.err != nil {
 			log.warn("handshake did not arrive:", op.recv.err)
 			return
@@ -900,6 +904,8 @@ hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
 		kill := true
 		defer if kill do hctx->on_fail(server)
 
+		assert(hctx.sock != 0)
+
 		if op.send.err != nil {
 			log.warn("failed to send the server hello:", op.send.err)
 			return
@@ -923,9 +929,10 @@ hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
 		hctx: ^Handshake,
 		server: ^Server,
 	) {
-
 		kill := true
 		defer if kill do hctx->on_fail(server)
+
+		assert(hctx.sock != 0)
 
 		if op.recv.err != nil {
 			log.warn("handshake did not arrive:", op.recv.err)
@@ -984,6 +991,8 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	conn := server.free_conns
 	server.free_conns = conn.next_free
 
+	assert(op.accept.client != 0)
+
 	conn^ = {}
 	conn.tcp_endpoint = op.accept.client_endpoint
 	conn.last_packet = time.now()
@@ -1004,6 +1013,8 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	on_boot :: proc(conn: ^Connection, server: ^Server) {
 		kill := true
 		defer if kill do conn->on_fail(server)
+
+		assert(conn.tcp.sock != 0)
 
 		request := (^sim.Client_Request_Header)(&conn.ch.payload)
 
@@ -1235,9 +1246,11 @@ recv_content :: proc(
 	d := sim.Decoder{payload}
 
 	conn.request_state.payload = payload
-	body := sim.client_asset_Upload_body_decode(&d) or_return
+	body := sim.client_asset_upload_body_decode(&d) or_return
 	conn.request_state.assets = body.metas
 	conn.request_state.buf = make([]u8, size_of(sim.Tag) + 4096)
+
+	log.debug("starting content download:", body.metas)
 
 	do_progress(conn)
 
@@ -1265,7 +1278,19 @@ recv_content :: proc(
 					return false
 				}
 
-				nbio.close(state.write_file, l = server.hr.l)
+				_, sares := sqlite.exec(
+					server.save_asset,
+					sim.hash_prefix(&curr.hash),
+					nm.str(&curr.name),
+					curr.hash,
+					curr.size,
+					curr.type,
+				)
+				sqlite.assert_ok(server.save_asset, sares)
+
+				if state.write_file != 0 {
+					nbio.close(state.write_file, l = server.hr.l)
+				}
 				state.write_file = 0
 				state.written = 0
 				state.rcvd_assets += 1
@@ -1295,7 +1320,8 @@ recv_content :: proc(
 				)
 				if !ok {
 					log.warn(
-						"received corrupted file chunk, deleting the file",
+						"received corrupted file chunk, deleting the file:",
+						source,
 					)
 					err := os.remove(asset_path(curr))
 					if err != nil {
@@ -1325,6 +1351,7 @@ recv_content :: proc(
 				on_recv,
 				all = true,
 				l = server.hr.l,
+				timeout = conn.tcp.timeout,
 			)
 			return true
 		}
@@ -1414,7 +1441,9 @@ server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
 
 	delete(conn.request_state.payload)
 	delete(conn.request_state.buf)
-	nbio.close(conn.request_state.write_file, l = l)
+	if conn.request_state.write_file != 0 {
+		nbio.close(conn.request_state.write_file, l = l)
+	}
 
 	log.debug("killed the connection")
 }

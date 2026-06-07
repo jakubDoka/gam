@@ -1,6 +1,7 @@
 package client
 
 import "../sim"
+import "../util/arna"
 import "../util/b58"
 import "../util/nm"
 import "../util/packer"
@@ -261,18 +262,21 @@ UI_Profiles :: struct {
 }
 
 UI_Content_Editor :: struct {
-	expanded:         bool,
-	selected:         sim.Ent_Stats_ID,
-	stat_edit_state:  sim.Ent_Stats,
-	stat_editor:      Stat_Editor_State,
-	edit_name:        strings.Builder,
-	create_stat:      bool,
-	create_stat_name: strings.Builder,
-	upload_error:     string,
-	dropped_assets:   #soa[dynamic]struct {
+	expanded:             bool,
+	selected:             sim.Ent_Stats_ID,
+	stat_edit_state:      sim.Ent_Stats,
+	stat_editor:          Stat_Editor_State,
+	edit_name:            strings.Builder,
+	create_stat:          bool,
+	create_stat_name:     strings.Builder,
+	upload_error:         string,
+	upload_arena:         arna.Allocator,
+	dropped_assets:       #soa[dynamic]struct {
 		base:  sim.Asset,
+		path:  string,
 		issue: string,
 	},
+	last_prepared_upload: time.Time,
 }
 
 Stat_Editor_State :: struct {
@@ -669,7 +673,9 @@ ui_connection_menu :: proc(client: ^Client) {
 			}
 
 			if entry.state == .Connecting || entry.state == .Disconnecting {
-				ui_load_bar()
+				ui_load_bar(
+					{width = orui.grow(), height = orui.fixed(ROW_HEIGHT)},
+				)
 				continue
 			}
 
@@ -1098,28 +1104,25 @@ ui_connection_menu :: proc(client: ^Client) {
 	}
 }
 
-ui_load_bar :: proc() {
+ui_load_bar :: proc(config: Label_Config) {
+	config := config
+
 	elipsis := "..."
-	ui_label(
-		id("server-info-loading"),
-		{
-			label = fmt.tprint(
-				"Loading",
-				elipsis[:int(rl.GetTime() * 3) % 3 + 1],
-				sep = "",
-			),
-			width = orui.grow(),
-			height = orui.fixed(ROW_HEIGHT),
-			background = ui_color_slot(
-				.SLOT1,
-				rl.ColorLerp(
-					ui_color(.SECONDARY),
-					ui_color(.SECONDARY_FAINT),
-					(math.sin(f32(rl.GetTime() * 5)) + 1) / 2,
-				),
-			),
-		},
+	config.label = fmt.tprint(
+		"Loading",
+		elipsis[:int(rl.GetTime() * 3) % 3 + 1],
+		sep = "",
 	)
+	config.background = ui_color_slot(
+		.SLOT1,
+		rl.ColorLerp(
+			ui_color(.SECONDARY),
+			ui_color(.SECONDARY_FAINT),
+			(math.sin(f32(rl.GetTime() * 5)) + 1) / 2,
+		),
+	)
+
+	ui_label(id("server-info-loading"), config)
 }
 
 ui_clicked_off :: proc() -> bool {

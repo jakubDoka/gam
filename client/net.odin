@@ -285,7 +285,7 @@ client_handle_packet :: proc(
 		case .Token:
 			fetch_assets(client, &p)
 		case .Ack:
-			panic("TODO")
+			upload_assets(client, &p)
 		}
 	case sim.Broadcast_Packet:
 		switch &p in p {
@@ -329,11 +329,17 @@ client_handle_packet :: proc(
 }
 
 Req :: struct {
-	using hctx:  Handshake,
-	metas:       []sim.Asset,
-	files_recvd: int,
-	global_hash: sim.Hash,
-	pk:          sim.Private_Key,
+	using hctx:       Handshake,
+	metas:            []sim.Asset,
+	paths:            []string,
+	buf:              []u8,
+	files_recvd:      int,
+	files_uploaded:   int,
+	red_portion:      int,
+	buffered_portion: int,
+	read_file:        nbio.Handle,
+	global_hash:      sim.Hash,
+	pk:               sim.Private_Key,
 }
 
 #assert(offset_of(Req, hctx) == 0)
@@ -368,10 +374,134 @@ req_connect :: proc(
 			log.error(reason)
 		}
 
-		client.asset_loader = nil
+		if client.asset_loader == req do client.asset_loader = nil
+		if client.asset_uploader == req do client.asset_uploader = nil
 
 		delete(req.metas)
+		delete(req.buf)
+
 		free(req)
+	}
+}
+
+upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
+	ctx := &client.content_editing
+
+	if len(ctx.dropped_assets) == 0 {
+		log.warn("we are trying to upload assets but nothing is dropped")
+		return
+	}
+
+	req, req_slot := req_connect(client, on_boot)
+
+	req_slot.kind = .Upload_Content
+	copy(req_slot.inline_body[:], p.token[:])
+	req.metas = slice.clone(ctx.dropped_assets.base[:len(ctx.dropped_assets)])
+	req.paths = ctx.dropped_assets.path[:len(ctx.dropped_assets)]
+	req.buf = make([]u8, size_of(sim.Tag) + 4096)
+
+	client.asset_uploader = req
+
+	on_boot :: proc(req: ^Req, l: ^nbio.Event_Loop) {
+		do_progress(req)
+	}
+
+	do_progress :: proc(req: ^Req) -> bool {
+		client := (^Client)(req.host.asoc_data)
+
+		for req.files_uploaded < len(req.metas) {
+			path := req.paths[req.files_uploaded]
+			curr := req.metas[req.files_uploaded]
+
+			remining := curr.size - req.red_portion
+
+			if remining == 0 {
+				if req.read_file != 0 {
+					nbio.close(req.read_file, l = client.l)
+				}
+				req.red_portion = 0
+				req.read_file = 0
+				req.files_uploaded += 1
+				continue
+			}
+
+			if req.read_file == 0 {
+				nbio.open_poly(path, req, on_open, l = client.l)
+				return true
+			}
+
+			if req.buffered_portion > 0 {
+				req.red_portion += req.buffered_portion
+
+				buf := req.buf[size_of(sim.Tag):][:req.buffered_portion]
+
+				sim.encrypt(&req.secret, (^sim.Tag)(raw_data(req.buf)), buf)
+
+				nbio.send_poly(
+					req.sock,
+					{req.buf[:size_of(sim.Tag) + req.buffered_portion]},
+					req,
+					on_send,
+					l = client.l,
+				)
+				return true
+			}
+
+			rlen := min(remining, len(req.buf) - size_of(sim.Tag))
+			buf := req.buf[size_of(sim.Tag):][:rlen]
+
+			nbio.read_poly(
+				req.read_file,
+				req.red_portion,
+				buf,
+				req,
+				on_read,
+				all = true,
+				l = client.l,
+			)
+			return true
+		}
+
+		return false
+	}
+
+	on_open :: proc(op: ^nbio.Operation, req: ^Req) {
+		kill := true
+		defer if kill do req->on_fail("failed to open file")
+
+		if op.open.err != nil {
+			log.error("failed to open", op.open.path, ":", op.recv.err)
+			return
+		}
+
+		req.read_file = op.open.handle
+		kill = !do_progress(req)
+	}
+
+	on_read :: proc(op: ^nbio.Operation, req: ^Req) {
+		kill := true
+		defer if kill do req->on_fail("failed to read from file")
+
+		if op.read.err != nil {
+			log.error("failed to read file chunk:", op.send.err)
+			return
+		}
+
+		req.buffered_portion = len(op.read.buf)
+		kill = !do_progress(req)
+	}
+
+	on_send :: proc(op: ^nbio.Operation, req: ^Req) {
+		kill := true
+		defer if kill do req->on_fail("failed to send file chunk")
+
+		if op.send.err != nil {
+			log.error("failed to send file chunk:", op.send.err)
+			return
+		}
+
+		req.buffered_portion = 0
+		kill = !do_progress(req)
 	}
 }
 

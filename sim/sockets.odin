@@ -1,6 +1,7 @@
 package sim
 
 import "../util/hot"
+import "core:fmt"
 import "core:log"
 import "core:nbio"
 import "core:reflect"
@@ -417,6 +418,8 @@ tcp_connection_send :: proc(
 		ok = packet.encode(packet.data, &e)
 		assert(ok)
 
+		assert(conn.sock != 0)
+
 		nbio.timeout_poly2(
 			LATENCY * time.Millisecond,
 			conn,
@@ -505,6 +508,8 @@ tcp_connection_ensure_sending :: proc(
 	if conn.buffered == 0 || conn.sender != nil {
 		return
 	}
+
+	assert(conn.sock != 0)
 
 	conn.sender = nbio.send_poly(
 		conn.sock,
