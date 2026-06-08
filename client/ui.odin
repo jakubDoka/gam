@@ -153,12 +153,16 @@ UI_Reactor :: struct {
 }
 
 UI_Event_Kind :: enum {
-	Edit_Stat,
+	Select_Team,
+	Delete_Team,
+	Select_Profile,
 }
 
 UI_Event :: struct {
-	kind: UI_Event_Kind,
-	stat: sim.Ent_Stats_ID,
+	kind:     UI_Event_Kind,
+	team:     sim.Ent_Team_ID,
+	team_idx: int,
+	name:     nm.Name,
 }
 
 emit_event :: #force_no_inline proc(
@@ -285,6 +289,7 @@ UI_Profiles :: struct {
 UI_Content_Editor :: struct {
 	expanded:             bool,
 	selected:             sim.Ent_Stats_ID,
+	prev_scroll:          f32,
 	stat_edit_state:      sim.Ent_Stats,
 	stat_editor:          Stat_Editor_State,
 	edit_name:            strings.Builder,
@@ -947,12 +952,10 @@ ui_connection_menu :: proc(client: ^Client) {
 		selected_profile := ui_get_selected_user(client).name
 
 		i := 0
-		was_selected := false
 		profile_query, pqs := sqlite.query(client.load_profiles, Profile)
 		for row in sqlite.query_next(&profile_query) {
 			row := row
 			selected := nm.str(&row.name) == nm.str(&selected_profile)
-			was_selected |= selected
 
 			if ui_button(
 				id("profile-name", i),
@@ -963,17 +966,11 @@ ui_connection_menu :: proc(client: ^Client) {
 					toggle = !selected,
 				},
 			) {
-				selected_profile = row.name
-				if selected do selected_profile = {}
-
-				_, save_err := sqlite.exec(
-					client.save_input_content,
-					SELECTED_PROFILE_CID,
-					nm.str(&selected_profile),
+				emit_event(
+					client,
+					.Select_Profile,
+					{name = selected ? {} : row.name},
 				)
-				sqlite.assert_ok(client.save_input_content, save_err)
-				ctx.editing = false
-				selected = !was_selected
 			}
 
 			if selected {
@@ -1546,7 +1543,7 @@ ui_ship_selection :: proc(client: ^Client) {
 					!alives[tid],
 				},
 			) {
-				client.selected_team = tid
+				emit_event(client, .Select_Team, {team = tid})
 			}
 		}
 	}
@@ -1811,16 +1808,21 @@ ui_build :: proc(client: ^Client) {
 		}
 	}
 
-	for ev in client.events {
+	for &ev in client.events {
 		switch ev.kind {
-		case .Edit_Stat:
-			ctx := &client.content_editing
-
-			stats := sim.ents_stats_get(&client.ents, ev.stat)
-			ctx.selected = stats.id
-			clear(&ctx.edit_name.buf)
-			append(&ctx.edit_name.buf, nm.str(&stats.name))
-			ctx.stat_edit_state = stats^
+		case .Select_Team:
+			client.selected_team = ev.team
+		case .Delete_Team:
+			ordered_remove(&client.map_editing.teams, ev.team_idx)
+			client.map_editing.team = 0
+		case .Select_Profile:
+			_, save_err := sqlite.exec(
+				client.save_input_content,
+				SELECTED_PROFILE_CID,
+				nm.str(&ev.name),
+			)
+			sqlite.assert_ok(client.save_input_content, save_err)
+			client.profiles.editing = false
 		}
 	}
 	clear(&client.events)

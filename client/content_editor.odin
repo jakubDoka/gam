@@ -37,8 +37,9 @@ ui_content_editor :: proc(client: ^Client) {
 		ctx.expanded = false
 	}
 
+	ce := id("content-ediitor")
 	box(
-		id("content-ediitor"),
+		ce,
 		{
 			height = orui.grow(),
 			width = orui.fixed(500),
@@ -51,33 +52,105 @@ ui_content_editor :: proc(client: ^Client) {
 		},
 	)
 
-	prefix := min(1, len(client.ents.stats))
-	for &stats, i in client.ents.stats[prefix:] {
-		selected := ctx.selected == stats.id
+	stats := sim.ents_stats_get(&client.ents, ctx.selected)
+	if stats == sim.NIL_STATS {
+		prev_scroll := orui.scroll_offset().y
+		if ctx.prev_scroll != 0 {
+			orui.set_scroll_offset(ctx.prev_scroll)
+			ctx.prev_scroll = 0
+		}
 
+		prefix := min(1, len(client.ents.stats))
+		for &stats, i in client.ents.stats[prefix:] {
+			if ui_button(
+				id("stat-selector", i),
+				{
+					label = nm.str(&stats.name),
+					width = orui.grow(),
+					height = orui.fixed(ROW_HEIGHT),
+					background = .SECONDARY,
+					focused_color = .PRIMARY,
+				},
+			) {
+				ctx.selected = stats.id
+				ctx.prev_scroll = prev_scroll
+				orui.set_scroll_offset(ce, 0)
+				clear(&ctx.edit_name.buf)
+				append(&ctx.edit_name.buf, nm.str(&stats.name))
+				ctx.stat_edit_state = stats
+			}
+		}
+
+		if ctx.create_stat {
+			box(
+				id("create-stat-frame"),
+				{
+					background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
+					width = orui.grow(),
+					gap = PADDING,
+				},
+			)
+
+			text, confirmed := ui_text_input(
+				id("create-stat-name-input"),
+				&ctx.create_stat_name,
+				{
+					width = orui.grow(),
+					height = orui.fixed(ROW_HEIGHT),
+					placeholder = "name...",
+					border = 1,
+				},
+			)
+
+			already_taken := len(text) == 0
+			for &stat in client.ents.stats {
+				already_taken |= nm.str(&stat.name) == text
+			}
+
+			if ui_button(
+				   id("create-stat-confirm"),
+				   {
+					   width = orui.fixed(ROW_HEIGHT),
+					   height = orui.fixed(ROW_HEIGHT),
+					   icon = .ICON_FILE_SAVE_CLASSIC,
+					   disabled = already_taken,
+				   },
+			   ) ||
+			   confirmed {
+				stats: sim.Ent_Stats
+				stats.name = nm.from_str(text)
+				tcp_send(
+					client,
+					sim.Client_Content_Action{kind = .Create, stats = stats},
+				)
+			}
+
+			ctx.create_stat ~=
+				ui_icon_button(
+					id("create-stat-close"),
+					ROW_HEIGHT,
+					.ICON_CROSS,
+					"Cancel new stat",
+				) ||
+				confirmed
+		} else {
+			ctx.create_stat ~= ui_button(
+				id("create-stat-expand"),
+				{
+					label = "+",
+					width = orui.grow(),
+					height = orui.fixed(ROW_HEIGHT),
+				},
+			)
+		}
+
+		ui_file_upload(client)
+	} else {
 		selector: {
 			box(id("stat-selector-row"), {width = orui.grow(), gap = PADDING})
 
-			if !selected {
-				if ui_button(
-					id("stat-selector", i),
-					{
-						label = nm.str(&stats.name),
-						width = orui.grow(),
-						height = orui.fixed(ROW_HEIGHT),
-						toggle = selected,
-						background = .SECONDARY,
-						focused_color = .PRIMARY,
-					},
-				) {
-					emit_event(client, .Edit_Stat, {stat = stats.id})
-				}
-
-				break selector
-			}
-
 			text, _ := ui_text_input(
-				id("stat-selector-name-edit", i),
+				id("stat-selector-name-edit"),
 				&ctx.edit_name,
 				{
 					width = orui.grow(),
@@ -89,9 +162,9 @@ ui_content_editor :: proc(client: ^Client) {
 
 			ctx.stat_edit_state.name = nm.from_str(text)
 
-			if !reflect.equal(stats, ctx.stat_edit_state, true) {
+			if !reflect.equal(stats^, ctx.stat_edit_state, true) {
 				if ui_icon_button(
-					id("stat-selector-save", i),
+					id("stat-selector-save"),
 					ROW_HEIGHT,
 					.ICON_FILE_OPEN,
 					"Save changes",
@@ -108,7 +181,7 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 
 			if ui_icon_button(
-				id("stat-selector-close", i),
+				id("stat-selector-close"),
 				ROW_HEIGHT,
 				.ICON_CROSS,
 				"Close editor",
@@ -117,336 +190,258 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 		}
 
-		if selected {
-			box(
-				id("struct-editor-frame"),
-				{
-					background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
-					width = orui.grow(),
-					padding = orui.padding(PADDING),
-				},
-			)
-
-			ctx.stat_editor.root = id("stat-struct-editor")
-			ctx.stat_editor.eidt_root = id("edit-struct-editor", i)
-			ui_stat_editor(
-				client,
-				&ctx.stat_editor,
-				ctx.stat_edit_state,
-				stats,
-			)
-		}
-	}
-
-	if ctx.create_stat {
 		box(
-			id("create-stat-frame"),
+			id("struct-editor-frame"),
 			{
 				background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
 				width = orui.grow(),
-				gap = PADDING,
+				padding = orui.padding(PADDING),
 			},
 		)
 
-		text, confirmed := ui_text_input(
-			id("create-stat-name-input"),
-			&ctx.create_stat_name,
-			{
-				width = orui.grow(),
-				height = orui.fixed(ROW_HEIGHT),
-				placeholder = "name...",
-				border = 1,
-			},
-		)
+		ctx.stat_editor.root = id("stat-struct-editor")
+		ctx.stat_editor.eidt_root = id("edit-struct-editor")
+		ui_stat_editor(client, &ctx.stat_editor, ctx.stat_edit_state, stats^)
+	}
+}
 
-		already_taken := len(text) == 0
-		for &stat in client.ents.stats {
-			already_taken |= nm.str(&stat.name) == text
-		}
+ui_file_upload :: proc(client: ^Client) {
+	ctx := &client.content_editing
 
-		if ui_button(
-			   id("create-stat-confirm"),
-			   {
-				   width = orui.fixed(ROW_HEIGHT),
-				   height = orui.fixed(ROW_HEIGHT),
-				   icon = .ICON_FILE_SAVE_CLASSIC,
-				   disabled = already_taken,
-			   },
-		   ) ||
-		   confirmed {
-			stats: sim.Ent_Stats
-			stats.name = nm.from_str(text)
-			tcp_send(
-				client,
-				sim.Client_Content_Action{kind = .Create, stats = stats},
+	area_id := id("drop-sprite-area")
+
+	rect := orui.bounding_rect()
+	hovered := rl.CheckCollisionPointRec(rl.GetMousePosition(), rect)
+
+	load: if hovered && rl.IsFileDropped() {
+		ctx.upload_error = ""
+
+		raw_files := rl.LoadDroppedFiles()
+		defer rl.UnloadDroppedFiles(raw_files)
+		files := raw_files.paths[:max(raw_files.capacity, raw_files.count)]
+
+		context.allocator = arna.allocator(&ctx.upload_arena)
+		free_all(context.allocator)
+		ctx.dropped_assets = {}
+
+		resize(&ctx.dropped_assets, len(files))
+
+		for file, i in files {
+			entry := &ctx.dropped_assets[i]
+
+			filename := os.base(string(file))
+
+			mtype: Maybe(sim.Asset_Type)
+			for ext, i in sim.EXT_BY_TYPE {
+				if strings.ends_with(filename, ext) {
+					mtype = i
+				}
+			}
+
+			entry.issue = "Invalid file extension."
+			type := mtype.? or_continue
+
+			filename = filename[:len(filename) - len(sim.EXT_BY_TYPE[type])]
+
+			entry.issue = "Name is too long."
+			entry.base.type = type
+			entry.base.name = nm.from_str(filename) or_continue
+
+			entry.issue = "Cant load the file for some reason!"
+			bytes, err := os.read_entire_file(
+				string(file),
+				context.temp_allocator,
 			)
-		}
+			if err != nil {
+				log.info("Failed to open a file at", file, ":", err)
+				continue
+			}
 
-		ctx.create_stat ~=
-			ui_icon_button(
-				id("create-stat-expand"),
-				ROW_HEIGHT,
-				.ICON_CROSS,
-				"Cancel new stat",
-			) ||
-			confirmed
-	} else {
-		ctx.create_stat ~= ui_button(
-			id("create-stat-expand"),
-			{
-				label = "+",
-				width = orui.grow(),
-				height = orui.fixed(ROW_HEIGHT),
-			},
-		)
+			sim.hash(bytes, &entry.base.hash)
+			entry.base.size = len(bytes)
+
+			entry.path = strings.clone_from_cstring(file)
+			entry.issue = ""
+		}
 	}
 
-	{
-		area_id := id("drop-sprite-area")
+	box(
+		area_id,
+		{
+			border = orui.border(1),
+			border_color = ui_color(.PRIMARY),
+			background_color = ui_color(
+				hovered && len(ctx.dropped_assets) == 0 ? .SECONDARY : .PRIMARY_FAINT,
+			),
+			width = orui.grow(),
+			height = {.Fit, 0, 200, 0},
+			padding = orui.padding(PADDING),
+			gap = PADDING,
+			direction = .TopToBottom,
+		},
+	)
 
-		rect := orui.bounding_rect()
-		hovered := rl.CheckCollisionPointRec(rl.GetMousePosition(), rect)
+	if len(ctx.dropped_assets) == 0 {
+		msg := "Drag and drop file here to upload to\n the server (*.png)"
 
-		if hovered {
-			load: if rl.IsFileDropped() {
-				ctx.upload_error = ""
+		ui_label(
+			id("drop-asset-area-text"),
+			{
+				label = msg,
+				background = .NONE,
+				width = orui.grow(),
+				height = orui.grow(),
+			},
+		)
+	} else if client.asset_uploader != nil {
+		ui_label(
+			id("drop-asset-area-text"),
+			{
+				label = fmt.tprintf(
+					"Uploading %v/%v ...",
+					client.asset_uploader.files_uploaded,
+					len(ctx.dropped_assets),
+				),
+				background = .NONE,
+				width = orui.grow(),
+				height = orui.grow(),
+			},
+		)
+	} else if time.since(ctx.last_prepared_upload) < time.Second * 3 {
+		ui_load_bar({width = orui.grow(), height = orui.grow()})
+	} else {
+		files := rl.LoadDroppedFiles()
 
-				raw_files := rl.LoadDroppedFiles()
-				defer rl.UnloadDroppedFiles(raw_files)
-				files := raw_files.paths[:max(
-					raw_files.capacity,
-					raw_files.count,
-				)]
+		{box(
+				id("drop-assets-upload-table"),
+				{
+					width = orui.grow(),
+					layout = .Grid,
+					col_sizes = {
+						orui.grow(),
+						orui.fit(),
+						orui.fit(),
+						orui.fit(),
+					},
+					gap = PADDING,
+					cols = 4,
+					rows = i32(len(ctx.dropped_assets)),
+				},
+			)
 
-				log.info(raw_files)
-
-				context.allocator = arna.allocator(&ctx.upload_arena)
-				free_all(context.allocator)
-				ctx.dropped_assets = {}
-
-				resize(&ctx.dropped_assets, len(files))
-
-				for file, i in files {
-					entry := &ctx.dropped_assets[i]
-
-					filename := os.base(string(file))
-
-					mtype: Maybe(sim.Asset_Type)
-					for ext, i in sim.EXT_BY_TYPE {
-						if strings.ends_with(filename, ext) {
-							mtype = i
-						}
-					}
-
-					entry.issue = "Invalid file extension."
-					type := mtype.? or_continue
-
-					filename = filename[:len(filename) -
-					len(sim.EXT_BY_TYPE[type])]
-
-					entry.issue = "Name is too long."
-					entry.base.type = type
-					entry.base.name = nm.from_str(filename) or_continue
-
-					entry.issue = "Cant load the file for some reason!"
-					bytes, err := os.read_entire_file(
-						string(file),
-						context.temp_allocator,
-					)
-					if err != nil {
-						log.info("Failed to open a file at", file, ":", err)
-						continue
-					}
-
-					sim.hash(bytes, &entry.base.hash)
-					entry.base.size = len(bytes)
-
-					entry.path = strings.clone_from_cstring(file)
-					entry.issue = ""
+			for &asset, i in ctx.dropped_assets {
+				if asset.issue != "" {
+					ui_label(id("issue-idk", i), {label = asset.issue})
+					continue
 				}
+
+				ui_label(
+					id("dropped-file-name", i),
+					{
+						label = nm.str(&asset.base.name),
+						height = orui.fixed(ROW_HEIGHT),
+						width = orui.grow(),
+						align = .Start,
+					},
+				)
+
+				EXT_TO_ICON := [sim.Asset_Type]rl.GuiIconName {
+					.Map    = .ICON_GRID,
+					.Sprite = .ICON_FILETYPE_IMAGE,
+				}
+
+				ui_icon_button(
+					id("dropped-file-type", i),
+					ROW_HEIGHT,
+					EXT_TO_ICON[asset.base.type],
+					sim.EXT_BY_TYPE[asset.base.type],
+					{background = .SECONDARY},
+				)
+
+				number := asset.base.size
+				label := "b"
+				switch asset.base.size {
+				case 0 ..< 1 << 10:
+				case 1 << 10 ..< 1 << 20:
+					label = "k"
+					number /= 1 << 10
+				case 1 << 20 ..< 1 << 30:
+					label = "m"
+					number /= 1 << 20
+				}
+
+				ui_label(
+					id("dropped-file-size", i),
+					{
+						label = fmt.tprint(number, label, sep = ""),
+						height = orui.fixed(ROW_HEIGHT),
+						width = orui.grow(),
+					},
+				)
+
+				ui_label(
+					id("dropped-file-hash", i),
+					{
+						label = b58.encode(asset.base.hash[:])[:8],
+						height = orui.fixed(ROW_HEIGHT),
+						width = orui.grow(),
+					},
+				)
 			}
 		}
 
 		box(
-			area_id,
+			id("drop-assets-upload-spacer"),
 			{
-				border = orui.border(1),
-				border_color = ui_color(.PRIMARY),
-				background_color = ui_color(
-					hovered && len(ctx.dropped_assets) == 0 ? .SECONDARY : .PRIMARY_FAINT,
-				),
+				height = orui.grow(),
 				width = orui.grow(),
-				height = {.Fit, 0, 200, 0},
-				padding = orui.padding(PADDING),
-				gap = PADDING,
 				direction = .TopToBottom,
 			},
 		)
 
-		if len(ctx.dropped_assets) == 0 {
-			msg := "Drag and drop file here to upload to\n the server (*.png)"
+		{box(
+				id("drop-assets-shift"),
+				{height = orui.grow(), width = orui.grow()},
+			)}
 
-			ui_label(
-				id("drop-asset-area-text"),
-				{
-					label = msg,
-					background = .NONE,
-					width = orui.grow(),
-					height = orui.grow(),
-				},
-			)
-		} else if client.asset_uploader != nil {
-			ui_label(
-				id("drop-asset-area-text"),
-				{
-					label = fmt.tprintf(
-						"Uploading %v/%v ...",
-						client.asset_uploader.files_uploaded,
-						len(ctx.dropped_assets),
-					),
-					background = .NONE,
-					width = orui.grow(),
-					height = orui.grow(),
-				},
-			)
-		} else if time.since(ctx.last_prepared_upload) < time.Second * 3 {
-			ui_load_bar({width = orui.grow(), height = orui.grow()})
-		} else {
-			files := rl.LoadDroppedFiles()
+		box(
+			id("drop-assets-control-row"),
+			{width = orui.grow(), gap = PADDING},
+		)
 
-			{box(
-					id("drop-assets-upload-spacer"),
-					{
-						width = orui.grow(),
-						layout = .Grid,
-						col_sizes = {
-							orui.grow(),
-							orui.fit(),
-							orui.fit(),
-							orui.fit(),
-						},
-						gap = PADDING,
-						cols = 4,
-						rows = i32(len(ctx.dropped_assets)),
-					},
-				)
+		if ui_button(
+			id("drop-assets-upload-button"),
+			{
+				label = "upload",
+				width = orui.grow(),
+				background = .SECONDARY,
+				focused_color = .PRIMARY,
+			},
+		) {
+			token: sim.Hash
+			crypto.rand_bytes(token[:])
 
-				for &asset, i in ctx.dropped_assets {
-					if asset.issue != "" {
-						ui_label(id("issue-idk", i), {label = asset.issue})
-						continue
-					}
-
-					ui_label(
-						id("dropped-file-name", i),
-						{
-							label = nm.str(&asset.base.name),
-							height = orui.fixed(ROW_HEIGHT),
-							width = orui.grow(),
-							align = .Start,
-						},
-					)
-
-					EXT_TO_ICON := [sim.Asset_Type]rl.GuiIconName {
-						.Map    = .ICON_GRID,
-						.Sprite = .ICON_FILETYPE_IMAGE,
-					}
-
-					ui_icon_button(
-						id("dropped-file-type", i),
-						ROW_HEIGHT,
-						EXT_TO_ICON[asset.base.type],
-						sim.EXT_BY_TYPE[asset.base.type],
-						{background = .SECONDARY},
-					)
-
-					number := asset.base.size
-					label := "b"
-					switch asset.base.size {
-					case 0 ..< 1 << 10:
-					case 1 << 10 ..< 1 << 20:
-						label = "k"
-						number /= 1 << 10
-					case 1 << 20 ..< 1 << 30:
-						label = "m"
-						number /= 1 << 20
-					}
-
-					ui_label(
-						id("dropped-file-size", i),
-						{
-							label = fmt.tprint(number, label, sep = ""),
-							height = orui.fixed(ROW_HEIGHT),
-							width = orui.grow(),
-						},
-					)
-
-					ui_label(
-						id("dropped-file-hash", i),
-						{
-							label = b58.encode(asset.base.hash[:])[:8],
-							height = orui.fixed(ROW_HEIGHT),
-							width = orui.grow(),
-						},
-					)
-				}
-			}
-
-			box(
-				id("drop-assets-upload-spacer"),
-				{
-					height = orui.grow(),
-					width = orui.grow(),
-					direction = .TopToBottom,
+			tcp_send(
+				client,
+				sim.Client_Asset_Upload {
+					token = token,
+					metas = ctx.dropped_assets.base[:len(ctx.dropped_assets)],
 				},
 			)
 
-			{box(
-					id("drop-assets-shift"),
-					{height = orui.grow(), width = orui.grow()},
-				)}
+			ctx.last_prepared_upload = time.now()
+		}
 
-			box(
-				id("drop-assets-control-row"),
-				{width = orui.grow(), gap = PADDING},
-			)
-
-			if ui_button(
-				id("drop-assets-upload-button"),
-				{
-					label = "upload",
-					width = orui.grow(),
-					background = .SECONDARY,
-					focused_color = .PRIMARY,
-				},
-			) {
-				token: sim.Hash
-				crypto.rand_bytes(token[:])
-
-				tcp_send(
-					client,
-					sim.Client_Asset_Upload {
-						token = token,
-						metas = ctx.dropped_assets.base[:len(
-							ctx.dropped_assets,
-						)],
-					},
-				)
-
-				ctx.last_prepared_upload = time.now()
-			}
-
-			if ui_button(
-				id("drop-assets-clear-button"),
-				{
-					label = "clear",
-					width = orui.grow(),
-					background = .SECONDARY,
-					focused_color = .PRIMARY,
-				},
-			) {
-				ctx.dropped_assets = {}
-			}
+		if ui_button(
+			id("drop-assets-clear-button"),
+			{
+				label = "clear",
+				width = orui.grow(),
+				background = .SECONDARY,
+				focused_color = .PRIMARY,
+			},
+		) {
+			ctx.dropped_assets = {}
 		}
 	}
 }
@@ -505,6 +500,8 @@ ui_stat_editor :: proc(
 	edited: any,
 	original: any,
 ) {
+	assert(edited.id == original.id)
+
 	info := type_info_of(reflect.typeid_base(edited.id)).variant.(rt.Type_Info_Struct)
 
 	expanded_count: i32 = 0

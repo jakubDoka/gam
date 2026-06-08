@@ -398,8 +398,7 @@ ui_map_editor :: proc(client: ^Client) {
 					.ICON_BIN,
 					"Delete team",
 				) {
-					ordered_remove(&ctx.teams, i)
-					ctx.team = 0
+					emit_event(client, .Delete_Team, {team_idx = prefix + i})
 				}
 
 				if ui_icon_button(
