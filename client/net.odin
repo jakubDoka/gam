@@ -433,9 +433,12 @@ upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
 			if req.buffered_portion > 0 {
 				req.red_portion += req.buffered_portion
 
-				buf := req.buf[size_of(sim.Tag):][:req.buffered_portion]
+				tag, source := sim.split_crypt_tag(
+					req.buf,
+					req.buffered_portion,
+				)
 
-				sim.encrypt(&req.secret, (^sim.Tag)(raw_data(req.buf)), buf)
+				sim.encrypt(&req.secret, tag, source)
 
 				nbio.send_poly(
 					req.sock,
@@ -447,8 +450,7 @@ upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
 				return true
 			}
 
-			rlen := min(remining, len(req.buf) - size_of(sim.Tag))
-			buf := req.buf[size_of(sim.Tag):][:rlen]
+			_, buf := sim.split_crypt_tag(req.buf, remining)
 
 			nbio.read_poly(
 				req.read_file,

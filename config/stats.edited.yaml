@@ -18,7 +18,7 @@ snipa:
     sprite_factor_minus_one: 0.2
     sprite: blah
   attack:
-    bullet: snip-shot
+    bullet: beam
   parry:
     invincibility: 0.3
     duration: 1
@@ -92,3 +92,33 @@ spawner:
   health:
     energy: 11
     recharge_speed: 2
+laser:
+  kind: Laser
+  physics:
+    speed: 1000
+    lifetime: 0.2
+    radius: 8
+    body_damage: 4
+beam:
+  kind: Beam
+  physics:
+    speed: 600
+    lifetime: 0.5
+    radius: 8
+    body_damage: 4
+  trail:
+    quantity_per_tick: 1
+    particle:
+      lifetime: 0.2
+beamer:
+  playable: true
+  kind: Unit
+  physics:
+    speed: 300
+    friction: 1
+    radius: 32
+    sprite: cannon
+  attack:
+    bullet: beam
+  turret:
+    reload: 1

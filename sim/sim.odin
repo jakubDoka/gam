@@ -67,7 +67,7 @@ DRAWS_ENERGY :: bit_set[Ent_Kind]{.Building, .Unit, .PowerSource}
 AUTO_RECONNECT :: bit_set[Ent_Kind]{.Unit}
 REPELS :: bit_set[Ent_Kind]{.Unit}
 COLLIDES_WITH_WALLS :: ~bit_set[Ent_Kind]{.Shell}
-COLLIDES_WITH_OTHERS :: ~bit_set[Ent_Kind]{.Shell}
+COLLIDES_WITH_OTHERS :: ~bit_set[Ent_Kind]{.Shell, .Beam}
 
 Ent_Kind :: enum u8 {
 	Building,
@@ -524,6 +524,8 @@ ents_attack_low :: proc(
 	pos: Vec,
 	next_net_id: ^Ent_Net_ID,
 ) {
+	if s.bullet.id == 0 do return
+
 	e := ents_get(ents, e)
 
 	e.vel -= linalg.normalize(pos - e.pos) * s.recoil
@@ -537,8 +539,6 @@ ents_attack_low :: proc(
 		e.counter = 0
 	}
 
-	assert(s.bullet.id != 0)
-
 	state: rand.PCG_Random_State
 	context.random_generator = rand.pcg_random_generator(&state)
 	rt.random_generator_reset_u64(
@@ -548,6 +548,8 @@ ents_attack_low :: proc(
 
 	for i in 0 ..< s.bullets_per_shot_minus_one + 1 {
 		bs := ents_stats_get(ents, s.bullet.id)
+
+		if bs.kind == .Laser && !ents_is_authoritative(ents) do return
 
 		be := ents_add(ents, next_net_id)
 		if be == NIL_ENT do break
@@ -681,6 +683,7 @@ laser_iter_next :: proc(
 
 ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	s := ents_stats_get(ents, e.stats)
+	if s.kind not_in COLLIDES_WITH_OTHERS do return
 	radius := ents_radius(ents, e.id)
 
 	overscan := radius / linalg.length(e.vel)
@@ -805,6 +808,8 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	for oent in ents_query_next(&iter) {
 		if oent == e do continue
 		oradius := ents_radius(ents, oent.id)
+		os := ents_stats_get(ents, oent.stats)
+		if os.kind not_in COLLIDES_WITH_OTHERS do continue
 
 		min_dist := radius + oradius
 		if linalg.length2(e.pos - oent.pos) < min_dist * min_dist - 1 {
@@ -900,6 +905,7 @@ ents_move :: proc(ents: ^Ents, delta: f32) {
 		index_iter := ents_iter(ents)
 		for e in ents_iter_next(&index_iter) {
 			s := ents_stats_get(ents, e.stats)
+			if s.kind not_in COLLIDES_WITH_OTHERS do continue
 			pstate := &ents.pstate[e.id.index]
 			pstate^ = {
 				fuel = delta,
@@ -938,9 +944,9 @@ ents_move :: proc(ents: ^Ents, delta: f32) {
 		}
 	}
 
-	OVERLA_ELIM_ROUNDS :: 4
+	OVERLAP_ELIM_ROUNDS :: 4
 
-	for _ in 0 ..< OVERLA_ELIM_ROUNDS {
+	for _ in 0 ..< OVERLAP_ELIM_ROUNDS {
 		iter := ents_iter(ents)
 		for e in ents_iter_next(&iter) {
 			eliminate_overlap(ents, e)
@@ -950,12 +956,15 @@ ents_move :: proc(ents: ^Ents, delta: f32) {
 
 eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 	s := ents_stats_get(ents, e.stats)
+	if s.kind not_in COLLIDES_WITH_OTHERS do return
 	radius := ents_radius(ents, e.id)
 
 	iter := ents_query(ents, e.pos, radius)
 	for oent in ents_query_next(&iter) {
 		if e == oent do continue
 		os := ents_stats_get(ents, oent.stats)
+
+		if os.kind not_in COLLIDES_WITH_OTHERS do continue
 
 		oradius := ents_radius(ents, oent.id)
 
@@ -1609,7 +1618,7 @@ ents_stats_get :: proc(ents: ^Ents, id: Ent_Stats_ID) -> ^Ent_Stats {
 }
 
 ents_team_get :: proc(ents: ^Ents, id: Ent_Team_ID) -> ^Ent_Team {
-	if id == 0 || int(id) >= len(ents.teams) do return NIL_TEAM
+	if id <= 0 || int(id) >= len(ents.teams) do return NIL_TEAM
 	return &ents.teams[id]
 }
 

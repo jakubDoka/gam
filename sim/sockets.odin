@@ -1,7 +1,6 @@
 package sim
 
 import "../util/hot"
-import "core:fmt"
 import "core:log"
 import "core:nbio"
 import "core:reflect"
@@ -210,27 +209,13 @@ packet_buffer_alloc :: proc(
 			chunk.used = 0
 		}
 
-		if chunk.used + size_of(Crypt_Header) < len(chunk.data) {
-			arr := chunk.data[chunk.used + size_of(Crypt_Header):]
-			e := Encoder{arr}
-			eok := packet.encode(packet.data, &e)
-			bytes := arr[:len(arr) - len(e.remining)]
-			if eok {
-				final_bytes = chunk.data[chunk.used:][:size_of(Crypt_Header) +
-				len(bytes)]
-				header := (^Crypt_Header)(&chunk.data[chunk.used])
-				if sk != nil {
-					header.len = u16(len(bytes))
-					encrypt(sk, &header.tag, bytes)
-				} else {
-					header^ = {}
-				}
-				chunk.used += size_of(Crypt_Header) + len(bytes)
-				assert(chunk.used <= BUFFER_CHUNK_SIZE)
-				break
-			} else {
-				assert(chunk.used != 0)
-			}
+		en: if buf, e, ok := begin_crypt_packet(chunk.data[chunk.used:]); ok {
+			packet.encode(packet.data, &e) or_break en
+			len := end_crypt_packet(sk, buf, e)
+			chunk.used += len
+			final_bytes = buf[:len]
+			assert(chunk.used <= BUFFER_CHUNK_SIZE)
+			break
 		}
 
 		chunk.used = BUFFER_CHUNK_SIZE
@@ -447,25 +432,34 @@ tcp_connection_send_no_delay :: proc(
 	packet: Any_Packet,
 	l: ^nbio.Event_Loop,
 ) -> bool {
-	(conn.buffered + size_of(Crypt_Header) <= len(conn.send_buf)) or_return
+	buf, e := begin_crypt_packet(conn.send_buf[conn.buffered:]) or_return
 
-	available_buffer := conn.send_buf[conn.buffered + size_of(Crypt_Header):]
-
-	e := Encoder{available_buffer}
 	packet.encode(packet.data, &e) or_return
-	bytes := available_buffer[:len(available_buffer) - len(e.remining)]
 
-	assert(len(bytes) > 0)
-
-	header := (^Crypt_Header)(raw_data(conn.send_buf[conn.buffered:]))
-	header.len = u16(len(bytes))
-	encrypt(&conn.secret, &header.tag, bytes)
-
-	conn.buffered += size_of(Crypt_Header) + len(bytes)
+	len := end_crypt_packet(&conn.secret, buf, e)
+	conn.buffered += len
 
 	tcp_connection_ensure_sending(conn, l)
 
 	return true
+}
+
+begin_crypt_packet :: proc(buf: []u8) -> (f: []u8, e: Encoder, ok: bool) {
+	if len(buf) < size_of(Crypt_Header) do return
+	return buf, Encoder{buf[size_of(Crypt_Header):]}, true
+}
+
+end_crypt_packet :: proc(sec: ^Secret_Key, buf: []u8, e: Encoder) -> int {
+	assert(len(buf) >= size_of(Crypt_Header))
+	header := (^Crypt_Header)(raw_data(buf))
+	len := len(buf) - size_of(Crypt_Header) - len(e.remining)
+	if sec == nil {
+		header^ = {}
+	} else {
+		header.len = u16(len)
+		encrypt(sec, &header.tag, buf[size_of(Crypt_Header):][:header.len])
+	}
+	return size_of(Crypt_Header) + len
 }
 
 tcp_connection_boot :: proc(

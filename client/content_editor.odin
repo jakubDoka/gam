@@ -52,10 +52,8 @@ ui_content_editor :: proc(client: ^Client) {
 	)
 
 	prefix := min(1, len(client.ents.stats))
-	was_selected := false
 	for &stats, i in client.ents.stats[prefix:] {
 		selected := ctx.selected == stats.id
-		was_selected |= selected
 
 		selector: {
 			box(id("stat-selector-row"), {width = orui.grow(), gap = PADDING})
@@ -72,11 +70,7 @@ ui_content_editor :: proc(client: ^Client) {
 						focused_color = .PRIMARY,
 					},
 				) {
-					ctx.selected = stats.id
-					selected = !was_selected
-					clear(&ctx.edit_name.buf)
-					append(&ctx.edit_name.buf, nm.str(&stats.name))
-					ctx.stat_edit_state = stats
+					emit_event(client, .Edit_Stat, {stat = stats.id})
 				}
 
 				break selector
@@ -114,7 +108,7 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 
 			if ui_icon_button(
-				id("stat-selector", i),
+				id("stat-selector-close", i),
 				ROW_HEIGHT,
 				.ICON_CROSS,
 				"Close editor",
@@ -219,7 +213,12 @@ ui_content_editor :: proc(client: ^Client) {
 
 				raw_files := rl.LoadDroppedFiles()
 				defer rl.UnloadDroppedFiles(raw_files)
-				files := raw_files.paths[:raw_files.capacity]
+				files := raw_files.paths[:max(
+					raw_files.capacity,
+					raw_files.count,
+				)]
+
+				log.info(raw_files)
 
 				context.allocator = arna.allocator(&ctx.upload_arena)
 				free_all(context.allocator)

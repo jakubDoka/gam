@@ -744,7 +744,7 @@ server_get_asset :: proc(
 	ass: Saved_Asset,
 	ok: bool,
 ) {
-	res, stmt := sqlite.query(server.get_asset, ass, transmute(u32)id)
+	res, stmt := sqlite.query(server.get_asset, ass, id)
 	sqlite.reset(stmt)
 	if res == .DONE do return
 	sqlite.assert_ok(stmt, res)
@@ -846,6 +846,7 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 	}
 }
 
+// TODO: there is no reason for this to be generic
 hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
 	nbio.recv_poly2(
 		hctx.sock,
@@ -1311,13 +1312,9 @@ recv_content :: proc(
 			}
 
 			if state.recvd > 0 {
-				source := state.buf[size_of(sim.Tag):state.recvd]
+				tag, source := sim.split_crypt_tag(state.buf, state.recvd)
 
-				ok := sim.decrypt(
-					&conn.tcp.secret,
-					(^sim.Tag)(raw_data(state.buf)),
-					source,
-				)
+				ok := sim.decrypt(&conn.tcp.secret, tag, source)
 				if !ok {
 					log.warn(
 						"received corrupted file chunk, deleting the file:",

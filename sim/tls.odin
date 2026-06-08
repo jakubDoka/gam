@@ -19,6 +19,17 @@ Payload :: [64]u8
 
 AAD: string : "gam"
 
+split_crypt_tag :: proc(
+	bytes: []u8,
+	ln := int(~uint(1) >> 1),
+) -> (
+	^Tag,
+	[]u8,
+) {
+	return auto_cast raw_data(bytes),
+		bytes[size_of(Tag):][:min(ln, len(bytes) - size_of(Tag))]
+}
+
 encrypt :: proc(sk: ^Secret_Key, tag: ^Tag, text: []u8) {
 	crypto.rand_bytes(tag[:12])
 	ctx: aes.Context_GCM

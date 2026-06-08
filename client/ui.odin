@@ -149,6 +149,27 @@ UI_Reactor :: struct {
 	orui_ctx:                orui.Context,
 	has_dirty_config:        bool,
 	control_selection_pivot: sim.Vec,
+	events:                  [dynamic]UI_Event,
+}
+
+UI_Event_Kind :: enum {
+	Edit_Stat,
+}
+
+UI_Event :: struct {
+	kind: UI_Event_Kind,
+	stat: sim.Ent_Stats_ID,
+}
+
+emit_event :: #force_no_inline proc(
+	r: ^UI_Reactor,
+	kind: UI_Event_Kind,
+	event: UI_Event,
+) {
+	event := event
+	event.kind = kind
+
+	append(&r.events, event)
 }
 
 UI_Chat :: struct {
@@ -1789,4 +1810,18 @@ ui_build :: proc(client: ^Client) {
 			ui_connection_menu(client)
 		}
 	}
+
+	for ev in client.events {
+		switch ev.kind {
+		case .Edit_Stat:
+			ctx := &client.content_editing
+
+			stats := sim.ents_stats_get(&client.ents, ev.stat)
+			ctx.selected = stats.id
+			clear(&ctx.edit_name.buf)
+			append(&ctx.edit_name.buf, nm.str(&stats.name))
+			ctx.stat_edit_state = stats^
+		}
+	}
+	clear(&client.events)
 }
