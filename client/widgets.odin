@@ -477,6 +477,7 @@ Text_Input_Config :: struct {
 	border_color:    UI_Color,
 	layer:           int,
 	dont_save_state: bool,
+	dont_autofocus:  bool,
 }
 
 ui_text_input :: proc(
@@ -546,7 +547,7 @@ ui_text_input :: proc(
 		},
 	)
 
-	if !already_initialized {
+	if !already_initialized && !config.dont_autofocus {
 		orui.current_context.focus_id = orui.current_context.current_id
 		orui.current_context.caret_index = len(state.buf)
 	}
@@ -574,6 +575,7 @@ Label_Config :: struct {
 	background: UI_Color,
 	align:      Maybe(orui.ContentAlignment),
 	padding:    Maybe(orui.Edges),
+	custom_dc:  Draw_Call,
 }
 
 ui_label :: proc(id: orui.Id, config: Label_Config) -> bool {
@@ -594,6 +596,7 @@ ui_label :: proc(id: orui.Id, config: Label_Config) -> bool {
 				PADDING * 2,
 				PADDING,
 			),
+			custom_event = rawptr(config.custom_dc),
 			overflow = .Wrap,
 		},
 	)
@@ -679,7 +682,7 @@ ui_select :: proc(
 			border_color = border_color,
 			border = orui.border(1),
 			direction = .TopToBottom,
-			layer = 100,
+			layer = 300,
 			background_color = ui_color(.SECONDARY),
 		},
 	)
@@ -828,7 +831,7 @@ dragged_ui_color_hue: orui.Id
 dragged_ui_color_alpha: orui.Id
 
 ui_drag_capture :: proc(id: ^orui.Id) -> (sim.Vec, bool) {
-	if orui.active() {
+	if orui.active() || (orui.hovered() && rl.IsMouseButtonPressed(.LEFT)) {
 		id^ = orui.current_context.current_id
 	}
 
@@ -924,7 +927,7 @@ ui_color_picker :: proc(
 	}
 
 	if config.dest_color != nil && prev_hsv != hsv^ {
-		config.dest_color^ = sim.Color(rl.ColorToInt(color))
+		config.dest_color^ = sim.Color(rl.ColorToInt(ui_color_from_hsv(hsv)))
 	}
 }
 

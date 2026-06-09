@@ -35,8 +35,6 @@ APP_NAME :: "gam"
 ASSET_CACHE :: "asset-cache"
 
 PLACEMENT_BUTTON_RADIUS :: 20
-UI_COLOR_PRIMARY :: rl.RED
-UI_COLOR_SECONDARY :: rl.Color{0, 0, 0, 204}
 
 font_medium: rl.Font
 

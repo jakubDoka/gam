@@ -24,7 +24,7 @@ ui_content_editor :: proc(client: ^Client) {
 	ctx := &client.ui.content_editor
 
 	if is_key_pressed(client, .Exit) {
-		emit_event(client, .Quit_Content_Editor, {priority = 2})
+		emit_event(client, .Quit_Content_Editor, {priority = 3})
 	}
 
 	box(
@@ -53,7 +53,7 @@ ui_content_editor :: proc(client: ^Client) {
 			direction = .TopToBottom,
 			gap = PADDING,
 			padding = orui.padding(PADDING * 2),
-			background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
+			background_color = ui_color(.SECONDARY_FAINT),
 			clip = {.Intersect, {}},
 		},
 	)
@@ -99,12 +99,7 @@ ui_content_editor :: proc(client: ^Client) {
 
 		for stats, i in order {
 			name := nm.str(&stats.name)
-			matched_chars := new(packer.Bit_Set, context.temp_allocator)
-			matched_chars^ = packer.bit_set_init(
-				len(name),
-				context.temp_allocator,
-			)
-			fuzzy_rank(name, query, matched_chars^)
+			matched_chars := fuzzy_rank_new_bitset(name, query)
 
 			if ui_button(
 				   id("stat-selector", i),
@@ -133,7 +128,7 @@ ui_content_editor :: proc(client: ^Client) {
 			box(
 				id("create-stat-frame"),
 				{
-					background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
+					background_color = ui_color(.SECONDARY_FAINT),
 					width = orui.grow(),
 					gap = PADDING,
 				},
@@ -205,6 +200,7 @@ ui_content_editor :: proc(client: ^Client) {
 					height = orui.fixed(ROW_HEIGHT),
 					placeholder = "name...",
 					border = 1,
+					dont_autofocus = true,
 				},
 			)
 
@@ -235,22 +231,149 @@ ui_content_editor :: proc(client: ^Client) {
 				   "Close editor",
 			   ) ||
 			   is_key_pressed(client, .Exit) {
-				emit_event(client, .Close_Stat_Editor, {priority = 3})
+				emit_event(client, .Close_Stat_Editor, {priority = 4})
 			}
+		}
+
+		query, confirmed := ui_text_input(
+			id("stat-prop-search"),
+			&ctx.prop_search,
+			{
+				height = orui.fixed(ROW_HEIGHT),
+				width = orui.grow(),
+				placeholder = "fuzzy-search-properties... F to select...",
+				dont_autofocus = true,
+			},
+		)
+
+		just_focused :=
+			orui.current_context.focus_id == orui.current_context.current_id &&
+			orui.current_context.focus_id != orui.current_context.prev_focus_id
+
+		if is_key_pressed(client, .Select_Finder) {
+			emit_event(
+				client,
+				.Focus,
+				{priority = 3, carret_index = len(ctx.prop_search.buf)},
+			)
 		}
 
 		box(
 			id("struct-editor-frame"),
 			{
-				background_color = rl.ColorAlpha(UI_COLOR_SECONDARY, 0.4),
+				background_color = ui_color(.SECONDARY_FAINT),
 				width = orui.grow(),
 				padding = orui.padding(PADDING),
+				direction = .TopToBottom,
+				gap = PADDING,
 			},
 		)
 
-		ctx.stat_editor.root = id("stat-struct-editor")
-		ctx.stat_editor.eidt_root = id("edit-struct-editor")
-		ui_stat_editor(client, &ctx.stat_editor, ctx.stat_edit_state, stats^)
+		if len(query) != 0 {
+			Field_Slot :: struct {
+				score: int,
+				name:  string,
+				value: any,
+				tag:   reflect.Struct_Tag,
+			}
+
+			props := make([dynamic]Field_Slot, context.temp_allocator)
+			name_stack := make([dynamic]string, context.temp_allocator)
+
+			collect_props(stats^, "", &name_stack, &props)
+
+			for &prop in props {
+				prop.score = fuzzy_rank(prop.name, query)
+			}
+
+			sort.merge_sort_proc(
+				props[:],
+				proc(a: Field_Slot, b: Field_Slot) -> int {
+					return sort.compare_ints(b.score, a.score)
+				},
+			)
+
+			if just_focused {
+				ctx.stat_editor.current_field = 0
+			}
+
+			for prop, i in props {
+				box(id("fuzzy-prop-row", i), {width = orui.grow()})
+				matched_chars := fuzzy_rank_new_bitset(prop.name, query)
+				name_pressed :=
+					ui_label(
+						id("fuzzy-prop-name", i),
+						{
+							label = prop.name,
+							custom_dc = draw_call_init_text_highlight(
+								matched_chars,
+							),
+							background = .NONE,
+						},
+					) ||
+					confirmed
+				confirmed = false
+
+				ui_content_field_edit(
+					client,
+					prop.value,
+					{
+						orui.id("fuzzy-prop-value", i),
+						orui.id("fuzzy-prop-value-edit", i),
+						name_pressed,
+						prop.tag,
+					},
+				)
+			}
+
+			collect_props :: proc(
+				value: any,
+				tag: reflect.Struct_Tag,
+				name_stack: ^[dynamic]string,
+				props: ^[dynamic]Field_Slot,
+			) {
+				if reflect.is_struct(type_info_of(value.id)) &&
+				   value.id != sim.Ent_Stats_Ref &&
+				   value.id != sim.Asset_Ref {
+					for field in reflect.struct_fields_zipped(value.id) {
+
+						if vl, ok := reflect.struct_tag_lookup(
+							field.tag,
+							"gam",
+						); ok && strings.contains(vl, "hidden") {
+							continue
+						}
+
+						append(name_stack, field.name)
+						value := reflect.struct_field_value(value, field)
+						collect_props(value, field.tag, name_stack, props)
+						pop(name_stack)
+					}
+				} else {
+					append(
+						props,
+						Field_Slot {
+							name = strings.join(
+								name_stack[:],
+								".",
+								context.temp_allocator,
+							),
+							tag = tag,
+							value = value,
+						},
+					)
+				}
+			}
+		} else {
+			ctx.stat_editor.root = id("stat-struct-editor")
+			ctx.stat_editor.eidt_root = id("edit-struct-editor")
+			ui_stat_editor(
+				client,
+				&ctx.stat_editor,
+				ctx.stat_edit_state,
+				stats^,
+			)
+		}
 	}
 }
 
@@ -629,29 +752,6 @@ ui_stat_editor :: proc(
 			},
 		)
 
-		if !editing {
-			switch &v in dest {
-			case sim.Asset_Ref:
-				index := sim.asset_id_to_idx(client.assets[:], v.id)
-
-				if index >= 0 && int(index) < len(client.ui.sheet.frames) {
-					dest = nm.str(&client.ui.sheet.frames[index].name)
-					if index == 0 do dest = "<none>"
-				} else {
-					dest = "<invalid>"
-				}
-			case sim.Ent_Stats_Ref:
-				if int(v.id) < len(client.ents.stats) {
-					dest = nm.str(&client.ents.stats[v.id].name)
-					if v.id == 0 do dest = "<none>"
-				} else {
-					dest = "<invalid>"
-				}
-			}
-		}
-
-		value := fmt.tprint(dest)
-
 		if is_struct {
 			if ui_button(
 				   id("struct-editor-value-elipsis", sub_root),
@@ -687,8 +787,60 @@ ui_stat_editor :: proc(
 			continue
 		}
 
-		if v, ok := &dest.(bool); ok {
-			v^ ~= ui_button(
+		ui_content_field_edit(
+			client,
+			dest,
+			{sub_root, sub_root_edit, name_pressed, tag},
+		)
+	}
+}
+
+Content_Field_Ctx :: struct {
+	sub_root:      orui.Id,
+	sub_root_edit: orui.Id,
+	name_pressed:  bool,
+	tag:           reflect.Struct_Tag,
+}
+
+ui_content_field_edit :: proc(
+	client: ^Client,
+	dest: any,
+	ctx: Content_Field_Ctx,
+) {
+	dest := dest
+	seb := &client.content_editor.stat_editor
+	sub_root := ctx.sub_root
+	sub_root_edit := ctx.sub_root_edit
+	editing := seb.current_field == sub_root_edit
+	name_pressed := ctx.name_pressed
+	tag := ctx.tag
+
+	if !editing {
+		switch &v in dest {
+		case sim.Asset_Ref:
+			index := sim.asset_id_to_idx(client.assets[:], v.id)
+
+			if index >= 0 && int(index) < len(client.ui.sheet.frames) {
+				dest = nm.str(&client.ui.sheet.frames[index].name)
+				if index == 0 do dest = "<none>"
+			} else {
+				dest = "<invalid>"
+			}
+		case sim.Ent_Stats_Ref:
+			if int(v.id) < len(client.ents.stats) {
+				dest = nm.str(&client.ents.stats[v.id].name)
+				if v.id == 0 do dest = "<none>"
+			} else {
+				dest = "<invalid>"
+			}
+		}
+	}
+
+	value := fmt.tprint(dest)
+
+	if v, ok := &dest.(bool); ok {
+		v^ ~=
+			ui_button(
 				id("struct-editor-checkbox", sub_root),
 				{
 					width = orui.fixed(HEIGHT - 2),
@@ -700,185 +852,187 @@ ui_stat_editor :: proc(
 					focused_color = .PRIMARY_FAINT,
 					margin = orui.margin(1),
 				},
-			)
-			continue
+			) ||
+			name_pressed
+		return
+	}
+
+	if v, ok := &dest.(sim.Color); ok && !editing {
+		if ui_button(
+			   id("struct-editor-color-value", sub_root),
+			   {
+				   width = orui.grow(),
+				   height = orui.fixed(HEIGHT),
+				   background = ui_color_slot(.SLOT1, get_color(v^)),
+				   focused_color = .PRIMARY,
+				   border = 1,
+				   border_color = .PRIMARY,
+			   },
+		   ) ||
+		   name_pressed {
+			seb.current_field = sub_root_edit
+		}
+		return
+	}
+
+	if !editing {
+		if ui_button(
+			   id("struct-editor-field-value", sub_root),
+			   {
+				   label = value,
+				   width = orui.grow(),
+				   height = orui.fixed(HEIGHT),
+				   align = orui.ContentAlignment.Start,
+				   background = .NONE,
+				   focused_color = .PRIMARY,
+			   },
+		   ) ||
+		   name_pressed {
+			seb.current_field = sub_root_edit
+		}
+		return
+	}
+
+	initial_select := seb.current_field != seb.last_field
+	seb.last_field = seb.current_field
+
+	if initial_select {
+		clear(&seb.string_field.buf)
+	}
+
+	edit: switch &v in dest {
+	case sim.Ent_Kind:
+		res, should_close := ui_select_enum(
+			id("kind-picker"),
+			&seb.string_field,
+			sim.Ent_Kind,
+		)
+
+		if should_close {
+			seb.current_field = 0
 		}
 
-		if v, ok := &dest.(sim.Color); ok && !editing {
-			if ui_button(
-				   id("struct-editor-color-value", sub_root),
-				   {
-					   width = orui.grow(),
-					   height = orui.fixed(HEIGHT),
-					   background = ui_color_slot(.SLOT1, get_color(v^)),
-					   focused_color = .PRIMARY,
-				   },
-			   ) ||
-			   name_pressed {
-				seb.current_field = sub_root_edit
-			}
-			continue
+		if res, ok := res.?; ok {
+			v = res
+			seb.current_field = 0
+			seb.last_field = 0
+		}
+	case sim.Asset_Ref:
+		res, should_close := ui_sprite_select(
+			client,
+			id("sprite-picker", sub_root),
+			&seb.string_field,
+		)
+
+		if should_close {
+			seb.current_field = 0
 		}
 
-		if !editing {
-			if ui_button(
-				   id("struct-editor-field-value", sub_root),
-				   {
-					   label = value,
-					   width = orui.grow(),
-					   height = orui.fixed(HEIGHT),
-					   align = orui.ContentAlignment.Start,
-					   background = .NONE,
-					   focused_color = .PRIMARY,
-				   },
-			   ) ||
-			   name_pressed {
-				seb.current_field = sub_root_edit
-			}
-			continue
+		if res >= 0 {
+			v.id = sim.asset_idx_to_id(client.assets[:], res)
+			seb.current_field = 0
+			seb.last_field = 0
+		}
+	case sim.Ent_Stats_Ref:
+		res, should_close := ui_select(
+			id("ent-ref-picker", sub_root),
+			&seb.string_field,
+			{
+				count = len(client.ents.stats),
+				ctx = client,
+				name_of = proc(ctx: rawptr, i: int) -> string {
+					client := (^Client)(ctx)
+					if i == 0 {return "<none>"}
+					return nm.str(&client.ents.stats[i].name)
+				},
+			},
+		)
+
+		if should_close {
+			seb.current_field = 0
 		}
 
-		initial_select := seb.current_field != seb.last_field
-		seb.last_field = seb.current_field
+		if res >= 0 {
+			v.id = sim.Ent_Stats_ID(res)
+			seb.current_field = 0
+			seb.last_field = 0
+		}
+	case sim.Color:
+		box(
+			id("ent-color-picker-anchor", sub_root),
+			{
+				width = orui.grow(),
+				height = orui.fixed(HEIGHT),
+				position = {.Relative, {}},
+				background_color = get_color(v),
+			},
+		)
 
+		box(
+			id("ent-color-picker-popup", sub_root),
+			{
+				position = {.Absolute, {}},
+				bounds = {.Window, .Flip, {}},
+				layer = 100,
+				placement = orui.placement(.BottomLeft, .TopLeft),
+			},
+		)
+
+		if ui_clicked_off() {
+			seb.current_field = 0
+		}
+
+		ui_color_picker(
+			id("ent-color-picker", sub_root),
+			&seb.color,
+			{
+				width = orui.fixed(ROW_HEIGHT * 5),
+				height = orui.fixed(ROW_HEIGHT * 5),
+				dest_color = &v,
+			},
+		)
+	case f32, int:
 		if initial_select {
-			clear(&seb.string_field.buf)
+			append(&seb.string_field.buf, value)
 		}
 
-		edit: switch &v in dest {
-		case sim.Ent_Kind:
-			res, should_close := ui_select_enum(
-				id("kind-picker"),
-				&seb.string_field,
-				sim.Ent_Kind,
-			)
+		text, confirmed := ui_text_input(
+			id("struct-editor-field-value-edit", sub_root_edit),
+			&seb.string_field,
+			{
+				width = orui.grow(),
+				height = orui.fixed(HEIGHT),
+				foreground = seb.has_error ? .PRIMARY : .FOREGROUND,
+			},
+		)
 
-			if should_close {
-				seb.current_field = 0
-			}
+		switch &v in dest {
+		case f32:
+			_, mult := sim.try_unwrap_rounded_float(dest, tag)
 
-			if res, ok := res.?; ok {
-				v = res
-				seb.current_field = 0
-				seb.last_field = 0
-			}
-		case sim.Asset_Ref:
-			res, should_close := ui_sprite_select(
-				client,
-				id("sprite-picker", sub_root),
-				&seb.string_field,
-			)
-
-			if should_close {
-				seb.current_field = 0
-			}
-
-			if res >= 0 {
-				v.id = sim.asset_idx_to_id(client.assets[:], res)
-				seb.current_field = 0
-				seb.last_field = 0
-			}
-		case sim.Ent_Stats_Ref:
-			res, should_close := ui_select(
-				id("ent-ref-picker", sub_root),
-				&seb.string_field,
-				{
-					count = len(client.ents.stats),
-					ctx = client,
-					name_of = proc(ctx: rawptr, i: int) -> string {
-						client := (^Client)(ctx)
-						if i == 0 {return "<none>"}
-						return nm.str(&client.ents.stats[i].name)
-					},
-				},
-			)
-
-			if should_close {
-				seb.current_field = 0
-			}
-
-			if res >= 0 {
-				v.id = sim.Ent_Stats_ID(res)
-				seb.current_field = 0
-				seb.last_field = 0
-			}
-		case sim.Color:
-			box(
-				id("ent-color-picker-anchor", sub_root),
-				{
-					width = orui.grow(),
-					height = orui.fixed(HEIGHT),
-					position = {.Relative, {}},
-					background_color = get_color(v),
-				},
-			)
-
-			box(
-				id("ent-color-picker-popup", sub_root),
-				{
-					position = {.Absolute, {}},
-					bounds = {.Window, .Flip, {}},
-					layer = 100,
-					placement = orui.placement(.BottomLeft, .TopLeft),
-				},
-			)
-
-			if ui_clicked_off() {
-				seb.current_field = 0
-			}
-
-			ui_color_picker(
-				id("ent-color-picker", sub_root),
-				&seb.color,
-				{
-					width = orui.fixed(ROW_HEIGHT * 5),
-					height = orui.fixed(ROW_HEIGHT * 5),
-					dest_color = &v,
-				},
-			)
-		case f32, int:
-			if initial_select {
-				append(&seb.string_field.buf, value)
-			}
-
-			text, confirmed := ui_text_input(
-				id("struct-editor-field-value-edit", sub_root_edit),
-				&seb.string_field,
-				{
-					width = orui.grow(),
-					height = orui.fixed(HEIGHT),
-					foreground = seb.has_error ? .PRIMARY : .FOREGROUND,
-				},
-			)
-
-			switch &v in dest {
-			case f32:
-				_, mult := sim.try_unwrap_rounded_float(dest, tag)
-
-				new_value, ok := strconv.parse_f32(text)
-				seb.has_error = !ok
-				if ok do v = math.round(new_value * mult) / mult
-			case int:
-				new_value, ok := strconv.parse_u64(text)
-				seb.has_error = !ok
-				if ok do v = int(new_value)
-			}
-
-			if confirmed {
-				seb.current_field = 0
-			}
-		case:
-			ui_label(
-				id("struct-editor-field-unhandled", sub_root),
-				{
-					label = "edinting is not supported",
-					width = orui.grow(),
-					height = orui.fixed(HEIGHT),
-					align = .Start,
-					background = .NONE,
-					foreground = .PRIMARY,
-				},
-			)
+			new_value, ok := strconv.parse_f32(text)
+			seb.has_error = !ok
+			if ok do v = math.round(new_value * mult) / mult
+		case int:
+			new_value, ok := strconv.parse_u64(text)
+			seb.has_error = !ok
+			if ok do v = int(new_value)
 		}
+
+		if confirmed {
+			seb.current_field = 0
+		}
+	case:
+		ui_label(
+			id("struct-editor-field-unhandled", sub_root),
+			{
+				label = "edinting is not supported",
+				width = orui.grow(),
+				height = orui.fixed(HEIGHT),
+				align = .Start,
+				background = .NONE,
+				foreground = .PRIMARY,
+			},
+		)
 	}
 }

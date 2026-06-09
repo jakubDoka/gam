@@ -163,6 +163,9 @@ UI_Event_Kind :: enum {
 	Open_Content_Editor,
 	Close_Stat_Editor,
 	Save_Content_Changes,
+	Open_Map_Editor,
+	Close_Map_Editor,
+	Focus,
 }
 
 Key_Bind :: enum {
@@ -182,7 +185,9 @@ Key_Bind :: enum {
 	Build_Select_End,
 	Build_Select_Clear,
 	Open_Content_Editor,
+	Open_Map_Editor,
 	Save,
+	Select_Finder,
 }
 
 Kk :: rl.KeyboardKey
@@ -215,22 +220,27 @@ BIND_TO_KEY := [Key_Bind]Key {
 	.Build_Select_End    = Mb.LEFT,
 	.Build_Select_Clear  = Mb.RIGHT,
 	.Open_Content_Editor = .C,
+	.Open_Map_Editor     = .B,
 	.Save                = Mod_And_Key{.LEFT_CONTROL, .S},
+	.Select_Finder       = .F,
 }
 
 UI_Event :: struct {
-	kind:     UI_Event_Kind,
-	team:     sim.Ent_Team_ID,
-	team_idx: int,
-	name:     nm.Name,
-	priority: int,
-	bind:     Key_Bind,
+	kind:         UI_Event_Kind,
+	team:         sim.Ent_Team_ID,
+	team_idx:     int,
+	name:         nm.Name,
+	priority:     int,
+	bind:         Key_Bind,
+	target:       orui.Id,
+	carret_index: int,
 }
 
 emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
 	event := event
 	event.kind = kind
 	event.bind = r.last_key_bind
+	event.target = orui.current_context.current_id
 	r.last_key_bind = .Nil
 
 	append(&r.events, event)
@@ -350,6 +360,7 @@ UI_Content_Editor :: struct {
 	expanded:             bool,
 	selected:             sim.Ent_Stats_ID,
 	search:               strings.Builder,
+	prop_search:          strings.Builder,
 	prev_scroll:          f32,
 	stat_edit_state:      sim.Ent_Stats,
 	stat_editor:          Stat_Editor_State,
@@ -1342,6 +1353,10 @@ ui_game_hud :: proc(client: ^Client) {
 					.ICON_GRID,
 					"map editor",
 				)
+
+				if is_key_pressed(client, .Open_Map_Editor) {
+					emit_event(client, .Open_Map_Editor, {priority = 1})
+				}
 			}
 		}
 
@@ -1560,7 +1575,7 @@ ui_ship_selection :: proc(client: ^Client) {
 		id("ship-selection-square"),
 		{
 			direction = .TopToBottom,
-			background_color = UI_COLOR_SECONDARY,
+			background_color = ui_color(.SECONDARY),
 			padding = orui.padding(PADDING * 2),
 			placement = orui.placement(.Center, .Center),
 			position = {.Relative, {}},
@@ -1881,7 +1896,10 @@ ui_build :: proc(client: ^Client) {
 		     .Quit_Content_Editor,
 		     .Open_Content_Editor,
 		     .Save_Content_Changes,
-		     .Close_Stat_Editor:
+		     .Close_Stat_Editor,
+		     .Close_Map_Editor,
+		     .Open_Map_Editor,
+		     .Focus:
 			assert(ev.bind != .Nil)
 			slot := &winning_kb_events[ev.bind]
 			if slot.priority < ev.priority {
@@ -1917,10 +1935,24 @@ ui_build :: proc(client: ^Client) {
 			tcp_send(client, sim.Client_Content_Action{kind = .Save})
 		case .Close_Stat_Editor:
 			client.content_editor.selected = 0
+		case .Open_Map_Editor:
+			client.ui.map_editing.expanded = true
+		case .Close_Map_Editor:
+			client.ui.map_editing.expanded = false
+		case .Focus:
+			orui.current_context.focus_id = ev.target
+			orui.current_context.caret_index = ev.carret_index
 		case:
 			log.warn("unhandled keybing event:", ev)
 		}
 	}
+}
+
+fuzzy_rank_new_bitset :: proc(name: string, query: string) -> ^packer.Bit_Set {
+	matched_chars := new(packer.Bit_Set, context.temp_allocator)
+	matched_chars^ = packer.bit_set_init(len(name), context.temp_allocator)
+	fuzzy_rank(name, query, matched_chars^)
+	return matched_chars
 }
 
 fuzzy_rank :: proc(
@@ -1932,7 +1964,7 @@ fuzzy_rank :: proc(
 	MISMATCH :: -2
 	SKIP_SAMPLE :: -1
 	SKIP_PATTERN :: -5
-	MAX_PATTERN :: 256
+	MAX_PATTERN :: 128
 
 	m := len(pattern)
 	if m == 0 do return 0
@@ -1940,6 +1972,11 @@ fuzzy_rank :: proc(
 
 	prev: [MAX_PATTERN + 1]int
 	curr: [MAX_PATTERN + 1]int
+
+	char_occs: [256]u8
+	for c in transmute([]u8)pattern {
+		char_occs[c] += 1
+	}
 
 	for j in 1 ..= m {
 		prev[j] = prev[j - 1] + SKIP_PATTERN
@@ -1950,12 +1987,14 @@ fuzzy_rank :: proc(
 		sc := to_lower(sample[i - 1])
 		curr[0] = 0
 
+		matched := false
 		for j in 1 ..= m {
 			pc := to_lower(pattern[j - 1])
 
 			sub_step: int
 			if sc == pc {
-				if highlighted.bit_length != 0 {
+				if highlighted.bit_length != 0 && char_occs[sc] > 0 {
+					matched = true
 					packer.bit_set_set(highlighted, i - 1)
 				}
 				boundary := i == 1 || is_separator(sample[i - 2])
@@ -1970,11 +2009,12 @@ fuzzy_rank :: proc(
 			curr[j] = max(diag, skip_s, skip_p)
 		}
 
-		if curr[m] > best do best = curr[m]
+		char_occs[sc] -= u8(matched)
+
 		prev = curr
 	}
 
-	return best
+	return curr[m]
 
 	to_lower :: proc(c: u8) -> u8 {
 		return (c + 32) if (c >= 'A' && c <= 'Z') else c

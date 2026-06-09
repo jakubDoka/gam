@@ -207,6 +207,10 @@ ui_map_export :: proc(client: ^Client) -> (mapa: sim.Map) {
 ui_map_editor :: proc(client: ^Client) {
 	ctx := &client.map_editing
 
+	if is_key_pressed(client, .Exit) {
+		emit_event(client, .Close_Map_Editor, {priority = 2})
+	}
+
 	TEAM_SIZE :: 32
 
 	{box(id("resize-nob"), {layer = 100})
