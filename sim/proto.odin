@@ -90,8 +90,8 @@ Client_Input_Key :: enum {
 	Down,
 	Right,
 	Left,
-	Click_Left,
-	Click_Right,
+	Shoot,
+	Parry,
 }
 
 Client_Cmd_Kind :: enum i32 {

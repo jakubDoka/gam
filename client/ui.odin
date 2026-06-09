@@ -10,6 +10,7 @@ import orui "../vendored/orui/src"
 import rt "base:runtime"
 import "core:crypto"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
@@ -138,7 +139,7 @@ UI_Reactor :: struct {
 	settings_expanded:       bool,
 	servers:                 UI_Servers,
 	profiles:                UI_Profiles,
-	content_editing:         UI_Content_Editor,
+	content_editor:          UI_Content_Editor,
 	map_editing:             UI_Map_Editor,
 	chat:                    UI_Chat,
 	db:                      sqlite.Connection,
@@ -150,12 +151,71 @@ UI_Reactor :: struct {
 	has_dirty_config:        bool,
 	control_selection_pivot: sim.Vec,
 	events:                  [dynamic]UI_Event,
+	last_key_bind:           Key_Bind,
 }
 
 UI_Event_Kind :: enum {
 	Select_Team,
 	Delete_Team,
 	Select_Profile,
+	Disconnect,
+	Quit_Content_Editor,
+	Open_Content_Editor,
+	Close_Stat_Editor,
+	Save_Content_Changes,
+}
+
+Key_Bind :: enum {
+	Nil,
+	Exit,
+	Toggle_Chat,
+	Abandon_Ship,
+	Up,
+	Down,
+	Left,
+	Right,
+	Shoot,
+	Parry,
+	Map_Place,
+	Map_Erase,
+	Build_Select_Start,
+	Build_Select_End,
+	Build_Select_Clear,
+	Open_Content_Editor,
+	Save,
+}
+
+Kk :: rl.KeyboardKey
+Mb :: rl.MouseButton
+Mod_And_Key :: struct {
+	mod: rl.KeyboardKey,
+	key: rl.KeyboardKey,
+}
+
+Key :: union #no_nil {
+	Kk,
+	Mb,
+	Mod_And_Key,
+}
+
+BIND_TO_KEY := [Key_Bind]Key {
+	.Nil                 = .KEY_NULL,
+	.Exit                = .ESCAPE,
+	.Toggle_Chat         = .ENTER,
+	.Abandon_Ship        = .V,
+	.Up                  = .W,
+	.Down                = .S,
+	.Left                = .A,
+	.Right               = .D,
+	.Shoot               = Mb.LEFT,
+	.Parry               = Mb.RIGHT,
+	.Map_Place           = Mb.LEFT,
+	.Map_Erase           = Mb.RIGHT,
+	.Build_Select_Start  = Mb.LEFT,
+	.Build_Select_End    = Mb.LEFT,
+	.Build_Select_Clear  = Mb.RIGHT,
+	.Open_Content_Editor = .C,
+	.Save                = Mod_And_Key{.LEFT_CONTROL, .S},
 }
 
 UI_Event :: struct {
@@ -163,15 +223,15 @@ UI_Event :: struct {
 	team:     sim.Ent_Team_ID,
 	team_idx: int,
 	name:     nm.Name,
+	priority: int,
+	bind:     Key_Bind,
 }
 
-emit_event :: #force_no_inline proc(
-	r: ^UI_Reactor,
-	kind: UI_Event_Kind,
-	event: UI_Event,
-) {
+emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
 	event := event
 	event.kind = kind
+	event.bind = r.last_key_bind
+	r.last_key_bind = .Nil
 
 	append(&r.events, event)
 }
@@ -289,6 +349,7 @@ UI_Profiles :: struct {
 UI_Content_Editor :: struct {
 	expanded:             bool,
 	selected:             sim.Ent_Stats_ID,
+	search:               strings.Builder,
 	prev_scroll:          f32,
 	stat_edit_state:      sim.Ent_Stats,
 	stat_editor:          Stat_Editor_State,
@@ -1160,8 +1221,8 @@ ui_game_hud :: proc(client: ^Client) {
 		   id("disconnect"),
 		   {label = "disconnect", height = orui.fixed(ROW_HEIGHT)},
 	   ) ||
-	   rl.IsKeyPressed(.ESCAPE) {
-		client_clear_state(client, "manual disconnect")
+	   is_key_pressed(client, .Exit) {
+		emit_event(client, .Disconnect, {priority = 1})
 	}
 
 	ui_label(
@@ -1226,14 +1287,15 @@ ui_game_hud :: proc(client: ^Client) {
 		} else {
 			player := client.players[player_idx]
 
-			if client.content_editing.expanded && client.has_dirty_config {
+			if client.content_editor.expanded && client.has_dirty_config {
 				if ui_icon_button(
-					id("content-edinting-save"),
-					ROW_HEIGHT,
-					.ICON_FILE_SAVE_CLASSIC,
-					"Save content changes",
-				) {
-					tcp_send(client, sim.Client_Content_Action{kind = .Save})
+					   id("content-edinting-save"),
+					   ROW_HEIGHT,
+					   .ICON_FILE_SAVE_CLASSIC,
+					   "Save content changes",
+				   ) ||
+				   is_key_pressed(client, .Save) {
+					emit_event(client, .Save_Content_Changes, {priority = 1})
 				}
 			}
 
@@ -1249,11 +1311,15 @@ ui_game_hud :: proc(client: ^Client) {
 
 				ui_icon_dropdown(
 					id("edit-content-opener"),
-					&client.content_editing.expanded,
+					&client.content_editor.expanded,
 					ROW_HEIGHT,
 					.ICON_GEAR_BIG,
 					"content editor",
 				)
+
+				if is_key_pressed(client, .Open_Content_Editor) {
+					emit_event(client, .Open_Content_Editor, {priority = 1})
+				}
 			}
 
 			if client.map_editing.expanded && ui_map_has_changes(client) {
@@ -1303,7 +1369,6 @@ ui_chat :: proc(client: ^Client) {
 			direction = .TopToBottom,
 			position = {.Absolute, {}},
 			clip = {.Intersect, {}},
-			layer = -1,
 		},
 	)
 
@@ -1427,7 +1492,7 @@ ui_chat :: proc(client: ^Client) {
 		ctx.open = orui.focused()
 	}
 
-	ctx.open ~= is_key_pressed(client, .ENTER)
+	ctx.open ~= is_key_pressed(client, .Toggle_Chat)
 }
 
 ui_player_color :: proc(seed: []u8) -> rl.Color {
@@ -1499,7 +1564,7 @@ ui_ship_selection :: proc(client: ^Client) {
 			padding = orui.padding(PADDING * 2),
 			placement = orui.placement(.Center, .Center),
 			position = {.Relative, {}},
-			layer = 1,
+			layer = 100,
 		},
 	)
 
@@ -1780,7 +1845,7 @@ ui_build :: proc(client: ^Client) {
 				ui_map_editor(client)
 			}
 
-			if client.content_editing.expanded {
+			if client.content_editor.expanded {
 				ui_content_editor(client)
 			}
 
@@ -1808,8 +1873,20 @@ ui_build :: proc(client: ^Client) {
 		}
 	}
 
+	winning_kb_events: [Key_Bind]UI_Event
+
 	for &ev in client.events {
 		switch ev.kind {
+		case .Disconnect,
+		     .Quit_Content_Editor,
+		     .Open_Content_Editor,
+		     .Save_Content_Changes,
+		     .Close_Stat_Editor:
+			assert(ev.bind != .Nil)
+			slot := &winning_kb_events[ev.bind]
+			if slot.priority < ev.priority {
+				slot^ = ev
+			}
 		case .Select_Team:
 			client.selected_team = ev.team
 		case .Delete_Team:
@@ -1826,4 +1903,88 @@ ui_build :: proc(client: ^Client) {
 		}
 	}
 	clear(&client.events)
+
+	for &ev in winning_kb_events {
+		if ev.priority == 0 do continue
+		#partial switch ev.kind {
+		case .Disconnect:
+			client_clear_state(client, "manual disconnect")
+		case .Quit_Content_Editor:
+			client.ui.content_editor.expanded = false
+		case .Open_Content_Editor:
+			client.ui.content_editor.expanded = true
+		case .Save_Content_Changes:
+			tcp_send(client, sim.Client_Content_Action{kind = .Save})
+		case .Close_Stat_Editor:
+			client.content_editor.selected = 0
+		case:
+			log.warn("unhandled keybing event:", ev)
+		}
+	}
+}
+
+fuzzy_rank :: proc(
+	sample, pattern: string,
+	highlighted: packer.Bit_Set = {},
+) -> int {
+	MATCH :: 10
+	BOUNDARY_BONUS :: 8
+	MISMATCH :: -2
+	SKIP_SAMPLE :: -1
+	SKIP_PATTERN :: -5
+	MAX_PATTERN :: 256
+
+	m := len(pattern)
+	if m == 0 do return 0
+	if m > MAX_PATTERN do m = MAX_PATTERN
+
+	prev: [MAX_PATTERN + 1]int
+	curr: [MAX_PATTERN + 1]int
+
+	for j in 1 ..= m {
+		prev[j] = prev[j - 1] + SKIP_PATTERN
+	}
+	best := prev[m]
+
+	for i in 1 ..= len(sample) {
+		sc := to_lower(sample[i - 1])
+		curr[0] = 0
+
+		for j in 1 ..= m {
+			pc := to_lower(pattern[j - 1])
+
+			sub_step: int
+			if sc == pc {
+				if highlighted.bit_length != 0 {
+					packer.bit_set_set(highlighted, i - 1)
+				}
+				boundary := i == 1 || is_separator(sample[i - 2])
+				sub_step = MATCH + (BOUNDARY_BONUS if boundary else 0)
+			} else {
+				sub_step = MISMATCH
+			}
+
+			diag := prev[j - 1] + sub_step
+			skip_s := prev[j] + SKIP_SAMPLE
+			skip_p := curr[j - 1] + SKIP_PATTERN
+			curr[j] = max(diag, skip_s, skip_p)
+		}
+
+		if curr[m] > best do best = curr[m]
+		prev = curr
+	}
+
+	return best
+
+	to_lower :: proc(c: u8) -> u8 {
+		return (c + 32) if (c >= 'A' && c <= 'Z') else c
+	}
+
+	is_separator :: proc(c: u8) -> bool {
+		switch c {
+		case ' ', '_', '-', '.', '/', '\\', ':':
+			return true
+		}
+		return false
+	}
 }

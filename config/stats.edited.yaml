@@ -52,6 +52,7 @@ node:
   physics:
     radius: 32
     sprite: node
+    body_damage: 10
   health:
     energy: 15
     recharge_speed: 1
@@ -105,7 +106,7 @@ beam:
     speed: 600
     lifetime: 0.5
     radius: 8
-    body_damage: 4
+    body_damage: 10
   trail:
     quantity_per_tick: 1
     particle:

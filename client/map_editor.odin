@@ -261,6 +261,7 @@ ui_map_editor :: proc(client: ^Client) {
 			gap = PADDING,
 			padding = orui.padding(PADDING),
 			background_color = ui_color(.SECONDARY_FAINT),
+			layer = 100,
 		},
 	)
 
@@ -470,7 +471,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		pos.x + pos.y * client.ents.width,
 	)
 
-	if is_mouse_down(&client.ui, .LEFT) {
+	if is_key_down(&client.ui, .Map_Place) {
 		#partial input: switch ctx.brush {
 		case .Building:
 			if server_current ~ client_current do break
@@ -493,7 +494,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		}
 	}
 
-	if is_mouse_down(&client.ui, .RIGHT) {
+	if is_key_down(&client.ui, .Map_Erase) {
 		#partial switch ctx.brush {
 		case .Building:
 		case .Wall, .Floor:

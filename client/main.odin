@@ -437,13 +437,13 @@ client_compute_input :: proc(client: ^Client) {
 	ui := &client.ui
 	mouse_pos := client_mouse_pos(client)
 
-	if is_key_down(ui, .W) do input.keys |= {.Up}
-	if is_key_down(ui, .S) do input.keys |= {.Down}
-	if is_key_down(ui, .A) do input.keys |= {.Left}
-	if is_key_down(ui, .D) do input.keys |= {.Right}
+	if is_key_down(ui, .Up) do input.keys |= {.Up}
+	if is_key_down(ui, .Down) do input.keys |= {.Down}
+	if is_key_down(ui, .Left) do input.keys |= {.Left}
+	if is_key_down(ui, .Right) do input.keys |= {.Right}
 
-	if is_mouse_down(ui, .LEFT) do input.keys |= {.Click_Left}
-	if is_mouse_down(ui, .RIGHT) do input.keys |= {.Click_Right}
+	if is_key_down(ui, .Shoot) do input.keys |= {.Shoot}
+	if is_key_down(ui, .Parry) do input.keys |= {.Parry}
 
 	input.relative_mouse_pos =
 		mouse_pos - sim.ents_get(&client.ents, client.ent).pos
@@ -456,7 +456,7 @@ client_compute_input :: proc(client: ^Client) {
 	return
 }
 
-ui_bs_update :: proc(client: ^Client) {
+ui_build_selection_update :: proc(client: ^Client) {
 	ui := &client.ui
 	mouse_pos := client_mouse_pos(client)
 
@@ -470,7 +470,7 @@ ui_bs_update :: proc(client: ^Client) {
 	se := sim.ents_get(&client.ents, client.bs.src_building)
 	de := sim.ents_get(&client.ents, client.bs.dst_building)
 
-	if is_mouse_pressed(ui, .LEFT) {
+	if is_key_pressed(ui, .Build_Select_Start) {
 		if he != se &&
 		   (he_is_friendly || he == sim.NIL_ENT) &&
 		   client.bs.place_pos == nil {
@@ -479,7 +479,7 @@ ui_bs_update :: proc(client: ^Client) {
 		}
 	}
 
-	select_dst: if is_mouse_released(ui, .LEFT) {
+	select_dst: if is_key_released(ui, .Build_Select_End) {
 		if has_valid_bs(client) {
 			if he_is_friendly {
 				if se != sim.NIL_ENT && he != sim.NIL_ENT {
@@ -504,7 +504,7 @@ ui_bs_update :: proc(client: ^Client) {
 		client.bs = {}
 	}
 
-	if is_mouse_pressed(ui, .RIGHT) {
+	if is_key_pressed(ui, .Build_Select_Clear) {
 		if se != sim.NIL_ENT {
 			client.last_handled_button = .RIGHT
 			client.bs = {}
@@ -642,7 +642,7 @@ client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
 	client.lasers.slots = make([]Laser, MAX_LASERS)
 	client.ent_extra = make([]Ent_Extra, sim.MAX_ENTS_PER_GAME)
 	client.config_allocator = arna.init_from_buffer(make([]u8, 1 << 16))
-	client.content_editing.upload_arena = arna.init_from_buffer(
+	client.content_editor.upload_arena = arna.init_from_buffer(
 		make([]u8, 1 << 14),
 	)
 
@@ -851,7 +851,7 @@ client_update :: proc(client: ^Client) {
 		client.camera.zoom = clamp(client.camera.zoom, 0.1, 2)
 	}
 
-	ui_bs_update(client)
+	ui_build_selection_update(client)
 	if client.map_editing.expanded {
 		ui_map_editor_update(client)
 	}
@@ -891,7 +891,7 @@ client_update :: proc(client: ^Client) {
 		x := client_ent_extra_get(client, client.ent)
 		if x == NIL_ENT_EXTRA do break input_integration
 
-		if is_key_pressed(client, .V) {
+		if is_key_pressed(client, .Abandon_Ship) {
 			tcp_send(client, sim.Client_Cmd{kind = .Abandon})
 		}
 

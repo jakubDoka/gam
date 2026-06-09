@@ -385,7 +385,7 @@ req_connect :: proc(
 }
 
 upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
-	ctx := &client.content_editing
+	ctx := &client.content_editor
 
 	if len(ctx.dropped_assets) == 0 {
 		log.warn("we are trying to upload assets but nothing is dropped")

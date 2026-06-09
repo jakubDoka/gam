@@ -14,21 +14,27 @@ import "core:log"
 import "core:math"
 import "core:os"
 import "core:reflect"
+import "core:sort"
 import "core:strconv"
 import "core:strings"
 import "core:time"
 import rl "vendor:raylib"
 
 ui_content_editor :: proc(client: ^Client) {
-	ctx := &client.ui.content_editing
+	ctx := &client.ui.content_editor
+
+	if is_key_pressed(client, .Exit) {
+		emit_event(client, .Quit_Content_Editor, {priority = 2})
+	}
 
 	box(
-		id("content-ediitor-centerer"),
+		id("content-editor-centerer"),
 		{
 			height = orui.grow(),
 			width = orui.grow(),
 			align_main = .Center,
 			position = {.Absolute, {}},
+			layer = 100,
 		},
 	)
 
@@ -37,7 +43,7 @@ ui_content_editor :: proc(client: ^Client) {
 		ctx.expanded = false
 	}
 
-	ce := id("content-ediitor")
+	ce := id("content-editor")
 	box(
 		ce,
 		{
@@ -60,24 +66,66 @@ ui_content_editor :: proc(client: ^Client) {
 			ctx.prev_scroll = 0
 		}
 
+		query, confirmed := ui_text_input(
+			id("content-editor-search"),
+			&ctx.search,
+			{
+				width = orui.grow(),
+				height = orui.fixed(ROW_HEIGHT),
+				placeholder = "fuzzy search...",
+				border = 1,
+			},
+		)
+
 		prefix := min(1, len(client.ents.stats))
-		for &stats, i in client.ents.stats[prefix:] {
+		stat_slots := client.ents.stats[prefix:]
+
+		Slot :: struct {
+			using ref: ^sim.Ent_Stats,
+			score:     int,
+		}
+
+		order := make([]Slot, len(stat_slots), context.temp_allocator)
+		for &o, i in order {
+			o.ref = &stat_slots[i]
+			o.score = fuzzy_rank(nm.str(&o.name), query)
+		}
+
+		if len(query) != 0 {
+			sort.merge_sort_proc(order, proc(a: Slot, b: Slot) -> int {
+				return sort.compare_ints(b.score, a.score)
+			})
+		}
+
+		for stats, i in order {
+			name := nm.str(&stats.name)
+			matched_chars := new(packer.Bit_Set, context.temp_allocator)
+			matched_chars^ = packer.bit_set_init(
+				len(name),
+				context.temp_allocator,
+			)
+			fuzzy_rank(name, query, matched_chars^)
+
 			if ui_button(
-				id("stat-selector", i),
-				{
-					label = nm.str(&stats.name),
-					width = orui.grow(),
-					height = orui.fixed(ROW_HEIGHT),
-					background = .SECONDARY,
-					focused_color = .PRIMARY,
-				},
-			) {
+				   id("stat-selector", i),
+				   {
+					   label = name,
+					   width = orui.grow(),
+					   height = orui.fixed(ROW_HEIGHT),
+					   background = .SECONDARY,
+					   focused_color = .PRIMARY,
+					   custom_dc = draw_call_init_text_highlight(
+						   matched_chars,
+					   ),
+				   },
+			   ) ||
+			   (i == 0 && confirmed) {
 				ctx.selected = stats.id
 				ctx.prev_scroll = prev_scroll
 				orui.set_scroll_offset(ce, 0)
 				clear(&ctx.edit_name.buf)
-				append(&ctx.edit_name.buf, nm.str(&stats.name))
-				ctx.stat_edit_state = stats
+				append(&ctx.edit_name.buf, name)
+				ctx.stat_edit_state = stats.ref^
 			}
 		}
 
@@ -181,12 +229,13 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 
 			if ui_icon_button(
-				id("stat-selector-close"),
-				ROW_HEIGHT,
-				.ICON_CROSS,
-				"Close editor",
-			) {
-				ctx.selected = 0
+				   id("stat-selector-close"),
+				   ROW_HEIGHT,
+				   .ICON_CROSS,
+				   "Close editor",
+			   ) ||
+			   is_key_pressed(client, .Exit) {
+				emit_event(client, .Close_Stat_Editor, {priority = 3})
 			}
 		}
 
@@ -206,7 +255,7 @@ ui_content_editor :: proc(client: ^Client) {
 }
 
 ui_file_upload :: proc(client: ^Client) {
-	ctx := &client.content_editing
+	ctx := &client.content_editor
 
 	area_id := id("drop-sprite-area")
 

@@ -2,6 +2,7 @@ package client
 
 import "../sim"
 import "../util/nm"
+import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
 import "base:runtime"
@@ -23,30 +24,64 @@ ui_color_to_hsv :: proc(color: rl.Color) -> (hsv: rl.Vector4) {
 	return {def_hsv.x, def_hsv.y, def_hsv.z, f32(color.a) / 255}
 }
 
-is_key_down :: proc(r: ^UI_Reactor, key: rl.KeyboardKey) -> bool {
-	return rl.IsKeyDown(key) && r.orui_ctx.prev_focus_id == 0
+is_key_down :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+	r.last_key_bind = key
+	switch b in BIND_TO_KEY[key] {
+	case rl.KeyboardKey:
+		return rl.IsKeyDown(b) && r.orui_ctx.prev_focus_id == 0
+	case rl.MouseButton:
+		return rl.IsMouseButtonDown(b) && !ui_is_interacting(r, b)
+	case Mod_And_Key:
+		return rl.IsKeyDown(b.key) && rl.IsKeyDown(b.mod)
+	case:
+		panic("wut")
+	}
 }
 
-is_key_pressed :: proc(r: ^UI_Reactor, key: rl.KeyboardKey) -> bool {
-	return rl.IsKeyPressed(key) && r.orui_ctx.prev_focus_id == 0
+is_key_pressed :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+	r.last_key_bind = key
+	switch b in BIND_TO_KEY[key] {
+	case rl.KeyboardKey:
+		return(
+			rl.IsKeyPressed(b) &&
+			(r.orui_ctx.prev_focus_id == 0 || b == .ESCAPE) \
+		)
+	case rl.MouseButton:
+		return rl.IsMouseButtonPressed(b) && !ui_is_interacting(r, b)
+	case Mod_And_Key:
+		return rl.IsKeyPressed(b.key) && rl.IsKeyDown(b.mod)
+	case:
+		panic("wut")
+	}
 }
 
-is_mouse_down :: proc(r: ^UI_Reactor, button: rl.MouseButton) -> bool {
-	return rl.IsMouseButtonDown(button) && !ui_is_interacting(r, button)
-}
-
-is_mouse_released :: proc(r: ^UI_Reactor, button: rl.MouseButton) -> bool {
-	return rl.IsMouseButtonReleased(button) && !ui_is_interacting(r, button)
-}
-
-is_mouse_pressed :: proc(r: ^UI_Reactor, button: rl.MouseButton) -> bool {
-	return rl.IsMouseButtonPressed(button) && !ui_is_interacting(r, button)
+is_key_released :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+	r.last_key_bind = key
+	switch b in BIND_TO_KEY[key] {
+	case rl.KeyboardKey:
+		return rl.IsKeyReleased(b) && r.orui_ctx.prev_focus_id == 0
+	case rl.MouseButton:
+		return rl.IsMouseButtonReleased(b) && !ui_is_interacting(r, b)
+	case Mod_And_Key:
+		return rl.IsKeyReleased(b.key) && rl.IsKeyDown(b.mod)
+	case:
+		panic("wut")
+	}
 }
 
 Draw_Call :: bit_field uintptr {
 	kind:     Draw_Call_Kind | 3,
 	icon:     rl.GuiIconName | 8,
 	expanded: bool           | 1,
+}
+
+draw_call_init_text_highlight :: proc(set: ^packer.Bit_Set) -> Draw_Call {
+	return Draw_Call(uintptr(set) | uintptr(Draw_Call_Kind.Text_Highlight_Set))
+}
+
+draw_call_extract_set :: proc(call: Draw_Call) -> ^packer.Bit_Set {
+	assert(call.kind == .Text_Highlight_Set)
+	return auto_cast (uintptr(call) & ~uintptr(0b111))
 }
 
 draw_call_init_hsv :: proc(
@@ -67,6 +102,7 @@ Draw_Call_Kind :: enum uint {
 	Rl_Color_Panel,
 	Rl_Hue_Panel,
 	Rl_Alpha_Panel,
+	Text_Highlight_Set,
 }
 
 UI_Color :: enum {
@@ -217,6 +253,7 @@ Button_Config :: struct {
 	border:        f32,
 	padding:       Maybe(orui.Edges),
 	position:      orui.Position,
+	custom_dc:     Draw_Call,
 }
 
 ui_button :: proc(uid: orui.Id, config: Button_Config) -> bool {
@@ -227,7 +264,7 @@ ui_button :: proc(uid: orui.Id, config: Button_Config) -> bool {
 
 	hovered := config.toggle.? or_else orui.hovered() && !orui.active()
 
-	custom_event: rawptr = nil
+	custom_event := rawptr(config.custom_dc)
 
 	if config.icon != .ICON_NONE {
 		custom_event = rawptr(Draw_Call{kind = .Rl_Icon, icon = config.icon})
@@ -1067,6 +1104,41 @@ ui_render :: proc() {
 					},
 					rl.WHITE,
 				)
+			case .Text_Highlight_Set:
+				set := draw_call_extract_set(call)
+
+				x, y := orui.text_origin(orui.current_context, elem)
+				inner_width := orui.inner_width(elem)
+
+				start := -1
+				for i in 0 ..= len(elem.text) {
+					if packer.bit_set_contains_unbounded(set^, i) {
+						if start == -1 {
+							start = i
+						}
+					} else if start != -1 {
+
+						call, _ := orui.render_selection_cmd(
+							orui.current_context,
+							elem,
+							elem.text,
+							0,
+							len(elem.text),
+							elem._text_width,
+							x,
+							y,
+							1,
+							inner_width,
+							{start = start, end = i},
+						)
+						start = -1
+
+						call.color = ui_color(.PRIMARY_FAINT)
+						call.size += 2
+
+						orui.render_command({.Rectangle, call})
+					}
+				}
 			}
 		}
 

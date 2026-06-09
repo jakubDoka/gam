@@ -502,7 +502,7 @@ ents_integrate_input :: proc(
 		ents,
 		e.id,
 		e.pos + input.relative_mouse_pos,
-		.Click_Left in input.keys,
+		.Shoot in input.keys,
 		rtt,
 		&input.next_net_id,
 	)
@@ -511,7 +511,7 @@ ents_integrate_input :: proc(
 		ents,
 		e.id,
 		e.pos + input.relative_mouse_pos,
-		.Click_Right in input.keys,
+		.Parry in input.keys,
 		rtt,
 		&input.next_net_id,
 	)
