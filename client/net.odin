@@ -231,6 +231,13 @@ client_handle_packet :: proc(
 
 			log.debug("player:", id, ":", nm.str(&name))
 		}
+
+		client.player_idx = -1
+		for r, i in client.players {
+			if r.pk == client.hctx.ch.id {
+				client.player_idx = i
+			}
+		}
 	case sim.Server_Stats:
 		d := sim.Decoder{p.packed}
 		count := sim.decode(&d, u16) or_return

@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
 import "core:reflect"
+import "core:slice"
 import "core:strings"
 import rl "vendor:raylib"
 
@@ -25,45 +26,63 @@ ui_color_to_hsv :: proc(color: rl.Color) -> (hsv: rl.Vector4) {
 }
 
 is_key_down :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
-	r.last_key_bind = key
-	switch b in BIND_TO_KEY[key] {
-	case rl.KeyboardKey:
-		return rl.IsKeyDown(b) && r.orui_ctx.prev_focus_id == 0
-	case rl.MouseButton:
-		return rl.IsMouseButtonDown(b) && !ui_is_interacting(r, b)
-	case Mod_And_Key:
-		return rl.IsKeyDown(b.key) && rl.IsKeyDown(b.mod)
-	case:
-		panic("wut")
-	}
+	return is_key(.Down, r, key)
 }
 
 is_key_pressed :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
-	r.last_key_bind = key
-	switch b in BIND_TO_KEY[key] {
-	case rl.KeyboardKey:
-		return(
-			rl.IsKeyPressed(b) &&
-			(r.orui_ctx.prev_focus_id == 0 || b == .ESCAPE) \
-		)
-	case rl.MouseButton:
-		return rl.IsMouseButtonPressed(b) && !ui_is_interacting(r, b)
-	case Mod_And_Key:
-		return rl.IsKeyPressed(b.key) && rl.IsKeyDown(b.mod)
-	case:
-		panic("wut")
-	}
+	return is_key(.Pressed, r, key)
 }
 
 is_key_released :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+	return is_key(.Released, r, key)
+}
+
+Press_Kind :: enum {
+	Pressed,
+	Down,
+	Released,
+}
+
+IS_KEY := [Press_Kind]proc "cdecl" (_: rl.KeyboardKey) -> bool {
+	.Pressed  = rl.IsKeyPressed,
+	.Down     = rl.IsKeyDown,
+	.Released = rl.IsKeyReleased,
+}
+
+IS_MOUSE := [Press_Kind]proc "cdecl" (_: rl.MouseButton) -> bool {
+	.Pressed  = rl.IsMouseButtonPressed,
+	.Down     = rl.IsMouseButtonDown,
+	.Released = rl.IsMouseButtonReleased,
+}
+
+is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: Key_Bind) -> bool {
+	key_mode := IS_KEY[kind]
+	mouse_mode := IS_MOUSE[kind]
+
+	bind := BIND_TO_KEY[key]
+	_, ok := slice.linear_search(
+		r.captured_key_binds[:],
+		key_or_mouse_from_key(bind),
+	)
+	if ok do return false
+
 	r.last_key_bind = key
 	switch b in BIND_TO_KEY[key] {
 	case rl.KeyboardKey:
-		return rl.IsKeyReleased(b) && r.orui_ctx.prev_focus_id == 0
+		return key_mode(b) && (r.orui_ctx.prev_focus_id == 0 || b == .ESCAPE)
 	case rl.MouseButton:
-		return rl.IsMouseButtonReleased(b) && !ui_is_interacting(r, b)
+		return mouse_mode(b) && !ui_is_interacting(r, b)
 	case Mod_And_Key:
-		return rl.IsKeyReleased(b.key) && rl.IsKeyDown(b.mod)
+		countermod := b.mod
+		#partial switch b.mod {
+		case .LEFT_CONTROL:
+			countermod = .RIGHT_CONTROL
+		case:
+		}
+		return(
+			key_mode(b.key) &&
+			(rl.IsKeyDown(b.mod) || rl.IsKeyDown(countermod)) \
+		)
 	case:
 		panic("wut")
 	}
@@ -316,7 +335,7 @@ ui_button :: proc(uid: orui.Id, config: Button_Config) -> bool {
 
 	ui_tooltip_end(uid, config.tooltip)
 
-	if pressed do r.last_handled_button = .LEFT
+	if pressed do append(&r.captured_key_binds, Mb.LEFT)
 
 	return pressed
 }
@@ -338,7 +357,7 @@ ui_tooltip_end :: proc(uid: orui.Id, value: string, prefix: string = "") {
 				position = {.Absolute, {}},
 				placement = orui.placement(.Bottom, .Top),
 				bounds = {.Window, .Flip, PADDING},
-				layer = 200,
+				layer = 500,
 				clip = {.None, {}},
 				font_size = f32(font_medium.baseSize),
 				color = ui_color(.FOREGROUND),

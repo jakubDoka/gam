@@ -132,11 +132,11 @@ Theme_Color :: struct #raw_union {
 // this struct
 UI_Reactor :: struct {
 	assets:                  [dynamic]sim.Asset_ID,
-	last_handled_button:     Maybe(rl.MouseButton),
 	ip_buf:                  strings.Builder,
 	ip_error:                string,
 	colors:                  UI_Colors,
 	settings_expanded:       bool,
+	building:                bool,
 	servers:                 UI_Servers,
 	profiles:                UI_Profiles,
 	content_editor:          UI_Content_Editor,
@@ -152,9 +152,29 @@ UI_Reactor :: struct {
 	control_selection_pivot: sim.Vec,
 	events:                  [dynamic]UI_Event,
 	last_key_bind:           Key_Bind,
+	captured_key_binds:      [dynamic; 16]Key_Or_Mouse,
+}
+
+Key_Or_Mouse :: union {
+	Kk,
+	Mb,
+}
+
+key_or_mouse_from_key :: proc(key: Key) -> Key_Or_Mouse {
+	switch k in key {
+	case rl.KeyboardKey:
+		return k
+	case rl.MouseButton:
+		return k
+	case Mod_And_Key:
+		return k.key
+	case:
+		panic("wut")
+	}
 }
 
 UI_Event_Kind :: enum {
+	Select_Stat,
 	Select_Team,
 	Delete_Team,
 	Select_Profile,
@@ -166,6 +186,7 @@ UI_Event_Kind :: enum {
 	Open_Map_Editor,
 	Close_Map_Editor,
 	Focus,
+	Apply_Content_Changes,
 }
 
 Key_Bind :: enum {
@@ -234,6 +255,7 @@ UI_Event :: struct {
 	bind:         Key_Bind,
 	target:       orui.Id,
 	carret_index: int,
+	stats:        sim.Ent_Stats_ID,
 }
 
 emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
@@ -410,6 +432,7 @@ ui_destroy :: proc(client: ^UI_Reactor) {
 		return
 	}
 
+	delete(client.events)
 	delete(client.selected_units)
 	for e in client.servers.server_info_cache do free(e)
 	delete(client.servers.server_info_cache)
@@ -1279,14 +1302,7 @@ ui_game_hud :: proc(client: ^Client) {
 	selected_profile := ui_get_selected_user(client)
 
 	if nm.ln(selected_profile.name) != 0 {
-		player_idx := -1
-		for r, i in client.players {
-			if r.pk == client.hctx.ch.id {
-				player_idx = i
-			}
-		}
-
-		if player_idx == -1 {
+		if client.player_idx == -1 {
 			if len(client.players) != 0 {
 				ui_error_label(
 					orui.id("profile-selection-error"),
@@ -1296,9 +1312,11 @@ ui_game_hud :: proc(client: ^Client) {
 				)
 			}
 		} else {
-			player := client.players[player_idx]
+			player := client.players[client.player_idx]
 
-			if client.content_editor.expanded && client.has_dirty_config {
+			if (client.content_editor.expanded ||
+				   client.content_editor.selected != 0) &&
+			   client.has_dirty_config {
 				if ui_icon_button(
 					   id("content-edinting-save"),
 					   ROW_HEIGHT,
@@ -1541,10 +1559,9 @@ ui_is_interacting :: proc(
 	button: Maybe(rl.MouseButton) = {},
 	ignore_map_editor := false,
 ) -> bool {
-	if orui.current_context.pointer_capture_id != 0 do return true
+	if ui.building do return false
 
-	button, ok := button.?
-	if ok && button == ui.last_handled_button do return true
+	if orui.current_context.pointer_capture_id != 0 do return true
 
 	if !ignore_map_editor && ui_map_eats_input(ui) do return true
 
@@ -1629,7 +1646,7 @@ ui_ship_selection :: proc(client: ^Client) {
 	}
 
 	{box(
-			id("ship-selection-team"),
+			id("ship-selection"),
 			{width = orui.grow(), align_main = .Center, gap = PADDING},
 		)
 
@@ -1656,6 +1673,7 @@ ui_ship_selection :: proc(client: ^Client) {
 					focused_color = .NONE,
 					sprite = s.sprite.id,
 					disabled = client.selected_team == 0,
+					padding = orui.padding(orui.hovered() ? 0 : PADDING),
 				},
 			) {
 				tcp_send(
@@ -1686,6 +1704,7 @@ ui_build_popup :: proc(client: ^Client, tile: sim.Map_Pos) {
 			rows = 5,
 			padding = orui.padding(PADDING),
 			background_color = ui_color(.SECONDARY),
+			layer = 100,
 		},
 	)
 
@@ -1743,6 +1762,7 @@ ui_edit_popup :: proc(client: ^Client) {
 			rows = 2,
 			padding = orui.padding(PADDING),
 			background_color = ui_color(.SECONDARY),
+			layer = 100,
 		},
 	)
 
@@ -1754,6 +1774,21 @@ ui_edit_popup :: proc(client: ^Client) {
 	) {
 		tcp_send(client, sim.Client_Cmd{kind = .Delete, ent = e.net_id})
 		client.bs = {}
+	}
+
+	if client.player_idx != -1 {
+		player := client.players[client.player_idx]
+
+		if .Edit_Content in player.permissions &&
+		   ui_icon_button(
+			   id("edit-popup-edit-stat"),
+			   ROW_HEIGHT,
+			   .ICON_PENCIL_BIG,
+			   "Edit entity stats",
+		   ) {
+			emit_event(client, .Select_Stat, {stats = e.stats})
+			client.bs = {}
+		}
 	}
 }
 
@@ -1775,6 +1810,7 @@ ui_connect_popup :: proc(client: ^Client) {
 			rows = 2,
 			padding = orui.padding(PADDING),
 			background_color = ui_color(.SECONDARY),
+			layer = 100,
 		},
 	)
 
@@ -1809,12 +1845,30 @@ ui_connect_popup :: proc(client: ^Client) {
 }
 
 ui_build :: proc(client: ^Client) {
+	client.building = true
+	defer client.building = false
+
+	keep := 0
+	for key in client.captured_key_binds {
+		released := false
+		switch k in key {
+		case rl.KeyboardKey:
+			released = rl.IsKeyReleased(k)
+		case rl.MouseButton:
+			released = rl.IsMouseButtonReleased(k)
+		}
+		if !released {
+			client.captured_key_binds[keep] = key
+			keep += 1
+		}
+	}
+	resize(&client.captured_key_binds, keep)
+
 	orui.begin(&client.orui_ctx, rl.GetScreenWidth(), rl.GetScreenHeight())
 
-	for b in ([?]rl.MouseButton{.LEFT, .RIGHT}) {
-		if rl.IsMouseButtonReleased(b) && b == client.last_handled_button {
-			client.last_handled_button = {}
-		}
+	if !ui_is_interacting(client, ignore_map_editor = true) {
+		client.camera.zoom *= 1 - rl.GetMouseWheelMove() * 0.2
+		client.camera.zoom = clamp(client.camera.zoom, 0.1, 2)
 	}
 
 	for &color, vl in client.ui.colors.picker_rgbs {
@@ -1860,7 +1914,8 @@ ui_build :: proc(client: ^Client) {
 				ui_map_editor(client)
 			}
 
-			if client.content_editor.expanded {
+			if client.content_editor.expanded ||
+			   client.content_editor.selected != 0 {
 				ui_content_editor(client)
 			}
 
@@ -1891,6 +1946,13 @@ ui_build :: proc(client: ^Client) {
 	winning_kb_events: [Key_Bind]UI_Event
 
 	for &ev in client.events {
+		if ev.bind != .Nil {
+			append(
+				&client.captured_key_binds,
+				key_or_mouse_from_key(BIND_TO_KEY[ev.bind]),
+			)
+		}
+
 		switch ev.kind {
 		case .Disconnect,
 		     .Quit_Content_Editor,
@@ -1899,12 +1961,22 @@ ui_build :: proc(client: ^Client) {
 		     .Close_Stat_Editor,
 		     .Close_Map_Editor,
 		     .Open_Map_Editor,
+		     .Apply_Content_Changes,
 		     .Focus:
 			assert(ev.bind != .Nil)
 			slot := &winning_kb_events[ev.bind]
 			if slot.priority < ev.priority {
 				slot^ = ev
 			}
+		case .Select_Stat:
+			ctx := &client.content_editor
+
+			stats := sim.ents_stats_get(&client.ents, ev.stats)
+
+			ctx.selected = ev.stats
+			clear(&ctx.edit_name.buf)
+			append(&ctx.edit_name.buf, nm.str(&stats.name))
+			ctx.stat_edit_state = stats^
 		case .Select_Team:
 			client.selected_team = ev.team
 		case .Delete_Team:
@@ -1942,6 +2014,14 @@ ui_build :: proc(client: ^Client) {
 		case .Focus:
 			orui.current_context.focus_id = ev.target
 			orui.current_context.caret_index = ev.carret_index
+		case .Apply_Content_Changes:
+			tcp_send(
+				client,
+				sim.Client_Content_Action {
+					kind = .Edit,
+					stats = client.content_editor.stat_edit_state,
+				},
+			)
 		case:
 			log.warn("unhandled keybing event:", ev)
 		}

@@ -290,8 +290,8 @@ ui_map_editor :: proc(client: ^Client) {
 				foreground = selected ? .FOREGROUND : deselected,
 				border_color = selected ? .PRIMARY : .NONE,
 				border = 1,
-				disabled = brush == .Building && ctx.team == 0,
 				icon = selected ? .ICON_PENCIL : .ICON_NONE,
+				tooltip = reflect.enum_name_from_value(brush) or_else "",
 			},
 		) {
 			ctx.editing_brush = selected
@@ -374,7 +374,7 @@ ui_map_editor :: proc(client: ^Client) {
 				{
 					background_color = ui_color(.SECONDARY),
 					position = {.Absolute, {}},
-					layer = 100,
+					layer = 300,
 					bounds = {.Window, .Shift, PADDING},
 				},
 			)
@@ -480,7 +480,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		case .Building:
 			if server_current ~ client_current do break
 			if client.bs == {} {
-				client.last_handled_button = .LEFT
+				append(&client.captured_key_binds, Mb.LEFT)
 				client.bs.place_pos = pos
 			}
 		case .Wall, .Floor:

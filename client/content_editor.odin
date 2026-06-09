@@ -39,8 +39,10 @@ ui_content_editor :: proc(client: ^Client) {
 	)
 
 	if orui.hovered() && rl.IsMouseButtonPressed(.LEFT) {
-		client.ui.last_handled_button = .LEFT
+		append(&client.captured_key_binds, Mb.LEFT)
+		if !ctx.expanded do ctx.selected = 0
 		ctx.expanded = false
+		return
 	}
 
 	ce := id("content-editor")
@@ -115,12 +117,9 @@ ui_content_editor :: proc(client: ^Client) {
 				   },
 			   ) ||
 			   (i == 0 && confirmed) {
-				ctx.selected = stats.id
 				ctx.prev_scroll = prev_scroll
 				orui.set_scroll_offset(ce, 0)
-				clear(&ctx.edit_name.buf)
-				append(&ctx.edit_name.buf, name)
-				ctx.stat_edit_state = stats.ref^
+				emit_event(client, .Select_Stat, {stats = stats.id})
 			}
 		}
 
@@ -208,19 +207,13 @@ ui_content_editor :: proc(client: ^Client) {
 
 			if !reflect.equal(stats^, ctx.stat_edit_state, true) {
 				if ui_icon_button(
-					id("stat-selector-save"),
-					ROW_HEIGHT,
-					.ICON_FILE_OPEN,
-					"Save changes",
-				) {
-					stats := ctx.stat_edit_state
-					tcp_send(
-						client,
-						sim.Client_Content_Action {
-							kind = .Edit,
-							stats = ctx.stat_edit_state,
-						},
-					)
+					   id("stat-selector-save"),
+					   ROW_HEIGHT,
+					   .ICON_FILE_OPEN,
+					   "Save changes",
+				   ) ||
+				   is_key_pressed(client, .Save) {
+					emit_event(client, .Apply_Content_Changes, {priority = 2})
 				}
 			}
 
@@ -269,6 +262,11 @@ ui_content_editor :: proc(client: ^Client) {
 			},
 		)
 
+		if just_focused {
+			ctx.stat_editor.current_field = 0
+			ctx.stat_editor.last_field = 0
+		}
+
 		if len(query) != 0 {
 			Field_Slot :: struct {
 				score: int,
@@ -280,7 +278,7 @@ ui_content_editor :: proc(client: ^Client) {
 			props := make([dynamic]Field_Slot, context.temp_allocator)
 			name_stack := make([dynamic]string, context.temp_allocator)
 
-			collect_props(stats^, "", &name_stack, &props)
+			collect_props(ctx.stat_edit_state, "", &name_stack, &props)
 
 			for &prop in props {
 				prop.score = fuzzy_rank(prop.name, query)
@@ -293,8 +291,8 @@ ui_content_editor :: proc(client: ^Client) {
 				},
 			)
 
-			if just_focused {
-				ctx.stat_editor.current_field = 0
+			if confirmed {
+				clear(&ctx.stat_editor.string_field.buf)
 			}
 
 			for prop, i in props {
@@ -895,6 +893,10 @@ ui_content_field_edit :: proc(
 
 	initial_select := seb.current_field != seb.last_field
 	seb.last_field = seb.current_field
+
+	if initial_select {
+		fmt.println("wooba")
+	}
 
 	if initial_select {
 		clear(&seb.string_field.buf)

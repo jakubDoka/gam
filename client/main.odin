@@ -171,6 +171,7 @@ Client :: struct {
 	input_display_texture: rl.RenderTexture2D,
 	asset_loader:          ^Req,
 	asset_uploader:        ^Req,
+	player_idx:            int,
 }
 
 @(rodata)
@@ -472,7 +473,7 @@ ui_build_selection_update :: proc(client: ^Client) {
 		if he != se &&
 		   (he_is_friendly || he == sim.NIL_ENT) &&
 		   client.bs.place_pos == nil {
-			client.last_handled_button = .LEFT
+			append(&client.captured_key_binds, Mb.LEFT)
 			client.bs.src_building = he.id
 		}
 	}
@@ -494,6 +495,7 @@ ui_build_selection_update :: proc(client: ^Client) {
 			   tile != stile &&
 			   !sim.map_tile_is_solid(&client.ents, tile) &&
 			   client.bs.place_pos == nil {
+				fmt.println("wuta")
 				client.bs.place_pos = tile
 				break select_dst
 			}
@@ -504,7 +506,7 @@ ui_build_selection_update :: proc(client: ^Client) {
 
 	if is_key_pressed(ui, .Build_Select_Clear) {
 		if se != sim.NIL_ENT {
-			client.last_handled_button = .RIGHT
+			append(&client.captured_key_binds, Mb.RIGHT)
 			client.bs = {}
 		}
 	}
@@ -521,7 +523,8 @@ has_valid_bs :: proc(client: ^Client) -> bool {
 	tile := sim.map_vec_to_pos(pos)
 	snapped_pos := sim.map_pos_to_vec(tile)
 
-	if linalg.distance(snapped_pos, se.pos) > ss.bind_range do return false
+	if linalg.distance(snapped_pos, se.pos) > ss.bind_range &&
+	   !client.map_editing.expanded {return false}
 
 	t, _, _ := sim.map_wall_collision(
 		&client.ents,
@@ -571,9 +574,23 @@ client_handle_playable_ent :: proc(client: ^Client, e: ^sim.Ent) {
 client_find_hovered_building :: proc(
 	client: ^Client,
 	pos: sim.Vec,
-) -> ^sim.Ent {
+) -> (
+	b: ^sim.Ent,
+) {
 	tile := sim.map_vec_to_pos(pos)
-	return sim.ents_building_get(&client.ents, tile)
+	b = sim.ents_building_get(&client.ents, tile)
+
+	if b == sim.NIL_ENT {
+		query := sim.ents_query(&client.ents, pos, 0)
+		for e in sim.ents_query_next(&query) {
+			s := sim.ents_stats_get(&client.ents, e.stats)
+			if linalg.distance(e.pos, pos) < s.radius {
+				return e
+			}
+		}
+	}
+
+	return
 }
 
 client_find_hovered_ent :: proc(client: ^Client, pos: sim.Vec) -> ^sim.Ent {
@@ -632,6 +649,7 @@ client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
 
 	client.l = hr.l
 
+	client.player_idx = -1
 	client.camera.zoom = 1
 	client.udp.recv_buf = make([]u8, 1 << 16)
 	sim.packet_buffer_reserve(&client.udp.send_buf, 16)
@@ -843,11 +861,6 @@ client_update :: proc(client: ^Client) {
 	rl.BeginDrawing()
 
 	ui_build(client)
-
-	if !ui_is_interacting(client, ignore_map_editor = true) {
-		client.camera.zoom *= 1 - rl.GetMouseWheelMove() * 0.2
-		client.camera.zoom = clamp(client.camera.zoom, 0.1, 2)
-	}
 
 	ui_build_selection_update(client)
 	if client.map_editing.expanded {

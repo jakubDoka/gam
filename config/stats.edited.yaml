@@ -1,4 +1,5 @@
 core:
+  placable: true
   can_spawn_player: true
   physics:
     radius: 64
@@ -8,6 +9,8 @@ core:
     energy_drain: -3
     recharge_speed: 2
     bind_range: 500
+  explosion:
+    on_contact: true
 snipa:
   playable: true
   kind: Unit
