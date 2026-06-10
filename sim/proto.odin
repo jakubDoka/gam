@@ -371,7 +371,7 @@ Server_Packet :: union #no_nil {
 }
 
 Crypt_Header :: struct {
-	len: u16,
+	len: u32,
 	tag: Tag,
 }
 
@@ -461,7 +461,17 @@ decode_aligned_slice :: proc(
 	vl: []T,
 	ok: bool,
 ) {
-	assert(mem.is_aligned(raw_data(d.remining), align_of(T)))
+	if !mem.is_aligned(raw_data(d.remining), align_of(T)) {
+		log.error(
+			"unaligned slice, expected",
+			align_of(T),
+			"got",
+			1 <<
+			intrinsics.count_trailing_zeros(uintptr(raw_data(d.remining))),
+		)
+		return
+	}
+
 	if len(d.remining) < size_of(T) * elems {
 		log.errorf(
 			"cant slice out %v bytes, remining %v",

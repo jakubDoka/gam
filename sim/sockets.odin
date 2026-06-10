@@ -456,7 +456,7 @@ end_crypt_packet :: proc(sec: ^Secret_Key, buf: []u8, e: Encoder) -> int {
 	if sec == nil {
 		header^ = {}
 	} else {
-		header.len = u16(len)
+		header.len = u32(len)
 		encrypt(sec, &header.tag, buf[size_of(Crypt_Header):][:header.len])
 	}
 	return size_of(Crypt_Header) + len

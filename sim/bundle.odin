@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:log"
 import "core:mem"
 import "core:reflect"
+import "core:slice"
 import "core:testing"
 
 SPRITE_DIR :: "config/sprites"
@@ -24,57 +25,15 @@ DIR_BY_TYPE := [Asset_Type]string {
 	.Sprite = SPRITE_DIR,
 }
 
-Bundle_Header :: struct {
-	version: int,
-	files:   []Bundle_File_Header,
-}
-
-Bundle_File_Type :: enum int {
-	Config,
-	Sprite,
-	Map,
-}
-
-Bundle_File_Header :: struct {
-	type: Bundle_File_Type,
-	name: string,
-	data: []u8,
-}
-
-File_Slice :: struct($T: typeid) #raw_union {
-	absolute:       []T,
-	using relative: Relative_File_Slice,
-}
-
 Relative_File_Slice :: struct {
 	offset: int,
 	len:    int,
 }
 
 Any_File_Slice :: struct #raw_union {
+	custom:      Any_Encoding,
 	absolute:    runtime.Raw_Slice,
 	using inner: Relative_File_Slice,
-}
-
-load_sprite :: proc(
-	loader: ^Asset_Loader,
-	path: string,
-) -> (
-	Asset_ID,
-	string,
-) {
-	files := (^[]Bundle_File_Header)(loader.asoc_data)^
-
-	id: int
-	for file in files {
-		if file.type != .Sprite do continue
-		id += 1
-		if file.name == path {
-			return Asset_ID(id), ""
-		}
-	}
-
-	return 0, "sprite not found in the bundle"
 }
 
 match_slice :: proc(
@@ -85,6 +44,7 @@ match_slice :: proc(
 ) {
 	id := id
 	if id == string do id = ([]u8)
+	if id == Custom_Encoding do return nil, true
 	return(
 		&type_info_of(reflect.typeid_base(id)).variant.(runtime.Type_Info_Slice) \
 	)
@@ -105,7 +65,10 @@ header_populate :: proc(header: any, data: []u8) -> (ok: bool) {
 			info: ^runtime.Type_Info_Slice,
 			slice: ^Any_File_Slice,
 		) -> bool {
+			info := info
 			data := ([^]u8)(context.user_ptr)[:context.user_index]
+
+			if info == nil do info = match_slice([]u8) or_else panic("")
 
 			if slice.offset < 0 {
 				log.error("slice offset is negative")
@@ -150,6 +113,16 @@ header_populate :: proc(header: any, data: []u8) -> (ok: bool) {
 
 }
 
+Custom_Encoding :: struct #raw_union {
+	raw:   []u8,
+	value: Any_Encoding,
+}
+
+Any_Encoding :: struct {
+	data:   rawptr,
+	encode: proc(data: rawptr, encoder: ^Encoder) -> bool,
+}
+
 header_serialize :: proc(
 	header: any,
 	e: ^Encoder,
@@ -172,8 +145,12 @@ header_serialize :: proc(
 		) -> (
 			ok: bool,
 		) {
+			info := info
 			e := (^Encoder)(context.user_ptr)
 			buffer_len := context.user_index
+
+			was_custom := info == nil
+			if was_custom do info = match_slice([]u8) or_else panic("")
 
 			tmp_data := slice.absolute.data
 
@@ -186,16 +163,26 @@ header_serialize :: proc(
 				slice.offset = aligned
 			}
 
-			encode_slice(
-				e,
-				([^]u8)(tmp_data)[:slice.len * info.elem_size],
-			) or_return
+			if was_custom {
+				prev := len(e.remining)
+				slice.custom.encode(tmp_data, e) or_return
+				slice.absolute.len = prev - len(e.remining)
+			} else {
+				encode_slice(
+					e,
+					([^]u8)(tmp_data)[:slice.len * info.elem_size],
+				) or_return
+			}
 
 			return true
 		}
 	}
 
 	copy(header_slot, reflect.as_bytes(header))
+
+	written := buffer_len - len(e.remining)
+	aligned := mem.align_forward_int(written, 8)
+	encoder_reserve(e, aligned - written)
 
 	return true
 }
@@ -224,7 +211,7 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 
 		if visitor.pre_slice != nil do visitor.pre_slice(slice_info, slice) or_return
 
-		if slice_info.elem.id != u8 {
+		if slice_info != nil && slice_info.elem.id != u8 {
 			i := 0
 			for elem, _ in reflect.iterate_array(header, &i) {
 				if !traverse_recur(elem, visitor) {
@@ -250,6 +237,17 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 			}
 		}
 		return true
+	case runtime.Type_Info_Union:
+		if !info.no_nil do break
+
+		tag := reflect.get_union_variant_raw_tag(header)
+		if tag < 0 || int(tag) >= len(info.variants) {
+			log.error("failed to traverse union, invalid tag", tag)
+			return false
+		}
+
+		header := reflect.get_union_variant(header)
+		return traverse_recur(header, visitor)
 	case runtime.Type_Info_Enum:
 		if info.base.id != int do break
 
@@ -268,9 +266,31 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 
 @(test)
 test_serialize_populate :: proc(t: ^testing.T) {
+	Bundle_Header :: struct {
+		version: int,
+		files:   []Bundle_File_Header,
+		smh:     union #no_nil {
+			i32,
+			[]u8,
+		},
+		cust:    Custom_Encoding,
+	}
+
+	Bundle_File_Type :: enum int {
+		Config,
+		Sprite,
+		Map,
+	}
+
+	Bundle_File_Header :: struct {
+		type: Bundle_File_Type,
+		name: string,
+		data: []u8,
+	}
+
 	files := Bundle_Header {
 		version = 1,
-		files   = {
+		files = {
 			{
 				type = .Config,
 				name = "test",
@@ -282,6 +302,12 @@ test_serialize_populate :: proc(t: ^testing.T) {
 				data = transmute([]u8)string("bazos"),
 			},
 		},
+		smh = transmute([]u8)string("sm"),
+		cust = {value = {nil, encode_cust}},
+	}
+
+	encode_cust :: proc(vl: rawptr, e: ^Encoder) -> bool {
+		return encode(e, u8(0))
 	}
 
 	buf: [256]u8
@@ -298,4 +324,5 @@ test_serialize_populate :: proc(t: ^testing.T) {
 
 	ok = header_populate(nfiles, bufa)
 	testing.expect(t, ok)
+	testing.expect(t, slice.equal(nfiles.cust.raw, []u8{0}))
 }
