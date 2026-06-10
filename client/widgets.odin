@@ -1036,29 +1036,40 @@ virtual_spacer :: proc(height: f32) {
 }
 
 ui_render :: proc() {
-	commands := orui.end()
+	for command in orui.end() {
+		defer orui.render_command(command)
 
-	index := make([]int, len(commands), context.temp_allocator)
+		if Draw_Call(command.source.custom_event).kind == .Text_Highlight_Set {
+			call := Draw_Call(command.source.custom_event)
+			set := draw_call_extract_set(call)
 
-	for command, i in commands {
-		if command.type == .Custom {
-			data := command.data.(orui.RenderCommandDataCustom)
-			index[i - data.total_commands] = data.total_commands
+			text := command.data.(orui.RenderCommandDataText) or_continue
+
+			start_idx := text.start_index
+
+			start := -1
+			for i in 0 ..= len(text.text) {
+				global := start_idx + i
+				if packer.bit_set_contains_unbounded(set^, global) {
+					if start == -1 {
+						start = i
+					}
+				} else if start != -1 {
+					rect, _ := orui.measure_text_command_range(
+						command,
+						start,
+						i,
+					)
+
+					rect.width += 2
+
+					rl.DrawRectangleRec(rect, ui_color(.PRIMARY))
+					start = -1
+				}
+			}
 		}
-	}
 
-	for i := 0; i < len(commands); i += index[i] + 1 {
-		if index[i] == 0 && commands[i].type != .Custom {
-			orui.render_command(commands[i])
-			continue
-		}
-
-		forward_idx := i + index[i]
-
-		normal_commands := commands[i:forward_idx]
-		command := commands[forward_idx]
-
-		assert(command.type == .Custom)
+		if command.type != .Custom do continue
 
 		data := command.data.(orui.RenderCommandDataCustom)
 		rect := data.rectangle
@@ -1067,10 +1078,6 @@ ui_render :: proc() {
 
 		auto_draw :=
 			call.kind not_in bit_set[Draw_Call_Kind]{.Text_Highlight_Set}
-
-		if auto_draw {
-			for command in normal_commands do orui.render_command(command)
-		}
 
 		switch call.kind {
 		case .Nil:
@@ -1151,59 +1158,6 @@ ui_render :: proc() {
 				rl.WHITE,
 			)
 		case .Text_Highlight_Set:
-			set := draw_call_extract_set(call)
-
-			for command in normal_commands {
-				defer orui.render_command(command)
-
-				text := command.data.(orui.RenderCommandDataText) or_continue
-
-				start_idx := int(
-					uintptr(raw_data(text.text)) -
-					uintptr(raw_data(elem.text)),
-				)
-
-				start := -1
-				for i in 0 ..= len(text.text) {
-					global := start_idx + i
-					if packer.bit_set_contains_unbounded(set^, global) {
-						if start == -1 {
-							start = i
-						}
-					} else if start != -1 {
-						prefix := rl.MeasureTextEx(
-							text.font^,
-							strings.clone_to_cstring(
-								text.text[:start],
-								context.temp_allocator,
-							),
-							text.font_size,
-							text.letter_spacing,
-						)
-
-						area := rl.MeasureTextEx(
-							text.font^,
-							strings.clone_to_cstring(
-								text.text[start:i],
-								context.temp_allocator,
-							),
-							text.font_size,
-							text.letter_spacing,
-						)
-
-						rl.DrawRectangleRec(
-							{
-								x = text.position.x + prefix.x,
-								y = text.position.y,
-								width = area.x + 2,
-								height = area.y,
-							},
-							ui_color(.PRIMARY),
-						)
-						start = -1
-					}
-				}
-			}
 		}
 	}
 }
