@@ -77,7 +77,7 @@ Content_Action_Kind :: enum {
 
 Client_Input :: struct {
 	seq:                int,
-	relative_mouse_pos: [2]f32,
+	relative_mouse_pos: Vec,
 	using state:        struct {
 		keys: Client_Input_Keys,
 	},
@@ -118,116 +118,25 @@ Client_Control_Cmd :: enum i32 {
 
 Client_Control :: struct {
 	using objective: Ent_Objective,
-	using _:         struct #raw_union {
-		ents: []Ent_Net_ID,
-		raw:  []u8,
-	},
+	ents:            []Ent_Net_ID,
 }
 
 Client_Cold_State :: struct {
-	using _: struct #raw_union {
-		state:  struct {
-			username: Player_Name,
-		},
-		packed: []u8,
-	},
+	username: Player_Name,
 }
 
 Client_Map_Edit :: struct {
-	using _: struct #raw_union {
-		mapa:   Map,
-		packed: []u8,
-	},
+	mapa: Map,
 }
 
 Client_Asset_Request :: struct {
 	inverted: bool,
-	using _:  struct #raw_union {
-		using body: Client_Asset_Request_Body,
-		packed:     []u8,
-	},
-}
-
-Client_Asset_Request_Body :: struct {
-	assets: []Asset_ID,
-}
-
-client_asset_request_body_encode :: proc(
-	req: Client_Asset_Request_Body,
-	e: ^Encoder,
-) -> bool {
-	encode(e, u32(len(req.assets))) or_return
-	encode_slice(e, req.assets) or_return
-
-	return true
-}
-
-client_asset_request_body_decode :: proc(
-	d: ^Decoder,
-) -> (
-	b: Client_Asset_Request_Body,
-	ok: bool,
-) {
-	return {
-			assets = decode_aligned_slice(
-				d,
-				Asset_ID,
-				decode(d, u32) or_return,
-			) or_return,
-		},
-		true
+	assets:   []Asset_ID,
 }
 
 Client_Asset_Upload :: struct {
-	token:   Hash,
-	using _: struct #raw_union {
-		using body: Client_Asset_Upload_Body,
-		packed:     []u8,
-	},
-}
-
-client_asset_upload_body_encode :: proc(
-	req: Client_Asset_Upload_Body,
-	e: ^Encoder,
-) -> bool {
-	encode(e, len(req.metas)) or_return
-	encode_slice(e, req.metas) or_return
-
-	return true
-}
-
-client_asset_upload_body_decode :: proc(
-	d: ^Decoder,
-	loc := #caller_location,
-) -> (
-	b: Client_Asset_Upload_Body,
-	ok: bool,
-) {
-	return {
-			metas = decode_aligned_slice(
-				d,
-				Asset,
-				decode(d, int, loc = loc) or_return,
-				loc = loc,
-			) or_return,
-		},
-		true
-}
-
-Client_Asset_Upload_Body :: struct {
+	token: Hash,
 	metas: []Asset,
-}
-
-Client_Packet_Tag :: enum u8 {
-	Client_Input,
-	Client_Cmd,
-	Client_Control,
-	Client_Cold_State,
-	Client_Content_Action,
-	Client_Map_Edit,
-	Client_Asset_Request,
-	Client_Asset_Upload,
-	Broadcast_Packet,
 }
 
 Client_Packet :: union #no_nil {
@@ -608,9 +517,13 @@ broadcast_packet_decode :: proc(
 	}
 }
 
+client_packet_encode_dyn :: proc(packet: rawptr, e: ^Encoder) -> bool {
+	return header_serialize((^Client_Packet)(packet)^, e)
+}
+
 client_packet_encode :: proc {
-	client_packet_encode_to_encoder,
 	client_packet_encode_to_slice,
+	client_packet_encode_to_encoder,
 }
 
 client_packet_encode_to_slice :: proc(
@@ -631,90 +544,13 @@ client_packet_encode_to_encoder :: proc(
 ) -> (
 	ok: bool,
 ) {
-	// TODO: This is annoying as fuck
-
-	encode_kind :: proc(e: ^Encoder, kind: Client_Packet_Tag) -> bool {
-		return encode(e, kind)
-	}
-
-	switch p in packet {
-	case Client_Input:
-		encode_kind(e, .Client_Input) or_return
-		encode(e, p) or_return
-	case Client_Cmd:
-		encode_kind(e, .Client_Cmd) or_return
-		encode(e, p) or_return
-	case Client_Control:
-		encode_kind(e, .Client_Control) or_return
-		encode(e, p)
-		for ent in p.ents {
-			encode(e, ent)
-		}
-	case Client_Cold_State:
-		encode_kind(e, .Client_Cold_State) or_return
-		username := p.state.username
-		name := nm.bytes(&username)
-		encode(e, u16(len(name))) or_return
-		encode_slice(e, name) or_return
-	case Client_Content_Action:
-		encode_kind(e, .Client_Content_Action) or_return
-		encode(e, p) or_return
-	case Client_Map_Edit:
-		encode_kind(e, .Client_Map_Edit) or_return
-		map_store(p.mapa, e) or_return
-	case Client_Asset_Request:
-		encode_kind(e, .Client_Asset_Request) or_return
-		encode(e, p.inverted) or_return
-		client_asset_request_body_encode(p.body, e) or_return
-	case Client_Asset_Upload:
-		encode_kind(e, .Client_Asset_Upload) or_return
-		encode(e, p.token) or_return
-		client_asset_upload_body_encode(p.body, e) or_return
-	case Broadcast_Packet:
-		encode_kind(e, .Broadcast_Packet) or_return
-		broadcast_packet_encode(p, e) or_return
-	}
-
-	return true
+	return header_serialize(packet, e)
 }
 
-client_packet_encode_dyn :: proc(packet: rawptr, bytes: ^Encoder) -> bool {
-	return client_packet_encode((^Client_Packet)(packet)^, bytes)
-}
-
-client_packet_decode :: proc(d: ^Decoder) -> (res: Client_Packet, ok: bool) {
-	switch decode(d, Client_Packet_Tag) or_return {
-	case .Client_Input:
-		return decode(d, Client_Input)
-	case .Client_Cmd:
-		return decode(d, Client_Cmd)
-	case .Client_Control:
-		p := decode(d, Client_Control) or_return
-		p.raw = d.remining
-		return p, true
-	case .Client_Cold_State:
-		return Client_Cold_State{packed = d.remining}, true
-	case .Client_Content_Action:
-		return decode(d, Client_Content_Action)
-	case .Client_Map_Edit:
-		return Client_Map_Edit{packed = d.remining}, true
-	case .Client_Asset_Request:
-		return Client_Asset_Request {
-				inverted = decode(d, bool) or_return,
-				packed = d.remining,
-			},
-			true
-	case .Client_Asset_Upload:
-		return Client_Asset_Upload {
-				token = decode(d, Hash) or_return,
-				packed = d.remining,
-			},
-			true
-	case .Broadcast_Packet:
-		return broadcast_packet_decode(d)
-	case:
-		return
-	}
+client_packet_decode :: proc(d: []u8) -> (packet: Client_Packet, ok: bool) {
+	header_populate(packet, d) or_return
+	ok = true
+	return
 }
 
 server_packet_encode :: proc {

@@ -1,5 +1,6 @@
 package sim
 
+import "../util/nm"
 import "base:intrinsics"
 import "base:runtime"
 import "core:log"
@@ -201,6 +202,11 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 	     Ent_Team_ID,
 	     Ent_ID,
 	     Ent_Stats_ID,
+	     Vec,
+	     u32,
+	     nm.Name,
+	     bool,
+	     bit_set[Client_Input_Key],
 	     Asset_ID,
 	     [Map_Sprite_Kind]Asset_ID:
 		return true
@@ -249,9 +255,7 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 		header := reflect.get_union_variant(header)
 		return traverse_recur(header, visitor)
 	case runtime.Type_Info_Enum:
-		if info.base.id != int do break
-
-		value := (^int)(header.data)^
+		value := reflect.as_int(header) or_return
 
 		if visitor.enum_ != nil {
 			if visitor.enum_(&info, value) do return true

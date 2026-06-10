@@ -744,7 +744,7 @@ client_on_ping :: proc(client: ^Client) {
 		selected_user := ui_get_selected_user(client)
 
 		packet := sim.Client_Cold_State {
-			state = {username = selected_user.name},
+			username = selected_user.name,
 		}
 
 		enc: sim.Encoder

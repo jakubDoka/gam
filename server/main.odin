@@ -341,12 +341,14 @@ server_clear_violations :: proc(server: ^Server, ip: Saved_IP) {
 server_handle_packet :: proc(
 	server: ^Server,
 	from: ^sim.TCP_Connection,
-	packet: sim.Client_Packet,
+	packet_bytes: []u8,
 ) -> (
 	ok: bool,
 ) {
 	#assert(offset_of(Connection, hctx) == 0)
 	#assert(offset_of(Handshake, tcp) == 0)
+
+	packet := sim.client_packet_decode(packet_bytes) or_return
 
 	defer if !ok do log.warn("invalid packet from client:", packet)
 
@@ -356,7 +358,7 @@ server_handle_packet :: proc(
 	from.last_packet = time.now()
 
 	// TODO: as of right now custom client can fuck us
-	switch p in packet {
+	switch &p in packet {
 	case sim.Client_Input:
 		if from.input.seq < p.seq {
 			from.input.inner = p
@@ -447,9 +449,7 @@ server_handle_packet :: proc(
 		e := sim.ents_get(&game.ents, from.ent)
 		if e != sim.NIL_ENT {
 			e.objective.gen += 1
-			d := sim.Decoder{p.raw}
-			for _ in 0 ..< len(p.raw) / size_of(sim.Ent_Net_ID) {
-				eid := sim.decode(&d, sim.Ent_Net_ID) or_return
+			for eid in p.ents {
 				ce := game_ent_by_net_id(game, eid)
 				if ce == sim.NIL_ENT do continue
 				ce.objective = p.objective
@@ -458,13 +458,9 @@ server_handle_packet :: proc(
 			}
 		}
 	case sim.Client_Cold_State:
-		d := sim.Decoder{p.packed}
+		name := nm.str(&p.username)
 
-		count := sim.decode(&d, u16) or_return
-		bytes := sim.decode_slice(&d, count) or_return
-		username := nm.from_str(string(bytes))
-
-		login: if nm.ln(username) != 0 {
+		login: if len(name) != 0 {
 			ip := ip_to_integers(from.tcp_endpoint.address)
 			query_res, s := sqlite.query(
 				server.select_user_by_pk,
@@ -500,7 +496,6 @@ server_handle_packet :: proc(
 			}
 
 			id: int
-			name := nm.str(&username)
 			insert_res, is := sqlite.query(
 				server.insert_user,
 				id,
@@ -591,41 +586,27 @@ server_handle_packet :: proc(
 	case sim.Client_Map_Edit:
 		map_path := pick_map(game.map_index - 1, context.temp_allocator)
 
-		aligned_buf, aberr := mem.alloc_bytes(
-			len(p.packed),
-			8,
-			context.temp_allocator,
-		)
-		assert(aberr == nil)
-		copy(aligned_buf, p.packed)
-		mapa, mok := sim.map_load(aligned_buf)
-		if !mok {
-			log.warn("map sent from player is not parsable")
-			return
-		}
-
 		me: sim.Encoder
 
-		okm := sim.map_store(mapa, &me)
-		if sim.encoded_len(&me) > len(p.packed) {
+		okm := sim.map_store(p.mapa, &me)
+		assert(okm)
+		if sim.encoded_len(&me) > len(packet_bytes) {
 			log.warn(
 				"map sent from player has overlapping regions:",
 				sim.encoded_len(&me),
 				"!=",
-				len(p.packed),
+				len(packet_bytes),
 			)
 			return
 		}
 
-		err := os.write_entire_file(map_path, p.packed)
-		log.assertf(err == nil, "failed to write the map: %v", err)
-
-		buf, berr := mem.alloc_bytes(sim.encoded_len(&me), 8)
-		assert(berr == nil)
-
-		e := sim.Encoder{buf}
-		ok := sim.map_store(mapa, &e)
+		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
+		me = {buf}
+		ok := sim.map_store(p.mapa, &me)
 		assert(ok)
+
+		err := os.write_entire_file(map_path, buf)
+		log.assertf(err == nil, "failed to write the map: %v", err)
 
 		game_set_map(game, buf)
 
@@ -634,13 +615,9 @@ server_handle_packet :: proc(
 		token: sim.Hash
 		crypto.rand_bytes(token[:])
 
-		payload, _ := mem.alloc_bytes(len(p.packed), 4)
-		copy(payload, p.packed)
+		payload, _ := mem.alloc_bytes(len(packet_bytes), 8)
+		copy(payload, packet_bytes)
 		defer delete(payload)
-
-		d := sim.Decoder{payload}
-
-		body := sim.client_asset_request_body_decode(&d) or_return
 
 		count := 0
 		config_hash_ctx: blake2s.Context
@@ -656,7 +633,7 @@ server_handle_packet :: proc(
 				0,
 			)
 			for asset in sqlite.query_next(&asset_q) {
-				_, found := slice.linear_search(body.assets, asset.id)
+				_, found := slice.linear_search(p.assets, asset.id)
 				if found do continue
 				blake2s.update(&config_hash_ctx, asset.hash[:])
 				append(&new_sprites, asset.id)
@@ -664,22 +641,22 @@ server_handle_packet :: proc(
 			}
 			sqlite.reset(stmt)
 
-			body := sim.Client_Asset_Request_Body {
+			body := sim.Client_Asset_Request {
 				assets = new_sprites[:],
 			}
 
 			e: sim.Encoder
-			sim.client_asset_request_body_encode(body, &e)
+			sim.client_packet_encode(body, &e)
 
 			delete(payload)
-			payload, _ = mem.alloc_bytes(sim.encoded_len(&e), 4)
+			payload, _ = mem.alloc_bytes(sim.encoded_len(&e), 8)
 			e = {payload}
 
-			ok := sim.client_asset_request_body_encode(body, &e)
+			ok := sim.client_packet_encode(body, &e)
 			assert(ok)
 		} else {
-			count += len(body.assets)
-			for s in body.assets {
+			count += len(p.assets)
+			for s in p.assets {
 				asset := server_get_asset(server, s) or_return
 				blake2s.update(&config_hash_ctx, asset.hash[:])
 			}
@@ -708,20 +685,14 @@ server_handle_packet :: proc(
 			},
 		)
 	case sim.Client_Asset_Upload:
-		payload, _ := mem.alloc_bytes(len(p.packed), 8)
-		copy(payload, p.packed)
-		defer delete(payload)
-
-		d := sim.Decoder{payload}
-
-		req := sim.client_asset_upload_body_decode(&d) or_return
+		payload, _ := mem.alloc_bytes(len(packet_bytes), 8)
+		copy(payload, packet_bytes)
 
 		lru.set(
 			&server.asset_requests,
 			p.token,
 			Asset_Request{payload = payload},
 		)
-		payload = {}
 
 		server_tcp_send(
 			server,
@@ -1105,11 +1076,10 @@ send_content :: proc(
 	payload := ass_req.value.payload
 	ass_req.value.payload = {}
 
-	d := sim.Decoder{payload}
-
 	conn.request_state.payload = payload
 
-	body := sim.client_asset_request_body_decode(&d) or_return
+	any_body := sim.client_packet_decode(payload) or_return
+	body := any_body.(sim.Client_Asset_Request)
 	conn.request_state.sprites = body.assets
 	conn.request_state.buf = make([]u8, 4096)
 
@@ -1244,10 +1214,9 @@ recv_content :: proc(
 	payload := ass_req.value.payload
 	ass_req.value.payload = {}
 
-	d := sim.Decoder{payload}
-
 	conn.request_state.payload = payload
-	body := sim.client_asset_upload_body_decode(&d) or_return
+	any_body := sim.client_packet_decode(payload) or_return
+	body := any_body.(sim.Client_Asset_Upload)
 	conn.request_state.assets = body.metas
 	conn.request_state.buf = make([]u8, size_of(sim.Tag) + 4096)
 
@@ -1451,12 +1420,7 @@ server_on_tcp_packet :: proc(
 	bytes: []u8,
 ) -> bool {
 	server := (^Server)(conn.host.asoc_data)
-	d := sim.Decoder{bytes}
-	packet := sim.client_packet_decode(&d) or_return
-
-	server_handle_packet(server, conn, packet) or_return
-
-	return true
+	return server_handle_packet(server, conn, bytes)
 }
 
 server_schedule_tick :: proc(server: ^Server) {
@@ -1646,18 +1610,6 @@ server_bundle_refresh :: proc(server: ^Server) {
 
 	delete(server.game.ents.stats)
 	server.game.ents.stats = loader.stats
-}
-
-collect_files :: proc(
-	cwd: string,
-	dir: string,
-	ext: string,
-	type: sim.Bundle_File_Type,
-	files: ^[dynamic]sim.Bundle_File_Header,
-) -> (
-	count: int,
-) {
-	return
 }
 
 visit_files :: proc(
@@ -2024,12 +1976,7 @@ server_on_udp_packet :: proc(
 	bytes: []u8,
 ) -> bool {
 	server := (^Server)(conn.host.asoc_data)
-	d := sim.Decoder{bytes}
-	packet := sim.client_packet_decode(&d) or_return
-
-	server_handle_packet(server, &server.last_udp_conn.hctx, packet)
-
-	return true
+	return server_handle_packet(server, &server.last_udp_conn.hctx, bytes)
 }
 
 server_decrypt_packet :: proc(
