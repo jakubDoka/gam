@@ -1036,134 +1036,174 @@ virtual_spacer :: proc(height: f32) {
 }
 
 ui_render :: proc() {
-	for command in orui.end() {
+	commands := orui.end()
+
+	index := make([]int, len(commands), context.temp_allocator)
+
+	for command, i in commands {
 		if command.type == .Custom {
 			data := command.data.(orui.RenderCommandDataCustom)
-			rect := data.rectangle
-			elem := data.source
-			call := Draw_Call(data.custom_event)
-			switch call.kind {
-			case .Nil:
-			case .Dropdown_Arrow:
-				ui_dropdown_arrow(
-					{rect.x, rect.y} +
-					{rect.width - rect.height / 2, rect.height / 2},
-					rect.height / 2,
-					call.expanded ? math.PI : 0,
-					elem.color,
+			index[i - data.total_commands] = data.total_commands
+		}
+	}
+
+	for i := 0; i < len(commands); i += index[i] + 1 {
+		if index[i] == 0 && commands[i].type != .Custom {
+			orui.render_command(commands[i])
+			continue
+		}
+
+		forward_idx := i + index[i]
+
+		normal_commands := commands[i:forward_idx]
+		command := commands[forward_idx]
+
+		assert(command.type == .Custom)
+
+		data := command.data.(orui.RenderCommandDataCustom)
+		rect := data.rectangle
+		elem := data.source
+		call := Draw_Call(data.custom_event)
+
+		auto_draw :=
+			call.kind not_in bit_set[Draw_Call_Kind]{.Text_Highlight_Set}
+
+		if auto_draw {
+			for command in normal_commands do orui.render_command(command)
+		}
+
+		switch call.kind {
+		case .Nil:
+		case .Dropdown_Arrow:
+			ui_dropdown_arrow(
+				{rect.x, rect.y} +
+				{rect.width - rect.height / 2, rect.height / 2},
+				rect.height / 2,
+				call.expanded ? math.PI : 0,
+				elem.color,
+			)
+		case .Rl_Icon:
+			pixel_size := math.floor(min(rect.height, rect.width) / 16)
+			icon_size := pixel_size * 16
+			icon_pos :=
+				sim.Vec{rect.x, rect.y} +
+				({rect.width, rect.height} - icon_size) * 0.5
+
+			rl.GuiDrawIcon(
+				call.icon & .ICON_255,
+				i32(icon_pos.x),
+				i32(icon_pos.y),
+				i32(pixel_size),
+				elem.color,
+			)
+		case .Rl_Color_Panel:
+			hsv := draw_call_extract_hsv(call)
+			max_hue_color := rl.ColorFromHSV(hsv.x, 1, 1)
+
+			rl.DrawRectangleGradientEx(
+				rect,
+				rl.WHITE,
+				rl.WHITE,
+				max_hue_color,
+				max_hue_color,
+			)
+			rl.DrawRectangleGradientEx(
+				rect,
+				rl.BLANK,
+				rl.BLACK,
+				rl.BLACK,
+				rl.BLANK,
+			)
+
+			pos := sim.Vec {
+				rect.x + hsv.y * rect.width,
+				rect.y + (1.0 - hsv.z) * rect.height,
+			}
+
+			rl.DrawRectangleRec({pos.x - 3, pos.y - 3, 6, 6}, rl.WHITE)
+		case .Rl_Hue_Panel:
+			ui_hue_gradient(rect)
+
+			hsv := draw_call_extract_hsv(call)
+
+			rl.DrawRectangleRec(
+				{
+					rect.x,
+					rect.y + hsv.x / 360.0 * rect.height - 1.5,
+					rect.width,
+					3,
+				},
+				rl.WHITE,
+			)
+		case .Rl_Alpha_Panel:
+			hsv := draw_call_extract_hsv(call)
+			color := rl.ColorFromHSV(hsv.x, hsv.y, hsv.z)
+
+			rl.DrawRectangleGradientEx(rect, color, rl.BLANK, rl.BLANK, color)
+
+			rl.DrawRectangleRec(
+				{
+					rect.x,
+					rect.y + (1.0 - hsv.w) * rect.height - 1.5,
+					rect.width,
+					3,
+				},
+				rl.WHITE,
+			)
+		case .Text_Highlight_Set:
+			set := draw_call_extract_set(call)
+
+			for command in normal_commands {
+				defer orui.render_command(command)
+
+				text := command.data.(orui.RenderCommandDataText) or_continue
+
+				start_idx := int(
+					uintptr(raw_data(text.text)) -
+					uintptr(raw_data(elem.text)),
 				)
-			case .Rl_Icon:
-				pixel_size := math.floor(min(rect.height, rect.width) / 16)
-				icon_size := pixel_size * 16
-				icon_pos :=
-					sim.Vec{rect.x, rect.y} +
-					({rect.width, rect.height} - icon_size) * 0.5
-
-				rl.GuiDrawIcon(
-					call.icon & .ICON_255,
-					i32(icon_pos.x),
-					i32(icon_pos.y),
-					i32(pixel_size),
-					elem.color,
-				)
-			case .Rl_Color_Panel:
-				hsv := draw_call_extract_hsv(call)
-				max_hue_color := rl.ColorFromHSV(hsv.x, 1, 1)
-
-				rl.DrawRectangleGradientEx(
-					rect,
-					rl.WHITE,
-					rl.WHITE,
-					max_hue_color,
-					max_hue_color,
-				)
-				rl.DrawRectangleGradientEx(
-					rect,
-					rl.BLANK,
-					rl.BLACK,
-					rl.BLACK,
-					rl.BLANK,
-				)
-
-				pos := sim.Vec {
-					rect.x + hsv.y * rect.width,
-					rect.y + (1.0 - hsv.z) * rect.height,
-				}
-
-				rl.DrawRectangleRec({pos.x - 3, pos.y - 3, 6, 6}, rl.WHITE)
-			case .Rl_Hue_Panel:
-				ui_hue_gradient(rect)
-
-				hsv := draw_call_extract_hsv(call)
-
-				rl.DrawRectangleRec(
-					{
-						rect.x,
-						rect.y + hsv.x / 360.0 * rect.height - 1.5,
-						rect.width,
-						3,
-					},
-					rl.WHITE,
-				)
-			case .Rl_Alpha_Panel:
-				hsv := draw_call_extract_hsv(call)
-				color := rl.ColorFromHSV(hsv.x, hsv.y, hsv.z)
-
-				rl.DrawRectangleGradientEx(
-					rect,
-					color,
-					rl.BLANK,
-					rl.BLANK,
-					color,
-				)
-
-				rl.DrawRectangleRec(
-					{
-						rect.x,
-						rect.y + (1.0 - hsv.w) * rect.height - 1.5,
-						rect.width,
-						3,
-					},
-					rl.WHITE,
-				)
-			case .Text_Highlight_Set:
-				set := draw_call_extract_set(call)
-
-				x, y := orui.text_origin(orui.current_context, elem)
-				inner_width := orui.inner_width(elem)
 
 				start := -1
-				for i in 0 ..= len(elem.text) {
-					if packer.bit_set_contains_unbounded(set^, i) {
+				for i in 0 ..= len(text.text) {
+					global := start_idx + i
+					if packer.bit_set_contains_unbounded(set^, global) {
 						if start == -1 {
 							start = i
 						}
 					} else if start != -1 {
+						prefix := rl.MeasureTextEx(
+							text.font^,
+							strings.clone_to_cstring(
+								text.text[:start],
+								context.temp_allocator,
+							),
+							text.font_size,
+							text.letter_spacing,
+						)
 
-						call, _ := orui.render_selection_cmd(
-							orui.current_context,
-							elem,
-							elem.text,
-							0,
-							len(elem.text),
-							elem._text_width,
-							x,
-							y,
-							1,
-							inner_width,
-							{start = start, end = i},
+						area := rl.MeasureTextEx(
+							text.font^,
+							strings.clone_to_cstring(
+								text.text[start:i],
+								context.temp_allocator,
+							),
+							text.font_size,
+							text.letter_spacing,
+						)
+
+						rl.DrawRectangleRec(
+							{
+								x = text.position.x + prefix.x,
+								y = text.position.y,
+								width = area.x + 2,
+								height = area.y,
+							},
+							ui_color(.PRIMARY),
 						)
 						start = -1
-
-						call.color = ui_color(.PRIMARY_FAINT)
-						call.size += 2
-
-						orui.render_command({.Rectangle, call})
 					}
 				}
 			}
 		}
-
-		orui.render_command(command)
 	}
 }

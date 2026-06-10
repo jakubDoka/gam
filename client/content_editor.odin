@@ -895,10 +895,6 @@ ui_content_field_edit :: proc(
 	seb.last_field = seb.current_field
 
 	if initial_select {
-		fmt.println("wooba")
-	}
-
-	if initial_select {
 		clear(&seb.string_field.buf)
 	}
 

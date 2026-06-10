@@ -1567,7 +1567,7 @@ ui_is_interacting :: proc(
 
 	ctx := orui.current_context
 
-	buf := orui.current_buffer(ctx)
+	buf := orui.previous_buffer(ctx)
 	for hid in orui.hovered_ids() {
 		idx, ok := orui.element_index_by_id(ctx, buf, hid)
 		if !ok do continue
@@ -1845,8 +1845,6 @@ ui_connect_popup :: proc(client: ^Client) {
 }
 
 ui_build :: proc(client: ^Client) {
-	client.building = true
-	defer client.building = false
 
 	keep := 0
 	for key in client.captured_key_binds {
@@ -1870,6 +1868,9 @@ ui_build :: proc(client: ^Client) {
 		client.camera.zoom *= 1 - rl.GetMouseWheelMove() * 0.2
 		client.camera.zoom = clamp(client.camera.zoom, 0.1, 2)
 	}
+
+	client.building = true
+	defer client.building = false
 
 	for &color, vl in client.ui.colors.picker_rgbs {
 		hsv := client.ui.colors.picker_hsvs[vl]
