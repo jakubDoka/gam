@@ -1671,7 +1671,7 @@ ui_ship_selection :: proc(client: ^Client) {
 					margin = orui.margin(PADDING),
 					background = .NONE,
 					focused_color = .NONE,
-					sprite = s.sprite.id,
+					sprite = s.sprite,
 					disabled = client.selected_team == 0,
 					padding = orui.padding(orui.hovered() ? 0 : PADDING),
 				},
@@ -1726,7 +1726,7 @@ ui_build_popup :: proc(client: ^Client, tile: sim.Map_Pos) {
 				background = .NONE,
 				focused_color = .NONE,
 				padding = orui.Edges{},
-				sprite = stat.sprite.id,
+				sprite = stat.sprite,
 			},
 		) {
 			tcp_send(

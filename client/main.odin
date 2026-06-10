@@ -1117,9 +1117,9 @@ client_update :: proc(client: ^Client) {
 
 		pos := e.pos + x.pos_smoothing
 
-		if s.sprite.id != 0 {
+		if s.sprite != 0 {
 			sradius := sradius * (1 + s.sprite_factor_minus_one)
-			texture, region := ui_get_sprite(&client.ui, s.sprite.id)
+			texture, region := ui_get_sprite(&client.ui, s.sprite)
 			rl.DrawTexturePro(
 				texture,
 				region,
@@ -1132,8 +1132,8 @@ client_update :: proc(client: ^Client) {
 			rl.DrawCircleV(pos, sradius, tcolor)
 		}
 
-		if s.cannon.id != 0 {
-			texture, region := ui_get_sprite(&client.ui, s.cannon.id)
+		if s.cannon != 0 {
+			texture, region := ui_get_sprite(&client.ui, s.cannon)
 			rl.DrawTexturePro(
 				texture,
 				region,

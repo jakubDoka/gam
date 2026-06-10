@@ -179,21 +179,12 @@ Server_State :: struct {
 	tps:              int,
 	you:              Ent_Net_ID,
 	your_next_net_id: Ent_Net_ID,
-	ctx:              ^Ents,
-	using _:          struct #raw_union {
-		state:  struct {
-			ents:    []Ent,
-			players: []Client_Input_Keys,
-		},
-		packed: []u8,
-	},
+	ents:             Custom_Encoding,
+	players:          []Client_Input_Keys,
 }
 
 Server_Config :: struct {
-	using _: struct #raw_union {
-		stats:  []Ent_Stats,
-		packed: []u8,
-	},
+	stats: Custom_Encoding,
 }
 
 Server_Map :: struct {
@@ -217,18 +208,9 @@ Player :: struct {
 	net_ent:     Ent_Net_ID,
 }
 
-Server_Cold_State_Header :: struct {
-	dirty_stats: bool,
-}
-
 Server_Cold_State :: struct {
-	header:  Server_Cold_State_Header,
-	using _: struct #raw_union {
-		state:  struct {
-			players: []Player,
-		},
-		packed: []u8,
-	},
+	dirty_stats: bool,
+	players:     []Player,
 }
 
 // TODO: the naming is lacking
@@ -250,23 +232,22 @@ Server_Cmd :: struct {
 }
 
 Server_Stats :: struct {
-	using _: struct #raw_union {
-		using _: struct {
-			stats:   []Ent_Stats,
-			sprites: []u32,
-		},
-		packed:  []u8,
-	},
+	stats:   Custom_Encoding,
+	sprites: []u32,
 }
 
-Server_Packet_Tag :: enum u8 {
-	Server_Ping,
-	Server_State,
-	Server_Map,
-	Server_Cold_State,
-	Server_Stats,
-	Server_Cmd,
-	Broadcast_Packet,
+custom_encoding_stats :: proc(stats: ^[]Ent_Stats) -> Custom_Encoding {
+	return {value = {stats, encode_stats}}
+
+	encode_stats :: proc(data: rawptr, e: ^Encoder) -> bool {
+		stats := (^[]Ent_Stats)(data)^
+
+		for stat in stats {
+			ent_stats_encode(stat, e) or_return
+		}
+
+		return true
+	}
 }
 
 Server_Packet :: union #no_nil {
@@ -479,44 +460,6 @@ encode_leb128 :: proc(d: ^Encoder, v: $T) -> bool {
 	return true
 }
 
-broadcast_packet_encode :: proc(p: Broadcast_Packet, e: ^Encoder) -> bool {
-	encode_kind :: proc(e: ^Encoder, kind: Broadcast_Packet_Tag) -> bool {
-		return encode(e, kind)
-	}
-
-	switch p in p {
-	case Chat_Msg:
-		encode_kind(e, .Chat_Msg) or_return
-		encode(e, p.name) or_return
-		encode(e, p.id) or_return
-		encode(e, u16(len(p.content))) or_return
-		encode_slice(e, transmute([]u8)p.content) or_return
-	}
-
-	return true
-}
-
-broadcast_packet_decode :: proc(
-	d: ^Decoder,
-) -> (
-	p: Broadcast_Packet,
-	ok: bool,
-) {
-	switch decode(d, Broadcast_Packet_Tag) or_return {
-	case .Chat_Msg:
-		return Chat_Msg {
-				name = decode(d, Player_Name) or_return,
-				id = decode(d, Identity) or_return,
-				content = string(
-					decode_slice(d, decode(d, u16) or_return) or_return,
-				),
-			},
-			true
-	case:
-		return
-	}
-}
-
 client_packet_encode_dyn :: proc(packet: rawptr, e: ^Encoder) -> bool {
 	return header_serialize((^Client_Packet)(packet)^, e)
 }
@@ -574,106 +517,13 @@ server_packet_encode_to_encoder :: proc(
 	packet: Server_Packet,
 	e: ^Encoder,
 ) -> bool {
-	encode_kind :: proc(e: ^Encoder, kind: Server_Packet_Tag) -> bool {
-		return encode(e, kind)
-	}
-
-	switch p in packet {
-	case Server_Ping:
-		encode_kind(e, .Server_Ping) or_return
-		encode(e, p) or_return
-	case Server_State:
-		encode_kind(e, .Server_State) or_return
-		encode(e, p.tps)
-		encode(e, p.you)
-		encode(e, p.your_next_net_id)
-
-		count := 0
-		for &ent in p.state.ents {
-			if ent_is_alive(&ent) do count += 1
-		}
-
-		encode(e, u16(count)) or_return
-
-		encode_iter := p.state.ents
-		for ent in ents_iter_next(&encode_iter) {
-			ent_synced_encode(ent, p.ctx, e) or_return
-		}
-
-		encode(e, u16(len(p.state.players)))
-		encode_slice(e, p.state.players)
-	case Server_Map:
-		encode_kind(e, .Server_Map) or_return
-		encode_slice(e, p.bytes) or_return
-	case Server_Cold_State:
-		encode_kind(e, .Server_Cold_State) or_return
-
-		encode(e, p.header) or_return
-
-		encode(e, u16(len(p.state.players)))
-		for &player in p.state.players {
-			encode(e, player.pk)
-			name := nm.bytes(&player.name)
-			encode(e, u8(len(name)))
-			encode_slice(e, name)
-			encode(e, player.permissions)
-			encode(e, player.net_ent)
-		}
-	case Server_Stats:
-		encode_kind(e, .Server_Stats) or_return
-
-		encode(e, u16(len(p.stats))) or_return
-		for &stat in p.stats {
-			ent_stats_encode(stat, e) or_return
-		}
-
-		encode(e, u16(len(p.sprites))) or_return
-		encode_slice(e, p.sprites) or_return
-	case Server_Cmd:
-		encode_kind(e, .Server_Cmd) or_return
-		encode(e, p) or_return
-	case Broadcast_Packet:
-		encode_kind(e, .Broadcast_Packet) or_return
-		broadcast_packet_encode(p, e) or_return
-	}
-
-	return true
+	return header_serialize(packet, e)
 }
 
 server_packet_decode :: proc(buf: []u8) -> (res: Server_Packet, ok: bool) {
-	d: Decoder = {buf}
-
-	t := decode(&d, Server_Packet_Tag) or_return
-
-	switch t {
-	case .Server_Ping:
-		return decode(&d, Server_Ping)
-	case .Server_State:
-		return Server_State {
-				tps = decode(&d, int) or_return,
-				you = decode(&d, Ent_Net_ID) or_return,
-				your_next_net_id = decode(&d, Ent_Net_ID) or_return,
-				packed = d.remining,
-			},
-			true
-	case .Server_Map:
-		return Server_Map{d.remining}, true
-	case .Server_Cold_State:
-		return Server_Cold_State {
-				header = decode(&d, Server_Cold_State_Header) or_return,
-				packed = d.remining,
-			},
-			true
-	case .Server_Stats:
-		return Server_Stats{packed = d.remining}, true
-	case .Server_Cmd:
-		return decode(&d, Server_Cmd)
-	case .Broadcast_Packet:
-		return broadcast_packet_decode(&d)
-	case:
-		log.error("invalid packet kind from server:", t)
-		return
-	}
+	header_populate(res, buf) or_return
+	ok = true
+	return
 }
 
 server_packet_encode_dyn :: proc(packet: rawptr, bytes: ^Encoder) -> bool {
@@ -841,7 +691,7 @@ ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
 				encode_leb128(e, int(v.id)) or_return
 			}
 		case Ent_Stats_ID:
-		case Asset_Ref:
+		case Asset_ID:
 			if field_presence_set(presence, v != {}) {
 				encode(e, v) or_return
 			}
@@ -950,9 +800,9 @@ ent_stats_decode :: proc(
 				}
 			}
 		case Ent_Stats_ID:
-		case Asset_Ref:
+		case Asset_ID:
 			if field_presence_get(presence) {
-				v = decode(d, Asset_Ref) or_return
+				v = decode(d, Asset_ID) or_return
 			}
 		case int:
 			if field_presence_get(presence) {

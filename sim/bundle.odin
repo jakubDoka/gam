@@ -167,7 +167,9 @@ header_serialize :: proc(
 			if was_custom {
 				prev := len(e.remining)
 				slice.custom.encode(tmp_data, e) or_return
-				slice.absolute.len = prev - len(e.remining)
+				if !encoder_is_measuring(e) {
+					slice.len = prev - len(e.remining)
+				}
 			} else {
 				encode_slice(
 					e,
@@ -204,8 +206,16 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 	     Ent_Stats_ID,
 	     Vec,
 	     u32,
+	     f32,
 	     nm.Name,
+	     Hash,
+	     Secret_Key,
+	     Ping_ID,
+	     Ping_Tag,
 	     bool,
+	     Ent_Stats_Ref,
+	     Identity,
+	     Player_Permissions,
 	     bit_set[Client_Input_Key],
 	     Asset_ID,
 	     [Map_Sprite_Kind]Asset_ID:
@@ -235,6 +245,8 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 	#partial switch &info in
 		type_info_of(reflect.typeid_base(header.id)).variant {
 	case runtime.Type_Info_Struct:
+		if .raw_union in info.flags do break
+
 		for field in reflect.struct_fields_zipped(header.id) {
 			value := reflect.struct_field_value(header, field)
 			if !traverse_recur(value, visitor) {

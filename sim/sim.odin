@@ -33,10 +33,6 @@ Ent_Team_ID :: distinct int
 Ent_Stats_ID :: distinct int
 Ent_Stats_Name :: nm.Name
 
-Asset_Ref :: struct #raw_union {
-	id: Asset_ID,
-}
-
 @(rodata)
 NIL_TEAM_MEM := Ent_Team {
 	color = 0x2BBDFBFF,
@@ -107,7 +103,7 @@ Ent_Stats :: struct {
 		sprite_factor_minus_one: f32 `gam:"round1"`,
 		mass_mult_minus_one:     f32 `gam:"round1"`,
 		absorbtion:              f32 `gam:"round"`,
-		sprite:                  Asset_Ref,
+		sprite:                  Asset_ID,
 		spin:                    f32 `gam:"round"`,
 		body_damage:             f32 `gam:"round"`,
 		bounce_multiplier:       f32 `gam:"round1"`,
@@ -122,7 +118,7 @@ Ent_Stats :: struct {
 		attack:        Ent_Stats_Attack,
 	},
 	using turret:     struct {
-		cannon:    Asset_Ref,
+		cannon:    Asset_ID,
 		aim_speed: f32 `gam:"round1"`,
 		range:     f32 `gam:"round"`,
 		reload:    f32 `gam:"round2"`,
@@ -248,11 +244,17 @@ Validation_Context :: struct {
 
 validate :: proc(val: any, ctx: Validation_Context) -> bool {
 	switch &v in val {
-	case f32, bool, int, Color, u8, Asset_Ref, nm.Name:
+	case f32, bool, int, Color, u8, Asset_ID, nm.Name:
 		return true
 	case Ent_Stats_ID:
+		if v != ctx.id {
+			log.error("index mismatch")
+		}
 		return v == ctx.id
 	case Ent_Stats_Ref:
+		if 0 > v.id || int(v.id) >= ctx.stat_count {
+			log.error("ent index mismatch", v.id)
+		}
 		return 0 <= v.id && int(v.id) < ctx.stat_count
 	}
 
@@ -260,12 +262,16 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 	case rt.Type_Info_Struct:
 		for field in reflect.struct_fields_zipped(val.id) {
 			value := reflect.struct_field_value(val, field)
-			if !validate(value, ctx) do return false
+			if !validate(value, ctx) {
+				log.error("failed while validating field", field.name)
+				return false
+			}
 		}
 		return true
 	case rt.Type_Info_Fixed_Capacity_Dynamic_Array:
 		len := (^int)(uintptr(val.data) + info.len_offset)^
 		if len > info.capacity {
+			log.error("bogus capacity")
 			return false
 		}
 
@@ -287,6 +293,7 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 			if u8(vl) == value do return true
 		}
 
+		log.error("invalid enum value")
 		return false
 	case:
 		log.error("unhandled type for validation:", val.id)
@@ -339,7 +346,7 @@ test_ent_stat_encode_decode :: proc(t: ^testing.T) {
 	stat.name = nm.from_str("test")
 	stat.placable = true
 	stat.speed = 10
-	stat.sprite.id = 1
+	stat.sprite = 1
 	stat.bullet.id = 2
 
 	e := Encoder{buf[:]}

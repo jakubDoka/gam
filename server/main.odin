@@ -312,6 +312,7 @@ Server :: struct #align (8) {
 		_: ^Connection,
 		_: sim.Server_Packet,
 	),
+	tcp_send_bytes:          proc(_: ^Server, _: ^Connection, _: []u8),
 	udp_send:                proc(
 		_: ^Server,
 		_: ^Connection,
@@ -350,7 +351,8 @@ server_handle_packet :: proc(
 
 	packet := sim.client_packet_decode(packet_bytes) or_return
 
-	defer if !ok do log.warn("invalid packet from client:", packet)
+	reason := ""
+	defer if !ok do log.warn("invalid packet from client (", reason, "):", packet)
 
 	from := (^Connection)(from)
 	game := &server.game
@@ -380,13 +382,19 @@ server_handle_packet :: proc(
 					tps = server.tps,
 					you = e.net_id,
 					your_next_net_id = from.input.next_net_id,
-					ctx = &game.ents,
-					state = {
-						ents = sim.ents_iter(&game.ents),
-						players = players[:],
-					},
+					ents = {value = {&game.ents, encode_state}},
+					players = players[:],
 				},
 			)
+
+			encode_state :: proc(data: rawptr, e: ^sim.Encoder) -> bool {
+				ents := (^sim.Ents)(data)
+				iter := sim.ents_iter(ents)
+				for ent in sim.ents_iter_next(&iter) {
+					sim.ent_synced_encode(ent, ents, e) or_return
+				}
+				return true
+			}
 		}
 	case sim.Client_Cmd:
 		switch p.kind {
@@ -537,15 +545,19 @@ server_handle_packet :: proc(
 
 			append(&game.ents.stats, stats)
 		case .Edit:
+			reason = "id out of bounds"
 			if p.stats.id < 0 || int(p.stats.id) >= len(game.ents.stats) do return
 			stats := p.stats
 
+			reason = "validation failed"
 			sim.validate(
 				stats,
 				{stat_count = len(game.ents.stats), id = stats.id},
 			) or_return
 
 			game.ents.stats[stats.id] = stats
+
+			reason = ""
 		case .Save:
 			edited_file, edited_file_err := os.open(
 				CONFIG_PATH_EDITED,
@@ -560,11 +572,11 @@ server_handle_packet :: proc(
 
 			ctx: sim.Store_Ctx
 			ctx.asoc_data = server
-			ctx.sprite_name = proc(ptr: rawptr, id: sim.Asset_Ref) -> string {
+			ctx.sprite_name = proc(ptr: rawptr, id: sim.Asset_ID) -> string {
 				server := (^Server)(ptr)
 
 				asset: Saved_Asset
-				res, stmt := sqlite.query(server.get_asset, asset, id.id)
+				res, stmt := sqlite.query(server.get_asset, asset, id)
 				sqlite.assert_ok(stmt, res)
 				sqlite.reset(stmt)
 
@@ -1055,7 +1067,11 @@ boot_player :: proc(
 	sim.dl_push(&server.resolving_udp, &conn.resolving_udp)
 
 	server->tcp_send(conn, sim.Server_Map{game.map_buf})
-	server->tcp_send(conn, sim.Server_Stats{stats = game.ents.stats[:]})
+	stats := game.ents.stats[:]
+	server->tcp_send(
+		conn,
+		sim.Server_Stats{stats = sim.custom_encoding_stats(&stats)},
+	)
 
 	return true
 }
@@ -1467,8 +1483,9 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 	server_schedule_tick(server)
 
 	{
+		stats := game.ents.stats[:]
 		packet := sim.Server_Stats {
-			stats = game.ents.stats[:],
+			stats = sim.custom_encoding_stats(&stats),
 		}
 
 		ensure_up_to_date_hash(server, &game.last_stats_hash, packet, "stats")
@@ -1488,10 +1505,8 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 		}
 
 		packet := sim.Server_Cold_State {
-			header = {
-				dirty_stats = game.last_stats_hash != game.clean_stats_hash,
-			},
-			state = {players = players[:]},
+			dirty_stats = game.last_stats_hash != game.clean_stats_hash,
+			players     = players[:],
 		}
 
 		ensure_up_to_date_hash(
@@ -1521,7 +1536,7 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 			hash^ = new_hash
 			for _, conn in server.connections {
 				log.debug("sending the", subject, "to:", conn.name)
-				server->tcp_send(conn, packet)
+				server->tcp_send_bytes(conn, buf)
 			}
 		}
 	}
@@ -1804,16 +1819,22 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 				_: ^Connection,
 				_: sim.Server_Packet,
 			) {}
+			server.tcp_send_bytes = proc(
+				_: ^Server,
+				_: ^Connection,
+				_: []u8,
+			) {}
 			server.udp_send = proc(
 				_: ^Server,
 				_: ^Connection,
 				_: sim.Server_Packet,
 			) {}
 			break init_net
+		} else {
+			server.tcp_send = server_tcp_send
+			server.tcp_send_bytes = server_tcp_send_bytes
+			server.udp_send = server_udp_send
 		}
-
-		server.tcp_send = server_tcp_send
-		server.udp_send = server_udp_send
 
 		udp_sock, create_err := nbio.create_udp_socket(.IP4)
 		log.assertf(
@@ -1884,6 +1905,14 @@ server_tcp_send :: proc(
 	packet: sim.Server_Packet,
 ) {
 	sim.tcp_connection_send_server(&conn.hctx, packet, server.hr.l)
+}
+
+server_tcp_send_bytes :: proc(
+	server: ^Server,
+	conn: ^Connection,
+	packet: []u8,
+) {
+	sim.tcp_connection_send_arbitrary(&conn.hctx, packet, server.hr.l)
 }
 
 server_udp_send :: proc(

@@ -61,12 +61,7 @@ client_handle_packet :: proc(
 		)
 		assert(ok)
 	case sim.Server_State:
-		d: sim.Decoder = {p.packed}
-
 		client.tps = p.tps
-
-		ln := sim.decode(&d, u16) or_return
-		assert(int(ln) < len(client.ents.slots))
 
 		present := packer.bit_set_init(
 			len(client.ents.slots),
@@ -92,7 +87,8 @@ client_handle_packet :: proc(
 			net_id_to_ent[e.net_id] = e
 		}
 
-		for _ in 0 ..< ln {
+		d: sim.Decoder = {p.ents.raw}
+		for len(d.remining) > 0 {
 			synced := sim.ent_synced_decode(&client.ents, &d) or_return
 
 			ne := net_id_to_ent[synced.net_id]
@@ -155,10 +151,9 @@ client_handle_packet :: proc(
 		client.ent = (net_id_to_ent[p.you] or_else sim.NIL_ENT).id
 		client.applied_input.next_net_id = p.your_next_net_id
 
-		player_count := sim.decode(&d, u16) or_return
-		for i in 0 ..< min(int(player_count), len(client.players)) {
+		for keys, i in p.players[:min(len(p.players), len(client.players))] {
 			p := &client.players[i]
-			p.input = sim.decode(&d, sim.Client_Input_Keys) or_return
+			p.input = keys
 			p.ent = (net_id_to_ent[p.net_ent] or_else sim.NIL_ENT).id
 		}
 
@@ -206,30 +201,13 @@ client_handle_packet :: proc(
 	case sim.Server_Cold_State:
 		clear(&client.players)
 
-		client.ui.has_dirty_config = p.header.dirty_stats
-
-		d := sim.Decoder{p.packed}
+		client.ui.has_dirty_config = p.dirty_stats
 
 		log.debug("received the cold state, our id:", client.hctx.ch.id)
 
-		count := sim.decode(&d, u16) or_return
-		for _ in 0 ..< count {
-			id := sim.decode(&d, sim.Identity) or_return
-
-			name_len := sim.decode(&d, u8) or_return
-			name_bytes := sim.decode_slice(&d, name_len) or_return
-
-			name := nm.from_str(string(name_bytes))
-
-			permissions := sim.decode(&d, sim.Player_Permissions) or_return
-			net_id := sim.decode(&d, sim.Ent_Net_ID) or_return
-
-			append(
-				&client.players,
-				Player{{0, id, name, permissions, net_id}, {}, {}},
-			)
-
-			log.debug("player:", id, ":", nm.str(&name))
+		for &pl in p.players {
+			append(&client.players, Player{pl, {}, {}})
+			log.debug("player:", pl.id, ":", nm.str(&pl.name))
 		}
 
 		client.player_idx = -1
@@ -239,14 +217,14 @@ client_handle_packet :: proc(
 			}
 		}
 	case sim.Server_Stats:
-		d := sim.Decoder{p.packed}
-		count := sim.decode(&d, u16) or_return
+		clear(&client.ents.stats)
 
-		resize(&client.ents.stats, count)
-		mem.zero_slice(client.ents.stats[:])
-
-		for &s, i in client.ents.stats {
-			sim.ent_stats_decode(&s, sim.Ent_Stats_ID(i), &d) or_return
+		d := sim.Decoder{p.stats.raw}
+		for len(d.remining) != 0 {
+			i := len(client.ents.stats)
+			append(&client.ents.stats, sim.Ent_Stats{})
+			slot := &client.ents.stats[i]
+			sim.ent_stats_decode(slot, sim.Ent_Stats_ID(i), &d) or_return
 		}
 
 		assets := make([dynamic]sim.Asset_ID, context.temp_allocator)
@@ -264,8 +242,8 @@ client_handle_packet :: proc(
 			) {
 				client := (^[dynamic]sim.Asset_ID)(context.user_ptr)
 				sw: switch &v in val {
-				case sim.Asset_Ref:
-					sim.add_asset(client, v.id)
+				case sim.Asset_ID:
+					sim.add_asset(client, v)
 				case:
 					go_deeper = true
 				}

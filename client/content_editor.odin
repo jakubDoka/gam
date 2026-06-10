@@ -332,7 +332,7 @@ ui_content_editor :: proc(client: ^Client) {
 			) {
 				if reflect.is_struct(type_info_of(value.id)) &&
 				   value.id != sim.Ent_Stats_Ref &&
-				   value.id != sim.Asset_Ref {
+				   value.id != sim.Asset_ID {
 					for field in reflect.struct_fields_zipped(value.id) {
 
 						if vl, ok := reflect.struct_tag_lookup(
@@ -709,7 +709,7 @@ ui_stat_editor :: proc(
 		sub_root_edit := orui.to_id(seb.eidt_root, i)
 		_, is_struct := reflect.type_info_base(type).variant.(rt.Type_Info_Struct)
 		is_struct &= type.id != sim.Ent_Stats_Ref
-		is_struct &= type.id != sim.Asset_Ref
+		is_struct &= type.id != sim.Asset_ID
 
 		dest := reflect.struct_field_value(edited, field)
 		original := reflect.struct_field_value(original, field)
@@ -815,8 +815,8 @@ ui_content_field_edit :: proc(
 
 	if !editing {
 		switch &v in dest {
-		case sim.Asset_Ref:
-			index := sim.asset_id_to_idx(client.assets[:], v.id)
+		case sim.Asset_ID:
+			index := sim.asset_id_to_idx(client.assets[:], v)
 
 			if index >= 0 && int(index) < len(client.ui.sheet.frames) {
 				dest = nm.str(&client.ui.sheet.frames[index].name)
@@ -915,7 +915,7 @@ ui_content_field_edit :: proc(
 			seb.current_field = 0
 			seb.last_field = 0
 		}
-	case sim.Asset_Ref:
+	case sim.Asset_ID:
 		res, should_close := ui_sprite_select(
 			client,
 			id("sprite-picker", sub_root),
@@ -927,7 +927,7 @@ ui_content_field_edit :: proc(
 		}
 
 		if res >= 0 {
-			v.id = sim.asset_idx_to_id(client.assets[:], res)
+			v = sim.asset_idx_to_id(client.assets[:], res)
 			seb.current_field = 0
 			seb.last_field = 0
 		}

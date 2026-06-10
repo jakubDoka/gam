@@ -155,7 +155,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 			}
 
 			if reflect.is_struct(type_info_of(dest.id)) &&
-			   dest.id != Asset_Ref {
+			   dest.id != Asset_ID {
 				if value == "" {
 					append(&segments, dest)
 					continue
@@ -223,7 +223,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 			a = {
 				name = value,
 			}
-		case Asset_Ref:
+		case Asset_ID:
 			id, load_err := loader.load_sprite(loader, value)
 			if len(load_err) != 0 {
 				report(
@@ -233,7 +233,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 					load_err,
 				)
 			}
-			a.id = id
+			a = id
 		case Ent_Kind:
 			v, ok := reflect.enum_from_name(Ent_Kind, value)
 			if !ok {
@@ -283,7 +283,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 		case bool,
 		     f32,
 		     int,
-		     Asset_Ref,
+		     Asset_ID,
 		     Ent_Stats_ID,
 		     Ent_Kind,
 		     Ent_Stats_Name,
@@ -441,7 +441,7 @@ test_config_loading :: proc(t: ^testing.T) {
 
 Store_Ctx :: struct {
 	asoc_data:   rawptr,
-	sprite_name: proc(_: rawptr, id: Asset_Ref) -> string,
+	sprite_name: proc(_: rawptr, id: Asset_ID) -> string,
 	stats:       []Ent_Stats,
 }
 
@@ -469,7 +469,7 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 		     int,
 		     bool,
 		     Color,
-		     Asset_Ref,
+		     Asset_ID,
 		     Ent_Stats_Ref,
 		     Ent_Kind,
 		     Ent_Stats_Name:
@@ -485,7 +485,7 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 			cl := v
 			if cl & 0xFF == 0xFF do cl >>= 8
 			fmt.wprintf(out, "#%x", cl)
-		case Asset_Ref:
+		case Asset_ID:
 			write_string(out, ctx.sprite_name(ctx.asoc_data, v))
 		case Ent_Stats_Ref:
 			io.write_full(out, nm.bytes(&ctx.stats[v.id].name))
@@ -540,8 +540,13 @@ when false {
 		names := []string{"", "arma", "foreign"}
 		stats := []Ent_Stats {
 			{},
-			{kind = .Unit, speed = 100, sprite = {index = 1}, id = 1},
-			{kind = .PowerSource, energy = 10, sprite = {index = 2}, id = 2},
+			{kind = .Unit, speed = 100, sprite = {Asset_ID = 1}, id = 1},
+			{
+				kind = .PowerSource,
+				energy = 10,
+				sprite = {Asset_ID = 2},
+				id = 2,
+			},
 		}
 
 		for i in 0 ..< len(names) {
@@ -550,7 +555,7 @@ when false {
 
 		ctx: Store_Ctx
 		ctx.asoc_data = &names
-		ctx.sprite_name = proc(asoc_data: rawptr, id: Asset_Ref) -> string {
+		ctx.sprite_name = proc(asoc_data: rawptr, id: Asset_ID) -> string {
 			return (^[]string)(asoc_data)^[id.index]
 		}
 		ctx.stats = stats
