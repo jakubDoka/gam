@@ -1,5 +1,6 @@
 package packer
 
+import "../bit_arr"
 import "../nm"
 import "core:log"
 import "core:math"
@@ -117,7 +118,7 @@ pack :: proc(
 	})
 
 	retry: for {
-		bitset := bit_set_init(int(bitset_dims.x * bitset_dims.y))
+		bitset := bit_arr.init(int(bitset_dims.x * bitset_dims.y))
 
 		resolve: for i in sorted {
 			texture := &textures[i]
@@ -131,7 +132,7 @@ pack :: proc(
 
 					for dy in 0 ..< height {
 						for dx in 0 ..< width {
-							taken := bit_set_contains(
+							taken := bit_arr.contains(
 								bitset,
 								(x + dx) + (y + dy) * bitset_dims.x,
 							)
@@ -141,7 +142,7 @@ pack :: proc(
 
 					for dy in 0 ..< height {
 						for dx in 0 ..< width {
-							bit_set_set(
+							bit_arr.set(
 								bitset,
 								(x + dx) + (y + dy) * bitset_dims.x,
 							)
@@ -187,70 +188,4 @@ test_pack :: proc(t: ^testing.T) {
 	for slot in slots {
 		log.debug(slot)
 	}
-}
-
-BIT_SET_MASK_SIZE :: size_of(uint) * 8
-
-Bit_Set :: struct {
-	masks:      [^]int,
-	bit_length: int,
-}
-
-bit_set_mask_len :: proc(bit_length: int) -> int {
-	return (bit_length + BIT_SET_MASK_SIZE - 1) / BIT_SET_MASK_SIZE
-}
-
-bit_set_init :: proc(
-	bit_length: int,
-	allocator := context.allocator,
-	loc := #caller_location,
-) -> Bit_Set {
-	return {
-		raw_data(
-			make([]int, bit_set_mask_len(bit_length), allocator, loc = loc),
-		),
-		bit_length,
-	}
-}
-
-bit_set_is_empty :: proc(bset: Bit_Set) -> bool {
-	for m in bset.masks[:bit_set_mask_len(bset.bit_length)] {
-		if m != 0 do return false
-	}
-
-	return true
-}
-
-bit_set_destroy :: proc(bset: Bit_Set) {
-	delete(bset.masks[:bit_set_mask_len(bset.bit_length)])
-}
-
-bit_set_set :: proc(bset: Bit_Set, #any_int index: int, value := true) {
-	assert(index < bset.bit_length)
-	if value {
-		bset.masks[index / BIT_SET_MASK_SIZE] |=
-			1 << uint(index % BIT_SET_MASK_SIZE)
-	} else {
-		bset.masks[index / BIT_SET_MASK_SIZE] &= ~(1 <<
-			uint(index % BIT_SET_MASK_SIZE))
-	}
-}
-
-bit_set_set_unbounded :: proc(bset: Bit_Set, index: int, value := true) {
-	if index < 0 || index >= bset.bit_length do return
-	bit_set_set(bset, index, value)
-}
-
-bit_set_contains_unbounded :: proc(bset: Bit_Set, index: int) -> bool {
-	if index < 0 || index >= bset.bit_length do return false
-	return bit_set_contains(bset, index)
-}
-
-bit_set_contains :: proc(bset: Bit_Set, #any_int index: int) -> bool {
-	assert(index < bset.bit_length)
-	return(
-		bset.masks[index / BIT_SET_MASK_SIZE] &
-			(1 << uint(index % BIT_SET_MASK_SIZE)) !=
-		0 \
-	)
 }

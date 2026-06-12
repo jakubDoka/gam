@@ -63,6 +63,7 @@ deinit_scratch :: proc() {
 scrath :: proc {
 	scrath_with_clobber,
 	scrath_no_clobber,
+	scrath_existing,
 }
 
 @(deferred_out = scrath_end)
@@ -81,6 +82,15 @@ scrath_with_clobber :: proc(
 		return allocator(&scratch[1]), scratch[1].pos
 	}
 	return allocator(&scratch[0]), scratch[0].pos
+}
+
+@(deferred_in_out = scrath_existing_end)
+scrath_existing :: proc(arena: ^Allocator) -> uint {
+	return arena.pos
+}
+
+scrath_existing_end :: proc(arena: ^Allocator, pos: uint) {
+	arena.pos = pos
 }
 
 scrath_end :: proc(arena: runtime.Allocator, pos: uint) {
@@ -131,7 +141,7 @@ alloc :: proc(
 ) -> (
 	b: []u8,
 	e: runtime.Allocator_Error,
-) {
+) #optional_allocator_error {
 	assert(math.is_power_of_two(int(alignemnt)))
 	assert(alignemnt <= mem.DEFAULT_PAGE_SIZE)
 
@@ -165,6 +175,13 @@ alloc :: proc(
 	if zeroed do mem.zero_slice(slc)
 
 	return slc, .None
+}
+
+smake :: proc(arena: ^Allocator, $T: typeid/[]$E, #any_int len: int) -> []E {
+	return mem.slice_data_cast(
+		[]E,
+		alloc(arena, uint(size_of(E) * len), align_of(E), true),
+	)
 }
 
 allocator :: proc(arena: ^Allocator) -> runtime.Allocator {

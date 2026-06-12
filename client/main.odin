@@ -495,7 +495,6 @@ ui_build_selection_update :: proc(client: ^Client) {
 			   tile != stile &&
 			   !sim.map_tile_is_solid(&client.ents, tile) &&
 			   client.bs.place_pos == nil {
-				fmt.println("wuta")
 				client.bs.place_pos = tile
 				break select_dst
 			}
