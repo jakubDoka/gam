@@ -1,5 +1,6 @@
 package sim
 
+import "../util/arna"
 import "../util/b58"
 import "../util/nm"
 import "../util/packer"
@@ -13,8 +14,6 @@ import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:reflect"
-import "core:simd"
-import "core:slice"
 import "core:sort"
 import "core:testing"
 
@@ -155,30 +154,8 @@ add_asset :: proc(buf: ^[dynamic]Asset_ID, sprite: Asset_ID) -> Asset_Idx {
 	return Asset_Idx(len(buf) - 1)
 }
 
-simd_search :: proc(haistack: []$T, needle: T) -> int {
-	LANES :: 16 / size_of(T)
-
-	for i in 0 ..< len(haistack) / LANES {
-		chunk := simd.from_slice(
-			#simd[LANES]Asset_ID,
-			haistack[i * LANES:][:LANES],
-		)
-		mask := simd.lanes_eq(chunk, (#simd[LANES]T)(needle))
-		bits := transmute(u8)simd.extract_lsbs(mask)
-		if bits == 0 do continue
-		return i * LANES + int(simd.count_trailing_zeros(bits))
-	}
-
-	idx, _ := slice.linear_search(
-		haistack[len(haistack) / LANES * LANES:],
-		needle,
-	)
-	if idx < 0 do return -1
-	return len(haistack) / LANES * LANES + idx
-}
-
 asset_id_to_idx :: proc(mapping: []Asset_ID, id: Asset_ID) -> Asset_Idx {
-	return Asset_Idx(simd_search(mapping, id))
+	return Asset_Idx(arna.simd_search(mapping, id))
 }
 
 asset_idx_to_id :: proc(mapping: []Asset_ID, idx: Asset_Idx) -> Asset_ID {

@@ -4,6 +4,8 @@ import "base:runtime"
 import "core:math"
 import "core:mem"
 import "core:mem/virtual"
+import "core:simd"
+import "core:slice"
 import "core:testing"
 
 @(thread_local)
@@ -177,11 +179,26 @@ alloc :: proc(
 	return slc, .None
 }
 
-smake :: proc(arena: ^Allocator, $T: typeid/[]$E, #any_int len: int) -> []E {
+smake :: proc(
+	arena: ^Allocator,
+	$T: typeid/[]$E,
+	#any_int len: int,
+	zeroed := true,
+) -> []E {
 	return mem.slice_data_cast(
 		[]E,
-		alloc(arena, uint(size_of(E) * len), align_of(E), true),
+		alloc(arena, uint(size_of(E) * len), align_of(E), zeroed),
 	)
+}
+
+clone :: proc(arena: ^Allocator, slc: []$T) -> []T {
+	slot := smake(arena, []T, len(slc), false)
+	mem.copy_non_overlapping(
+		raw_data(slot),
+		raw_data(slc),
+		len(slc) * size_of(T),
+	)
+	return slot
 }
 
 allocator :: proc(arena: ^Allocator) -> runtime.Allocator {
@@ -288,4 +305,23 @@ test_arena_sanity :: proc(t: ^testing.T) {
 	assert(err == nil)
 	bf, err = make([]u8, 1024 * 1024 / 2)
 	assert(err == nil)
+}
+
+simd_search :: proc(haistack: []$T, needle: T) -> (int, bool) {
+	LANES :: 16 / size_of(T)
+
+	for i in 0 ..< len(haistack) / LANES {
+		chunk := simd.from_slice(#simd[LANES]T, haistack[i * LANES:][:LANES])
+		mask := simd.lanes_eq(chunk, (#simd[LANES]T)(needle))
+		bits := transmute(u8)simd.extract_lsbs(mask)
+		if bits == 0 do continue
+		return i * LANES + int(simd.count_trailing_zeros(bits)), true
+	}
+
+	idx, _ := slice.linear_search(
+		haistack[len(haistack) / LANES * LANES:],
+		needle,
+	)
+	if idx < 0 do return -1, false
+	return len(haistack) / LANES * LANES + idx, true
 }

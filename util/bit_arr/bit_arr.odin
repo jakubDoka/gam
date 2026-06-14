@@ -85,7 +85,7 @@ iter_next :: proc(it: ^Iter) -> (int, bool) {
 	len := mask_len(it.set.bit_length)
 
 	for it.current_mask == 0 {
-		if it.i >= len do return 0, false
+		if it.i >= len do return -1, false
 		it.current_mask = it.set.masks[it.i]
 		it.i += 1
 	}

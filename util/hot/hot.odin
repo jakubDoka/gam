@@ -8,6 +8,7 @@ import "core:log"
 import "core:nbio"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
 HOT_RELOAD :: #config(HOT_RELOAD, false)
@@ -230,6 +231,7 @@ reload :: proc(
 	return
 }
 
+once: sync.Once
 global_trace_ctx: trace.Context
 
 dump_trace :: proc() {
@@ -256,8 +258,9 @@ dump_trace :: proc() {
 init_trace :: proc(
 ) -> proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
 	when !ODIN_DEBUG do return context.assertion_failure_proc
-	trace.init(&global_trace_ctx)
-	defer trace.destroy(&global_trace_ctx)
+	sync.once_do(&once, proc() {
+		trace.init(&global_trace_ctx)
+	})
 	return proc(prefix, message: string, loc := #caller_location) -> ! {
 			runtime.print_caller_location(loc)
 			runtime.print_string(" ")
