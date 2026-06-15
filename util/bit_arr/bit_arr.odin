@@ -54,7 +54,7 @@ set_unbounded :: proc(bset: Bit_Set, index: int, value := true) {
 	set(bset, index, value)
 }
 
-contains_unbounded :: proc(bset: Bit_Set, index: int) -> bool {
+contains_unbounded :: proc(bset: Bit_Set, #any_int index: int) -> bool {
 	if index < 0 || index >= bset.bit_length do return false
 	return contains(bset, index)
 }
