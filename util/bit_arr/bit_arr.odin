@@ -40,13 +40,21 @@ destroy :: proc(bset: Bit_Set) {
 	delete(bset.masks[:mask_len(bset.bit_length)])
 }
 
-set :: proc(bset: Bit_Set, #any_int index: int, value := true) {
+set :: proc(
+	bset: Bit_Set,
+	#any_int index: int,
+	value := true,
+) -> (
+	changed: bool,
+) {
 	assert(index < bset.bit_length)
+	mask := bset.masks[index / MASK_SIZE]
 	if value {
 		bset.masks[index / MASK_SIZE] |= 1 << uint(index % MASK_SIZE)
 	} else {
 		bset.masks[index / MASK_SIZE] &= ~(1 << uint(index % MASK_SIZE))
 	}
+	return mask != bset.masks[index / MASK_SIZE]
 }
 
 set_unbounded :: proc(bset: Bit_Set, index: int, value := true) {
