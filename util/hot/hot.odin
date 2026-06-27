@@ -240,13 +240,11 @@ dump_trace :: proc() {
 		buf: [64]trace.Frame
 		runtime.print_string("Debug Trace:\n")
 		frames := trace.frames(ctx, 1, buf[:])
-		for f, i in frames {
+		for f in frames {
 			fl := trace.resolve(ctx, f, context.temp_allocator)
 			if fl.loc.file_path == "" && fl.loc.line == 0 {
 				continue
 			}
-			// Intellij IDEA does not interpet result as path to file if there is not collum
-			// print_caller_location does not print column when it is zero
 			fl.column = 1
 			runtime.print_caller_location(fl.loc)
 			runtime.print_byte('\n')

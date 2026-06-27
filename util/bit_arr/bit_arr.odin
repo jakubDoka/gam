@@ -1,6 +1,7 @@
 package bit_arr
 
 import "base:intrinsics"
+import "core:slice"
 import "core:testing"
 MASK_SIZE :: size_of(uint) * 8
 
@@ -22,6 +23,10 @@ init :: proc(
 		raw_data(make([]int, mask_len(bit_length), allocator, loc = loc)),
 		bit_length,
 	}
+}
+
+set_all :: proc(bset: Bit_Set) {
+	slice.fill(bset.masks[:mask_len(bset.bit_length)], -1)
 }
 
 init_from_masks :: proc(masks: []int) -> Bit_Set {

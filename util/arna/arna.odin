@@ -1,5 +1,6 @@
 package arna
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:mem"
@@ -18,16 +19,59 @@ Allocator :: struct {
 	reserved: uint,
 }
 
+reserve :: proc "contextless" (size: uint) -> ([]u8, runtime.Allocator_Error) {
+	when ODIN_ARCH == .wasm32 {
+		off := intrinsics.wasm_memory_grow(
+			0,
+			uintptr(size) / mem.DEFAULT_PAGE_SIZE,
+		)
+		if off == -1 do return {}, .Out_Of_Memory
+		return ([^]u8)(
+				uintptr(off * mem.DEFAULT_PAGE_SIZE),
+			)[:mem.DEFAULT_PAGE_SIZE],
+			nil
+	} else {
+		return virtual.reserve(size)
+	}
+}
+
+commit :: proc "contextless" (
+	data: rawptr,
+	size: uint,
+) -> runtime.Allocator_Error {
+	when ODIN_ARCH == .wasm32 {
+		return nil
+	} else {
+		return virtual.commit(data, size)
+	}
+}
+
+decommit :: proc "contextless" (data: rawptr, size: uint) {
+	when ODIN_ARCH == .wasm32 {
+		return
+	} else {
+		virtual.decommit(data, size)
+	}
+}
+
+release :: proc "contextless" (data: rawptr, size: uint) {
+	when ODIN_ARCH == .wasm32 {
+		return
+	} else {
+		virtual.release(data, size)
+	}
+}
+
 init :: proc "contextless" (
 	slot: ^Allocator,
 	size: int,
 ) -> runtime.Allocator_Error {
-	mem := virtual.reserve(uint(size)) or_return
+	mem := reserve(uint(size)) or_return
 	slot^ = {raw_data(mem), 0, 0, uint(size)}
 	return .None
 }
 
-init_from_buffer :: proc(buf: []u8) -> Allocator {
+init_from_buffer :: proc "contextless" (buf: []u8) -> Allocator {
 	return {
 		ptr = raw_data(buf),
 		pos = 0,
@@ -40,19 +84,19 @@ destroy :: proc(slot: ^Allocator) {
 	if slot.commited > slot.reserved {
 		delete(slot.ptr[:slot.reserved])
 	} else {
-		virtual.release(slot.ptr, slot.reserved)
+		release(slot.ptr, slot.reserved)
 	}
 }
 
-reset :: proc(arena: ^Allocator, decommit: bool = true) {
-	if arena.commited <= arena.reserved && decommit {
-		virtual.decommit(arena.ptr, arena.commited)
+reset :: proc "contextless" (arena: ^Allocator, decommit_: bool = true) {
+	if arena.commited <= arena.reserved && decommit_ {
+		decommit(arena.ptr, arena.commited)
 		arena.commited = 0
 	}
 	arena.pos = 0
 }
 
-init_scratch :: proc(size: int) {
+init_scratch :: proc "contextless" (size: int) {
 	init(&scratch[0], size)
 	init(&scratch[1], size)
 }
@@ -69,7 +113,7 @@ scrath :: proc {
 }
 
 @(deferred_out = scrath_end)
-scrath_no_clobber :: proc() -> (runtime.Allocator, uint) {
+scrath_no_clobber :: proc "contextless" () -> (runtime.Allocator, uint) {
 	return allocator(&scratch[0]), scratch[0].pos
 }
 
@@ -108,7 +152,7 @@ bulk_init :: proc "contextless" (
 		total += slot.reserved
 	}
 
-	mem := virtual.reserve(total) or_return
+	mem := reserve(total) or_return
 	for slot in slots {
 		slot.ptr = raw_data(mem)
 		slot.pos = 0
@@ -132,7 +176,7 @@ bulk_destroy :: proc(slots: ..^Allocator) {
 		assert(rel_offset + uintptr(slot.reserved) <= uintptr(size))
 	}
 
-	virtual.release(rawptr(min_ptr), size)
+	release(rawptr(min_ptr), size)
 }
 
 alloc :: proc(
@@ -165,7 +209,7 @@ alloc :: proc(
 			mem.DEFAULT_PAGE_SIZE,
 		)
 		commit_pos := uintptr(arena.ptr) + uintptr(arena.commited)
-		virtual.commit(rawptr(commit_pos), commit_chunk) or_return
+		commit(rawptr(commit_pos), commit_chunk) or_return
 		arena.commited += commit_chunk
 		assert(arena.commited <= arena.reserved)
 		assert(end <= arena.commited)
@@ -191,7 +235,7 @@ smake :: proc(
 	)
 }
 
-clone :: proc(arena: ^Allocator, slc: []$T) -> []T {
+clone :: proc "contextless" (arena: ^Allocator, slc: []$T) -> []T {
 	slot := smake(arena, []T, len(slc), false)
 	mem.copy_non_overlapping(
 		raw_data(slot),
@@ -201,7 +245,7 @@ clone :: proc(arena: ^Allocator, slc: []$T) -> []T {
 	return slot
 }
 
-allocator :: proc(arena: ^Allocator) -> runtime.Allocator {
+allocator :: proc "contextless" (arena: ^Allocator) -> runtime.Allocator {
 	return {procedure = allocator_proc, data = arena}
 }
 
@@ -233,7 +277,7 @@ allocator_proc :: proc(
 		}
 		return {}, nil
 	case .Free_All:
-		reset(arena, decommit = false)
+		reset(arena, decommit_ = false)
 		return {}, nil
 	case .Resize, .Resize_Non_Zeroed:
 		if uintptr(old_memory) - uintptr(arena.ptr) !=
