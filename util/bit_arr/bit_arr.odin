@@ -19,14 +19,12 @@ init :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> Bit_Set {
-	return {
-		raw_data(make([]int, mask_len(bit_length), allocator, loc = loc)),
-		bit_length,
-	}
+	slc := make([]int, mask_len(bit_length), allocator, loc = loc)
+	return {raw_data(slc), min(bit_length, len(slc) * MASK_SIZE)}
 }
 
-set_all :: proc(bset: Bit_Set) {
-	slice.fill(bset.masks[:mask_len(bset.bit_length)], -1)
+set_all :: proc(bset: Bit_Set, value := true) {
+	slice.fill(bset.masks[:mask_len(bset.bit_length)], -int(value))
 }
 
 init_from_masks :: proc(masks: []int) -> Bit_Set {

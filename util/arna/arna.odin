@@ -235,7 +235,7 @@ smake :: proc(
 	)
 }
 
-clone :: proc "contextless" (arena: ^Allocator, slc: []$T) -> []T {
+clone :: proc(arena: ^Allocator, slc: []$T) -> []T {
 	slot := smake(arena, []T, len(slc), false)
 	mem.copy_non_overlapping(
 		raw_data(slot),
