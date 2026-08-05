@@ -2,6 +2,7 @@ package arna
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:io"
 import "core:math"
 import "core:mem"
 import "core:mem/virtual"
@@ -189,12 +190,13 @@ alloc :: proc(
 	e: runtime.Allocator_Error,
 ) #optional_allocator_error {
 	assert(math.is_power_of_two(int(alignemnt)))
-	assert(alignemnt <= mem.DEFAULT_PAGE_SIZE)
+	assert(alignemnt <= uint(mem.PAGE_SIZE))
 
 	base := mem.align_forward_uint(arena.pos, alignemnt)
 	end := base + size
 
 	if end > arena.reserved {
+		assert(false)
 		return {}, .Out_Of_Memory
 	}
 
@@ -206,7 +208,7 @@ alloc :: proc(
 		)
 		commit_chunk = mem.align_forward_uint(
 			commit_chunk,
-			mem.DEFAULT_PAGE_SIZE,
+			uint(mem.PAGE_SIZE),
 		)
 		commit_pos := uintptr(arena.ptr) + uintptr(arena.commited)
 		commit(rawptr(commit_pos), commit_chunk) or_return
@@ -307,6 +309,33 @@ allocator_proc :: proc(
 	case:
 	}
 	return {}, .Mode_Not_Implemented
+}
+
+to_stream :: proc(a: ^Allocator) -> io.Stream {
+	return {stream_proc, a}
+}
+
+stream_proc :: proc(
+	stream_data: rawptr,
+	mode: io.Stream_Mode,
+	p: []byte,
+	offset: i64,
+	whence: io.Seek_From,
+) -> (
+	n: i64,
+	err: io.Error,
+) {
+	a := (^Allocator)(stream_data)
+
+	#partial switch mode {
+	case .Flush:
+		return 0, .None
+	case .Write:
+		clone(a, p)
+		return i64(len(p)), .None
+	case:
+		return 0, .Unsupported
+	}
 }
 
 @(test)

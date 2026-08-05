@@ -3,6 +3,7 @@ package bit_arr
 import "base:intrinsics"
 import "core:slice"
 import "core:testing"
+
 MASK_SIZE :: size_of(uint) * 8
 
 Bit_Set :: struct {
