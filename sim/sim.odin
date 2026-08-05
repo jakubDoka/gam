@@ -2,8 +2,8 @@ package sim
 
 import "../util/arna"
 import "../util/b58"
+import "../util/bit_arr"
 import "../util/nm"
-import "../util/packer"
 import rt "base:runtime"
 import "core:container/queue"
 import "core:fmt"
@@ -57,14 +57,14 @@ Ent_Stats_Ref :: struct #raw_union {
 	id:   Ent_Stats_ID,
 }
 
-TARGETABLE :: bit_set[Ent_Kind]{.Building, .Unit, .PowerSource, .Rocket}
-DRAWS_ENERGY :: bit_set[Ent_Kind]{.Building, .Unit, .PowerSource}
-AUTO_RECONNECT :: bit_set[Ent_Kind]{.Unit}
-REPELS :: bit_set[Ent_Kind]{.Unit}
-COLLIDES_WITH_WALLS :: ~bit_set[Ent_Kind]{.Shell}
-COLLIDES_WITH_OTHERS :: ~bit_set[Ent_Kind]{.Shell, .Beam}
+TARGETABLE :: bit_set[Ent_Type]{.Building, .Unit, .PowerSource, .Rocket}
+DRAWS_ENERGY :: bit_set[Ent_Type]{.Building, .Unit, .PowerSource}
+AUTO_RECONNECT :: bit_set[Ent_Type]{.Unit}
+REPELS :: bit_set[Ent_Type]{.Unit}
+COLLIDES_WITH_WALLS :: ~bit_set[Ent_Type]{.Shell}
+COLLIDES_WITH_OTHERS :: ~bit_set[Ent_Type]{.Shell, .Beam}
 
-Ent_Kind :: enum u8 {
+Ent_Type :: enum u8 {
 	Building,
 	Unit,
 	PowerSource,
@@ -91,8 +91,10 @@ Ent_Stats :: struct {
 	id:               Ent_Stats_ID `gam:"hidden"`,
 	playable:         bool,
 	placable:         bool,
+	guards:           bool,
+	tall:             bool,
 	can_spawn_player: bool,
-	kind:             Ent_Kind,
+	kind:             Ent_Type,
 	spawn_unit:       Ent_Stats_Ref,
 	using physics:    struct {
 		speed:                   f32 `gam:"round"`,
@@ -155,7 +157,8 @@ add_asset :: proc(buf: ^[dynamic]Asset_ID, sprite: Asset_ID) -> Asset_Idx {
 }
 
 asset_id_to_idx :: proc(mapping: []Asset_ID, id: Asset_ID) -> Asset_Idx {
-	return Asset_Idx(arna.simd_search(mapping, id))
+	idx, _ := arna.simd_search(mapping, id)
+	return Asset_Idx(idx)
 }
 
 asset_idx_to_id :: proc(mapping: []Asset_ID, idx: Asset_Idx) -> Asset_ID {
@@ -294,7 +297,7 @@ test_validate :: proc(t: ^testing.T) {
 }
 
 Field_Presence :: struct {
-	bits:   packer.Bit_Set,
+	bits:   bit_arr.Bit_Set,
 	cursor: int,
 }
 
@@ -305,14 +308,14 @@ field_presence_init :: proc(ctx: ^Field_Presence, slot: []int) {
 }
 
 field_presence_set :: proc(ctx: ^Field_Presence, value: bool) -> bool {
-	if value do packer.bit_set_set(ctx.bits, ctx.cursor)
+	if value do bit_arr.set(ctx.bits, ctx.cursor)
 	ctx.cursor += 1
 	return value
 }
 
 field_presence_get :: proc(ctx: ^Field_Presence) -> bool {
 	defer ctx.cursor += 1
-	return packer.bit_set_contains(ctx.bits, ctx.cursor)
+	return bit_arr.contains(ctx.bits, ctx.cursor)
 }
 
 @(test)
@@ -405,6 +408,7 @@ PState :: struct {
 
 Ents :: struct {
 	slots:         []Ent,
+	winning_team:  Ent_Team_ID,
 	len:           int,
 	pstate:        []PState,
 	queued_remove: ^Ent,
@@ -1019,6 +1023,7 @@ eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 ents_update :: proc(ents: ^Ents) {
 	ents_move(ents, ents.delta)
 
+	found_spawner := make([]bool, len(ents.teams), context.temp_allocator)
 	for &e in ents_iter(ents) {
 		s := ents_stats_get(ents, e.stats)
 
@@ -1029,6 +1034,9 @@ ents_update :: proc(ents: ^Ents) {
 		e.parry_progress -= ents.delta
 		e.parent_net_id = ents_get(ents, e.parent).net_id
 		e.rot += ents.delta * s.spin
+		if s.can_spawn_player {
+
+		}
 	}
 
 	Coll :: struct {
@@ -1231,11 +1239,11 @@ ents_update :: proc(ents: ^Ents) {
 		groups: [dynamic]Group
 		append(&groups, Group{0, NIL_ENT})
 		extra := make([]Energy_Extra, ents.len)
-		seen := packer.bit_set_init(ents.len)
+		seen := bit_arr.init(ents.len)
 
 		gather_iter := ents_iter(ents)
 		for e in ents_iter_next(&gather_iter) {
-			if packer.bit_set_contains(seen, e.id.index) do continue
+			if bit_arr.contains(seen, e.id.index) do continue
 
 			group: Group
 
@@ -1244,8 +1252,8 @@ ents_update :: proc(ents: ^Ents) {
 			for cursor != NIL_ENT {
 				group.root = cursor
 				depth += 1
-				if packer.bit_set_contains(seen, cursor.id.index) do break
-				packer.bit_set_set(seen, cursor.id.index)
+				if bit_arr.contains(seen, cursor.id.index) do break
+				bit_arr.set(seen, cursor.id.index)
 				stats := ents_stats_get(ents, cursor.stats)
 				group.energy_drain += stats.energy_drain
 				if cursor.energy_consumed > 0 &&

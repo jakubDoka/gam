@@ -4,6 +4,7 @@ import "../sim"
 import "../util/arna"
 import "../util/b58"
 import "../util/nm"
+import "../util/bit_arr"
 import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
@@ -379,24 +380,24 @@ UI_Profiles :: struct {
 }
 
 UI_Content_Editor :: struct {
-	expanded:             bool,
-	selected:             sim.Ent_Stats_ID,
-	search:               strings.Builder,
-	prop_search:          strings.Builder,
-	prev_scroll:          f32,
-	stat_edit_state:      sim.Ent_Stats,
-	stat_editor:          Stat_Editor_State,
-	edit_name:            strings.Builder,
-	create_stat:          bool,
-	create_stat_name:     strings.Builder,
-	upload_error:         string,
-	upload_arena:         arna.Allocator,
-	dropped_assets:       #soa[dynamic]struct {
-		base:  sim.Asset,
-		path:  string,
-		issue: string,
+	expanded:         bool,
+	selected:         sim.Ent_Stats_ID,
+	search:           strings.Builder,
+	prop_search:      strings.Builder,
+	prev_scroll:      f32,
+	stat_edit_state:  sim.Ent_Stats,
+	stat_editor:      Stat_Editor_State,
+	edit_name:        strings.Builder,
+	create_stat:      bool,
+	create_stat_name: strings.Builder,
+	upload_error:     string,
+	upload_arena:     arna.Allocator,
+	dropped_assets:   #soa[dynamic]struct {
+		base:     sim.Asset,
+		path:     string,
+		issue:    string,
+		uploaded: bool,
 	},
-	last_prepared_upload: time.Time,
 }
 
 Stat_Editor_State :: struct {
@@ -1679,7 +1680,7 @@ ui_ship_selection :: proc(client: ^Client) {
 				tcp_send(
 					client,
 					sim.Client_Cmd {
-						kind = .Spawn,
+						type = .Spawn,
 						parent = spawn_parent.net_id,
 						id = s.id,
 					},
@@ -1732,7 +1733,7 @@ ui_build_popup :: proc(client: ^Client, tile: sim.Map_Pos) {
 			tcp_send(
 				client,
 				sim.Client_Cmd {
-					kind = .Build,
+					type = .Build,
 					pos = map_tile_center(tile),
 					id = sim.Ent_Stats_ID(i),
 					parent = p.net_id,
@@ -1772,7 +1773,7 @@ ui_edit_popup :: proc(client: ^Client) {
 		.ICON_EXPLOSION,
 		"Delete building",
 	) {
-		tcp_send(client, sim.Client_Cmd{kind = .Delete, ent = e.net_id})
+		tcp_send(client, sim.Client_Cmd{type = .Delete, ent = e.net_id})
 		client.bs = {}
 	}
 
@@ -1824,7 +1825,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		tcp_send(
 			client,
 			sim.Client_Cmd {
-				kind = .Rewire,
+				type = .Rewire,
 				parent = se.net_id,
 				ent = de.net_id,
 			},
@@ -1839,7 +1840,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		   .ICON_FILTER_BILINEAR,
 		   "Disconnect buildings",
 	   ) {
-		tcp_send(client, sim.Client_Cmd{kind = .Rewire, ent = de.net_id})
+		tcp_send(client, sim.Client_Cmd{type = .Rewire, ent = de.net_id})
 		client.bs = {}
 	}
 }
@@ -2005,7 +2006,7 @@ ui_build :: proc(client: ^Client) {
 		case .Open_Content_Editor:
 			client.ui.content_editor.expanded = true
 		case .Save_Content_Changes:
-			tcp_send(client, sim.Client_Content_Action{kind = .Save})
+			tcp_send(client, sim.Client_Content_Action{type = .Save})
 		case .Close_Stat_Editor:
 			client.content_editor.selected = 0
 		case .Open_Map_Editor:
@@ -2019,7 +2020,7 @@ ui_build :: proc(client: ^Client) {
 			tcp_send(
 				client,
 				sim.Client_Content_Action {
-					kind = .Edit,
+					type = .Edit,
 					stats = client.content_editor.stat_edit_state,
 				},
 			)
@@ -2029,16 +2030,16 @@ ui_build :: proc(client: ^Client) {
 	}
 }
 
-fuzzy_rank_new_bitset :: proc(name: string, query: string) -> ^packer.Bit_Set {
-	matched_chars := new(packer.Bit_Set, context.temp_allocator)
-	matched_chars^ = packer.bit_set_init(len(name), context.temp_allocator)
+fuzzy_rank_new_bitset :: proc(name: string, query: string) -> ^bit_arr.Bit_Set {
+	matched_chars := new(bit_arr.Bit_Set, context.temp_allocator)
+	matched_chars^ = bit_arr.init(len(name), context.temp_allocator)
 	fuzzy_rank(name, query, matched_chars^)
 	return matched_chars
 }
 
 fuzzy_rank :: proc(
 	sample, pattern: string,
-	highlighted: packer.Bit_Set = {},
+	highlighted: bit_arr.Bit_Set = {},
 ) -> int {
 	MATCH :: 10
 	BOUNDARY_BONUS :: 8
@@ -2076,7 +2077,7 @@ fuzzy_rank :: proc(
 			if sc == pc {
 				if highlighted.bit_length != 0 && char_occs[sc] > 0 {
 					matched = true
-					packer.bit_set_set(highlighted, i - 1)
+					bit_arr.set(highlighted, i - 1)
 				}
 				boundary := i == 1 || is_separator(sample[i - 2])
 				sub_step = MATCH + (BOUNDARY_BONUS if boundary else 0)

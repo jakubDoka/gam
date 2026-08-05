@@ -902,7 +902,7 @@ client_update :: proc(client: ^Client) {
 		if x == NIL_ENT_EXTRA do break input_integration
 
 		if is_key_pressed(client, .Abandon_Ship) {
-			tcp_send(client, sim.Client_Cmd{kind = .Abandon})
+			tcp_send(client, sim.Client_Cmd{type = .Abandon})
 		}
 
 		prev_vel := sim.ents_get(&client.ents, client.ent).vel

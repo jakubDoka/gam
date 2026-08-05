@@ -17,14 +17,14 @@ CLIENT_RECV_BUF_SIZE :: 1024 * 64
 SERVER_RECV_BUF_SIZE :: 1024 * 16
 SERVER_REQUEST_BUF_SIZE :: 1024 * 4
 ENT_SYNCED_PRESENCE_CAP :: 16
+UPLOAD_BUFFER_SIZE :: size_of(Tag) + 4096
 
-Broadcast_Packet :: union {
+Broadcast_Packet :: union #no_nil {
 	Chat_Msg,
+	Empty,
 }
 
-Broadcast_Packet_Tag :: enum u8 {
-	Chat_Msg,
-}
+Empty :: struct {}
 
 Chat_Msg :: struct {
 	name:    Player_Name,
@@ -63,13 +63,13 @@ Asset :: struct {
 }
 
 Client_Content_Action :: struct {
-	kind:    Content_Action_Kind,
+	type:    Content_Action_Type,
 	using _: struct #raw_union {
 		stats: Ent_Stats,
 	},
 }
 
-Content_Action_Kind :: enum {
+Content_Action_Type :: enum {
 	Create,
 	Edit,
 	Save,
@@ -94,7 +94,7 @@ Client_Input_Key :: enum {
 	Parry,
 }
 
-Client_Cmd_Kind :: enum i32 {
+Client_Cmd_Type :: enum i32 {
 	Abandon,
 	Build,
 	Delete,
@@ -103,7 +103,7 @@ Client_Cmd_Kind :: enum i32 {
 }
 
 Client_Cmd :: struct {
-	kind:   Client_Cmd_Kind,
+	type:   Client_Cmd_Type,
 	pos:    Vec,
 	id:     Ent_Stats_ID,
 	parent: Ent_Net_ID,
@@ -214,14 +214,14 @@ Server_Cold_State :: struct {
 }
 
 // TODO: the naming is lacking
-Server_Cmd_Kind :: enum int {
+Server_Cmd_Type :: enum int {
 	Laser,
 	Token,
 	Ack,
 }
 
 Server_Cmd :: struct {
-	kind:        Server_Cmd_Kind,
+	type:        Server_Cmd_Type,
 	pos:         Vec,
 	dir:         f32,
 	team:        Ent_Team_ID,
@@ -250,6 +250,15 @@ custom_encoding_stats :: proc(stats: ^[]Ent_Stats) -> Custom_Encoding {
 	}
 }
 
+Server_Event_Type :: enum {
+	File_Uploaded,
+}
+
+Server_Event :: struct {
+	type: Server_Event_Type,
+	hash: Hash,
+}
+
 Server_Packet :: union #no_nil {
 	Server_Ping,
 	Server_State,
@@ -258,6 +267,7 @@ Server_Packet :: union #no_nil {
 	Server_Stats,
 	Server_Cmd,
 	Broadcast_Packet,
+	Server_Event,
 }
 
 Crypt_Header :: struct {
@@ -699,7 +709,7 @@ ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
 			if field_presence_set(presence, v != 0) {
 				encode_leb128(e, v) or_return
 			}
-		case f32, Ent_Kind, Color:
+		case f32, Ent_Type, Color:
 			zeroed := mem.check_zero(reflect.as_bytes(val))
 			if field_presence_set(presence, !zeroed) {
 				if v, prec := try_unwrap_rounded_float(val, tag); v != nil {
@@ -808,7 +818,7 @@ ent_stats_decode :: proc(
 			if field_presence_get(presence) {
 				v = decode_leb128(d, int) or_return
 			}
-		case f32, Ent_Kind, Color:
+		case f32, Ent_Type, Color:
 			if field_presence_get(presence) {
 				if v, prec := try_unwrap_rounded_float(val, tag); v != nil {
 					v^ = f32(decode_leb128(d, int) or_return) / prec

@@ -21,7 +21,7 @@ AAD: string : "gam"
 
 split_crypt_tag :: proc(
 	bytes: []u8,
-	ln := int(~uint(1) >> 1),
+	ln := int(~uint(0) >> 1),
 ) -> (
 	^Tag,
 	[]u8,
@@ -63,7 +63,8 @@ client_handshake_init :: proc(
 	res: ^Client_Hello,
 ) {
 	expkey: ed.Private_Key
-	ed.private_key_set_bytes(&expkey, pk[:])
+	ok := ed.private_key_set_bytes(&expkey, pk[:])
+	assert(ok)
 
 	id: ed.Public_Key
 	ed.public_key_set_priv(&id, &expkey)
@@ -93,7 +94,8 @@ server_handshake_init :: proc(
 ) {
 
 	expkey: ed.Private_Key
-	ed.private_key_set_bytes(&expkey, pk[:])
+	ok := ed.private_key_set_bytes(&expkey, pk[:])
+	assert(ok)
 
 	id: ed.Public_Key
 	ed.public_key_set_priv(&id, &expkey)
@@ -142,7 +144,8 @@ client_handshake_end :: proc(
 	x.scalarmult(skres[:], xpk[:], sh.x[:])
 
 	expkey: ed.Private_Key
-	ed.private_key_set_bytes(&expkey, pk[:])
+	ok := ed.private_key_set_bytes(&expkey, pk[:])
+	assert(ok)
 
 	client_sig_msg := Sig_Msg {
 		client_challenge = ch.challenge,
@@ -165,7 +168,8 @@ server_handshake_end :: proc(
 ) -> bool {
 
 	id: ed.Public_Key
-	ed.public_key_set_bytes(&id, ch.id[:])
+	ok := ed.public_key_set_bytes(&id, ch.id[:])
+	assert(ok)
 
 	sig_msg := Sig_Msg {
 		client_challenge = ch.challenge,
@@ -224,7 +228,8 @@ Sig_Msg :: struct {
 
 sign_sig_msg :: proc(pk: ^Private_Key, msg: any, sig: ^Signature) {
 	expkey: ed.Private_Key
-	ed.private_key_set_bytes(&expkey, pk[:])
+	ok := ed.private_key_set_bytes(&expkey, pk[:])
+	assert(ok)
 
 	bytes := reflect.as_bytes(msg)
 
@@ -233,7 +238,8 @@ sign_sig_msg :: proc(pk: ^Private_Key, msg: any, sig: ^Signature) {
 
 verify_sig_msg :: proc(pk: ^Identity, msg: any, sig: ^Signature) -> bool {
 	id: ed.Public_Key
-	ed.public_key_set_bytes(&id, pk[:])
+	ok := ed.public_key_set_bytes(&id, pk[:])
+	assert(ok)
 
 	bytes := reflect.as_bytes(msg)
 

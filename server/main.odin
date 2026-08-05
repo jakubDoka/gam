@@ -10,6 +10,7 @@ import rt "base:runtime"
 import "core:container/lru"
 import "core:crypto"
 import "core:crypto/blake2s"
+import "core:fmt"
 import "core:io"
 import "core:log"
 import "core:mem"
@@ -113,6 +114,8 @@ Connection :: struct {
 	next_free:     ^Connection,
 	resolving_udp: sim.DL_Node,
 	listener:      sim.DL_Node,
+	in_game:       sim.DL_Node,
+	game:          ^Game,
 	request_state: Connection_Request_State,
 }
 
@@ -129,10 +132,12 @@ Connection_Request_State :: struct {
 	recvd:             int,
 	write_file:        nbio.Handle,
 	file_hash_ctx:     blake2s.Context,
+	requester:         ^Connection,
 }
 
 Game :: struct {
-	server:               ^Server,
+	using server:         ^Server,
+	players:              sim.DL_List,
 	ents:                 sim.Ents,
 	net_id:               sim.Ent_Net_ID,
 	map_index:            int,
@@ -140,6 +145,23 @@ Game :: struct {
 	last_cold_state_hash: sim.Hash,
 	last_stats_hash:      sim.Hash,
 	clean_stats_hash:     sim.Hash,
+}
+
+player_next :: proc(cursor: ^^sim.DL_Node) -> (^Connection, bool) {
+	return sim.dl_iter_next(cursor, Connection, offset_of(Connection, in_game))
+}
+
+game_add_player :: proc(game: ^Game, conn: ^Connection) {
+	conn.game = game
+
+	sim.dl_push(&game.players, &conn.in_game)
+
+	game->tcp_send(conn, sim.Server_Map{game.map_buf})
+	stats := game.ents.stats[:]
+	game->tcp_send(
+		conn,
+		sim.Server_Stats{stats = sim.custom_encoding_stats(&stats)},
+	)
 }
 
 game_tick :: proc(game: ^Game) {
@@ -152,11 +174,12 @@ game_tick :: proc(game: ^Game) {
 		game := (^Game)(uintptr(ents) - offset_of(Game, ents))
 		server := game.server
 
-		for _, conn in server.connections {
+		cursor := game.players.first
+		for p in player_next(&cursor) {
 			server->tcp_send(
-				conn,
+				p,
 				sim.Server_Cmd {
-					kind = .Laser,
+					type = .Laser,
 					pos = l.pos,
 					team = l.team,
 					stats = l.stats,
@@ -166,12 +189,78 @@ game_tick :: proc(game: ^Game) {
 		}
 	}
 
-	for _, c in server.connections {
-		rtt := rtt.smoothed(&c.rtt)
-		sim.ents_integrate_input(&game.ents, c.ent, rtt, &c.input)
+	cursor := game.players.first
+	for p in player_next(&cursor) {
+		rtt := rtt.smoothed(&p.rtt)
+		sim.ents_integrate_input(&game.ents, p.ent, rtt, &p.input)
 	}
 
 	sim.ents_update(&game.ents)
+
+	{
+		stats := game.ents.stats[:]
+		packet := sim.Server_Stats {
+			stats = sim.custom_encoding_stats(&stats),
+		}
+
+		ensure_up_to_date_hash(game, &game.last_stats_hash, packet, "stats")
+
+		if game.clean_stats_hash == {} {
+			game.clean_stats_hash = game.last_stats_hash
+		}
+	}
+
+	{
+		players := make([dynamic]sim.Player, context.temp_allocator)
+
+		cursor := game.players.first
+		for c in player_next(&cursor) {
+			e := sim.ents_get(&game.ents, c.ent)
+			c.player.net_ent = e.net_id
+			append(&players, c.player)
+		}
+
+		packet := sim.Server_Cold_State {
+			dirty_stats = game.last_stats_hash != game.clean_stats_hash,
+			players     = players[:],
+		}
+
+		ensure_up_to_date_hash(
+			game,
+			&game.last_cold_state_hash,
+			packet,
+			"cold state",
+		)
+	}
+
+	ensure_up_to_date_hash :: proc(
+		game: ^Game,
+		hash: ^sim.Hash,
+		packet: sim.Server_Packet,
+		subject: string,
+	) {
+		enc: sim.Encoder
+		sim.server_packet_encode(packet, &enc)
+
+		buf := make([]u8, sim.encoded_len(&enc), context.temp_allocator)
+		sim.server_packet_encode(packet, buf)
+
+		new_hash: sim.Hash
+		sim.hash(buf, &new_hash)
+
+		if new_hash != hash^ {
+			hash^ = new_hash
+			cursor := game.players.first
+			for c in player_next(&cursor) {
+				game->tcp_send_bytes(c, buf)
+			}
+		}
+	}
+}
+
+game_destroy :: proc(game: ^Game) {
+	delete(game.map_buf)
+	sim.ents_destroy(&game.ents)
 }
 
 Ip_Sighting :: struct {
@@ -262,6 +351,7 @@ Asset_Request_Kind :: enum {
 
 Asset_Request :: struct {
 	payload: []u8,
+	conn:    ^Connection,
 }
 
 Ping_Entry_Stage :: enum u8 {
@@ -294,7 +384,7 @@ Server :: struct #align (8) {
 	last_udp_conn:           ^Connection,
 	resolving_udp:           sim.DL_List,
 	listeners:               sim.DL_List,
-	game:                    Game,
+	lobby:                   Game,
 	next_frame:              time.Time,
 	next_peer_id:            u32,
 	content_spec:            sim.Content_Spec,
@@ -355,7 +445,7 @@ server_handle_packet :: proc(
 	defer if !ok do log.warn("invalid packet from client (", reason, "):", packet)
 
 	from := (^Connection)(from)
-	game := &server.game
+	game := from.game
 
 	from.last_packet = time.now()
 
@@ -368,12 +458,11 @@ server_handle_packet :: proc(
 
 			players := make(
 				[dynamic]sim.Client_Input_Keys,
-				0,
-				len(server.connections),
 				context.temp_allocator,
 			)
-			for _, conn in server.connections {
-				append(&players, conn.input.keys)
+			cursor := game.players.first
+			for p in player_next(&cursor) {
+				append(&players, p.input.keys)
 			}
 
 			server->udp_send(
@@ -397,7 +486,7 @@ server_handle_packet :: proc(
 			}
 		}
 	case sim.Client_Cmd:
-		switch p.kind {
+		switch p.type {
 		case .Abandon:
 			sim.ents_queue_remove(&game.ents, from.ent)
 		case .Build:
@@ -432,8 +521,9 @@ server_handle_packet :: proc(
 		case .Spawn:
 			counts := make([]int, len(game.ents.teams), context.temp_allocator)
 
-			for _, conn in server.connections {
-				e := sim.ents_get(&game.ents, conn.ent)
+			cursor := game.players.first
+			for p in player_next(&cursor) {
+				e := sim.ents_get(&game.ents, p.ent)
 				counts[e.team] += 1
 			}
 
@@ -533,7 +623,7 @@ server_handle_packet :: proc(
 			server_clear_violations(server, ip)
 		}
 	case sim.Client_Content_Action:
-		switch p.kind {
+		switch p.type {
 		case .Create:
 			stats := p.stats
 			stats.id = auto_cast len(game.ents.stats)
@@ -681,7 +771,7 @@ server_handle_packet :: proc(
 			lru.set(
 				&server.asset_requests,
 				token,
-				Asset_Request{payload = payload},
+				Asset_Request{payload = payload, conn = from},
 			)
 		}
 		payload = {}
@@ -690,7 +780,7 @@ server_handle_packet :: proc(
 			server,
 			from,
 			sim.Server_Cmd {
-				kind = .Token,
+				type = .Token,
 				token = token,
 				global_hash = global_hash,
 				count = count,
@@ -703,17 +793,18 @@ server_handle_packet :: proc(
 		lru.set(
 			&server.asset_requests,
 			p.token,
-			Asset_Request{payload = payload},
+			Asset_Request{payload = payload, conn = from},
 		)
 
 		server_tcp_send(
 			server,
 			from,
-			sim.Server_Cmd{kind = .Ack, token = p.token},
+			sim.Server_Cmd{type = .Ack, token = p.token},
 		)
 	case sim.Broadcast_Packet:
-		for _, c in server.connections {
-			server_tcp_send(server, c, p)
+		cursor := game.players.first
+		for player in player_next(&cursor) {
+			server_tcp_send(server, player, p)
 		}
 	}
 
@@ -824,8 +915,9 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 		e.parent = p.id
 	}
 
-	for _, conn in game.server.connections {
-		game.server->tcp_send(conn, sim.Server_Map{buf})
+	cursor := game.players.first
+	for c in player_next(&cursor) {
+		game.server->tcp_send(c, sim.Server_Map{buf})
 	}
 }
 
@@ -1058,20 +1150,13 @@ boot_player :: proc(
 
 	conn.hctx.tcp.host.on_packet = server_on_tcp_packet
 
-	game := &server.game
-
 	server.next_peer_id += 1
 	conn.input.next_net_id.peer = server.next_peer_id
 	conn.pk = conn.hctx.ch.id
 
 	sim.dl_push(&server.resolving_udp, &conn.resolving_udp)
 
-	server->tcp_send(conn, sim.Server_Map{game.map_buf})
-	stats := game.ents.stats[:]
-	server->tcp_send(
-		conn,
-		sim.Server_Stats{stats = sim.custom_encoding_stats(&stats)},
-	)
+	game_add_player(&server.lobby, conn)
 
 	return true
 }
@@ -1234,7 +1319,8 @@ recv_content :: proc(
 	any_body := sim.client_packet_decode(payload) or_return
 	body := any_body.(sim.Client_Asset_Upload)
 	conn.request_state.assets = body.metas
-	conn.request_state.buf = make([]u8, size_of(sim.Tag) + 4096)
+	conn.request_state.buf = make([]u8, sim.UPLOAD_BUFFER_SIZE)
+	conn.request_state.requester = ass_req.value.conn
 
 	log.debug("starting content download:", body.metas)
 
@@ -1280,6 +1366,12 @@ recv_content :: proc(
 				state.write_file = 0
 				state.written = 0
 				state.rcvd_assets += 1
+
+				server->tcp_send(
+					state.requester,
+					sim.Server_Event{type = .File_Uploaded, hash = curr.hash},
+				)
+
 				continue
 			}
 
@@ -1298,6 +1390,7 @@ recv_content :: proc(
 
 			if state.recvd > 0 {
 				tag, source := sim.split_crypt_tag(state.buf, state.recvd)
+				fmt.println(len(source))
 
 				ok := sim.decrypt(&conn.tcp.secret, tag, source)
 				if !ok {
@@ -1368,7 +1461,9 @@ recv_content :: proc(
 			return
 		}
 
-		conn.request_state.recvd = len(op.recv.bufs[0])
+		_, source := sim.split_crypt_tag(op.recv.bufs[0])
+
+		conn.request_state.recvd = len(source)
 		kill = !do_progress(conn)
 	}
 
@@ -1408,18 +1503,21 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
 	server := (^Server)(conn.host.asoc_data)
 	conn := (^Connection)(conn)
-	game := &server.game
+	game := conn.game
 
 	conn.next_free = server.free_conns
 	server.free_conns = conn
 
 	sim.dl_remove(&conn.resolving_udp)
 	sim.dl_remove(&conn.listener)
+	sim.dl_remove(&conn.in_game)
 
 	delete_key(&server.connections, conn.udp_endpoint)
 	delete_key(&server.connections, conn.tcp_endpoint)
 
-	sim.ents_queue_remove(&game.ents, conn.ent)
+	if game != nil {
+		sim.ents_queue_remove(&game.ents, conn.ent)
+	}
 
 	delete(conn.request_state.payload)
 	delete(conn.request_state.buf)
@@ -1476,70 +1574,9 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 
 	if res == .Refresh do return
 
-	game := &server.game
-
-	game_tick(game)
+	game_tick(&server.lobby)
 
 	server_schedule_tick(server)
-
-	{
-		stats := game.ents.stats[:]
-		packet := sim.Server_Stats {
-			stats = sim.custom_encoding_stats(&stats),
-		}
-
-		ensure_up_to_date_hash(server, &game.last_stats_hash, packet, "stats")
-
-		if game.clean_stats_hash == {} {
-			game.clean_stats_hash = game.last_stats_hash
-		}
-	}
-
-	{
-		players: [dynamic]sim.Player
-		players.allocator = context.temp_allocator
-		for _, conn in server.connections {
-			e := sim.ents_get(&game.ents, conn.ent)
-			conn.player.net_ent = e.net_id
-			append(&players, conn.player)
-		}
-
-		packet := sim.Server_Cold_State {
-			dirty_stats = game.last_stats_hash != game.clean_stats_hash,
-			players     = players[:],
-		}
-
-		ensure_up_to_date_hash(
-			server,
-			&game.last_cold_state_hash,
-			packet,
-			"cold state",
-		)
-	}
-
-	ensure_up_to_date_hash :: proc(
-		server: ^Server,
-		hash: ^sim.Hash,
-		packet: sim.Server_Packet,
-		subject: string,
-	) {
-		enc: sim.Encoder
-		sim.server_packet_encode(packet, &enc)
-
-		buf := make([]u8, sim.encoded_len(&enc), context.temp_allocator)
-		sim.server_packet_encode(packet, buf)
-
-		new_hash: sim.Hash
-		sim.hash(buf, &new_hash)
-
-		if new_hash != hash^ {
-			hash^ = new_hash
-			for _, conn in server.connections {
-				log.debug("sending the", subject, "to:", conn.name)
-				server->tcp_send_bytes(conn, buf)
-			}
-		}
-	}
 
 	free_all(context.temp_allocator)
 }
@@ -1623,8 +1660,13 @@ server_bundle_refresh :: proc(server: ^Server) {
 		return asset.id, ""
 	}
 
-	delete(server.game.ents.stats)
-	server.game.ents.stats = loader.stats
+	{
+		// TODO: this should be extracted out
+		game := &server.lobby
+
+		delete(game.ents.stats)
+		game.ents.stats = loader.stats
+	}
 }
 
 visit_files :: proc(
@@ -1725,7 +1767,6 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	}
 
 	init_resources: {
-		server.game.server = server
 		sim.packet_buffer_reserve(&server.udp.send_buf, 8)
 
 		server.conn_buf = make([]Connection, MAX_CONNECTIONS)
@@ -1938,7 +1979,8 @@ server_init :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	server = server_init_without_game(hr)
 
 	init_world: {
-		game := &server.game
+		game := &server.lobby
+		game.server = server
 		sim.ents_reserve(&game.ents, 128)
 		if FUZZING {
 			game.map_index = 1
@@ -2154,9 +2196,8 @@ server_deinit :: proc(server: ^Server) {
 	log.assertf(res == nil, "failed to run the io scheduler: %v", res)
 
 	delete(server.connections)
-	delete(server.game.map_buf)
 
-	sim.ents_destroy(&server.game.ents)
+	game_destroy(&server.lobby)
 
 	conn := sqlite.db_handle(server.insert_user)
 	sqlite.finalize(server.statements)

@@ -17,7 +17,6 @@ import "core:reflect"
 import "core:sort"
 import "core:strconv"
 import "core:strings"
-import "core:time"
 import rl "vendor:raylib"
 
 ui_content_editor :: proc(client: ^Client) {
@@ -163,7 +162,7 @@ ui_content_editor :: proc(client: ^Client) {
 				stats.name = nm.from_str(text)
 				tcp_send(
 					client,
-					sim.Client_Content_Action{kind = .Create, stats = stats},
+					sim.Client_Content_Action{type = .Create, stats = stats},
 				)
 			}
 
@@ -388,7 +387,7 @@ ui_file_upload :: proc(client: ^Client) {
 
 		raw_files := rl.LoadDroppedFiles()
 		defer rl.UnloadDroppedFiles(raw_files)
-		files := raw_files.paths[:max(raw_files.capacity, raw_files.count)]
+		files := raw_files.paths[:raw_files.count]
 
 		context.allocator = arna.allocator(&ctx.upload_arena)
 		free_all(context.allocator)
@@ -451,6 +450,8 @@ ui_file_upload :: proc(client: ^Client) {
 		},
 	)
 
+	all_uploaded := true
+
 	if len(ctx.dropped_assets) == 0 {
 		msg := "Drag and drop file here to upload to\n the server (*.png)"
 
@@ -477,8 +478,6 @@ ui_file_upload :: proc(client: ^Client) {
 				height = orui.grow(),
 			},
 		)
-	} else if time.since(ctx.last_prepared_upload) < time.Second * 3 {
-		ui_load_bar({width = orui.grow(), height = orui.grow()})
 	} else {
 		files := rl.LoadDroppedFiles()
 
@@ -500,6 +499,25 @@ ui_file_upload :: proc(client: ^Client) {
 			)
 
 			for &asset, i in ctx.dropped_assets {
+				if asset.uploaded {
+					box(
+						id("asset-uploaded-row"),
+						{col_span = 4, width = orui.grow()},
+					)
+					ui_label(
+						id("asset-uploaded", i),
+						{
+							label = "uploaded",
+							foreground = .SUCCESS,
+							height = orui.fixed(ROW_HEIGHT),
+							width = orui.grow(),
+						},
+					)
+					continue
+				}
+
+				all_uploaded = false
+
 				if asset.issue != "" {
 					ui_label(id("issue-idk", i), {label = asset.issue})
 					continue
@@ -586,6 +604,7 @@ ui_file_upload :: proc(client: ^Client) {
 				width = orui.grow(),
 				background = .SECONDARY,
 				focused_color = .PRIMARY,
+				disabled = all_uploaded,
 			},
 		) {
 			token: sim.Hash
@@ -598,8 +617,6 @@ ui_file_upload :: proc(client: ^Client) {
 					metas = ctx.dropped_assets.base[:len(ctx.dropped_assets)],
 				},
 			)
-
-			ctx.last_prepared_upload = time.now()
 		}
 
 		if ui_button(
@@ -899,11 +916,11 @@ ui_content_field_edit :: proc(
 	}
 
 	edit: switch &v in dest {
-	case sim.Ent_Kind:
+	case sim.Ent_Type:
 		res, should_close := ui_select_enum(
 			id("kind-picker"),
 			&seb.string_field,
-			sim.Ent_Kind,
+			sim.Ent_Type,
 		)
 
 		if should_close {

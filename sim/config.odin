@@ -234,8 +234,8 @@ load_config :: proc(loader: ^Asset_Loader) {
 				)
 			}
 			a = id
-		case Ent_Kind:
-			v, ok := reflect.enum_from_name(Ent_Kind, value)
+		case Ent_Type:
+			v, ok := reflect.enum_from_name(Ent_Type, value)
 			if !ok {
 				report(loader, "invalid ent kind (TDOD: log options)")
 			}
@@ -285,7 +285,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 		     int,
 		     Asset_ID,
 		     Ent_Stats_ID,
-		     Ent_Kind,
+		     Ent_Type,
 		     Ent_Stats_Name,
 		     Color:
 			return
@@ -471,7 +471,7 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 		     Color,
 		     Asset_ID,
 		     Ent_Stats_Ref,
-		     Ent_Kind,
+		     Ent_Type,
 		     Ent_Stats_Name:
 			write_string(out, " ")
 		}
@@ -479,7 +479,7 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 		matched := true
 
 		switch &v in e {
-		case f32, bool, Ent_Kind, int:
+		case f32, bool, Ent_Type, int:
 			fmt.wprint(out, v)
 		case Color:
 			cl := v

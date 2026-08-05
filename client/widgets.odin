@@ -2,6 +2,7 @@ package client
 
 import "../sim"
 import "../util/nm"
+import "../util/bit_arr"
 import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
@@ -94,11 +95,11 @@ Draw_Call :: bit_field uintptr {
 	expanded: bool           | 1,
 }
 
-draw_call_init_text_highlight :: proc(set: ^packer.Bit_Set) -> Draw_Call {
+draw_call_init_text_highlight :: proc(set: ^bit_arr.Bit_Set) -> Draw_Call {
 	return Draw_Call(uintptr(set) | uintptr(Draw_Call_Kind.Text_Highlight_Set))
 }
 
-draw_call_extract_set :: proc(call: Draw_Call) -> ^packer.Bit_Set {
+draw_call_extract_set :: proc(call: Draw_Call) -> ^bit_arr.Bit_Set {
 	assert(call.kind == .Text_Highlight_Set)
 	return auto_cast (uintptr(call) & ~uintptr(0b111))
 }
@@ -649,7 +650,7 @@ ui_select_generic_enum :: proc(
 	config := config
 	config.count = len(reflect.enum_field_names(enm))
 	config.name_of = proc(_: rawptr, i: int) -> string {
-		return reflect.enum_field_names(sim.Ent_Kind)[i]
+		return reflect.enum_field_names(sim.Ent_Type)[i]
 	}
 
 	res, should_close := ui_select(root, state, config)
@@ -1050,7 +1051,7 @@ ui_render :: proc() {
 			start := -1
 			for i in 0 ..= len(text.text) {
 				global := start_idx + i
-				if packer.bit_set_contains_unbounded(set^, global) {
+				if bit_arr.contains_unbounded(set^, global) {
 					if start == -1 {
 						start = i
 					}

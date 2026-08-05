@@ -2,8 +2,8 @@ package client
 
 import "../sim"
 import "../util/b58"
+import "../util/bit_arr"
 import "../util/nm"
-import "../util/packer"
 import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
@@ -48,6 +48,7 @@ client_handle_packet :: proc(
 ) {
 	client.last_server_packet = time.now()
 
+	packet := packet
 	switch &p in packet {
 	case sim.Server_Ping:
 		ok := chan.send(
@@ -63,17 +64,11 @@ client_handle_packet :: proc(
 	case sim.Server_State:
 		client.tps = p.tps
 
-		present := packer.bit_set_init(
-			len(client.ents.slots),
-			context.temp_allocator,
-		)
-		new := packer.bit_set_init(
-			len(client.ents.slots),
-			context.temp_allocator,
-		)
+		present := bit_arr.init(len(client.ents.slots), context.temp_allocator)
+		new := bit_arr.init(len(client.ents.slots), context.temp_allocator)
 
 		for i in 0 ..< len(client.ents.slots) {
-			assert(!packer.bit_set_contains(present, i))
+			assert(!bit_arr.contains(present, i))
 		}
 
 		net_id_to_ent := make(
@@ -98,10 +93,10 @@ client_handle_packet :: proc(
 				ne = sim.ents_add(&client.ents, &synced.net_id)
 				if ne == sim.NIL_ENT do continue
 				ne.synced = synced
-				packer.bit_set_set(new, int(ne.id.index))
+				bit_arr.set(new, int(ne.id.index))
 			}
 
-			packer.bit_set_set(present, int(ne.id.index))
+			bit_arr.set(present, int(ne.id.index))
 
 			normalize_timer :: proc(
 				client: ^Client,
@@ -139,7 +134,7 @@ client_handle_packet :: proc(
 		}
 
 		for &e in sim.ents_iter(&client.ents) {
-			if !packer.bit_set_contains(present, int(e.id.index)) &&
+			if !bit_arr.contains(present, int(e.id.index)) &&
 			   e.age > client.rtt * 2 + (1.0 / sim.TPS) {
 				sim.ents_queue_remove(&client.ents, e.id)
 				continue
@@ -169,7 +164,7 @@ client_handle_packet :: proc(
 			buf[i] = e.pos
 			client.ent_extra[i].pos_smoothing += e.pos
 
-			if !packer.bit_set_contains(present, i) {
+			if !bit_arr.contains(present, i) {
 				if sim.ent_is_alive(&e) {
 					append(&marks, &e)
 					e.id.gen += 1
@@ -255,7 +250,7 @@ client_handle_packet :: proc(
 		to_fetch := client_find_missing_assets(client, assets[:])
 		tcp_send(client, sim.Client_Asset_Request{assets = to_fetch[:]})
 	case sim.Server_Cmd:
-		switch p.kind {
+		switch p.type {
 		case .Laser:
 			l := retained_add(&client.lasers)
 			if l == nil do break
@@ -284,6 +279,17 @@ client_handle_packet :: proc(
 					content = p.content,
 				},
 			)
+		case sim.Empty:
+		}
+	case sim.Server_Event:
+		switch p.type {
+		case .File_Uploaded:
+			for &ass, i in client.content_editor.dropped_assets {
+				if ass.base.hash == p.hash {
+					ass.uploaded = true
+					break
+				}
+			}
 		}
 	}
 
@@ -383,7 +389,7 @@ upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
 	copy(req_slot.inline_body[:], p.token[:])
 	req.metas = slice.clone(ctx.dropped_assets.base[:len(ctx.dropped_assets)])
 	req.paths = ctx.dropped_assets.path[:len(ctx.dropped_assets)]
-	req.buf = make([]u8, size_of(sim.Tag) + 4096)
+	req.buf = make([]u8, sim.UPLOAD_BUFFER_SIZE)
 
 	client.asset_uploader = req
 
@@ -449,7 +455,8 @@ upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
 			return true
 		}
 
-		return false
+		req->on_fail("")
+		return true
 	}
 
 	on_open :: proc(op: ^nbio.Operation, req: ^Req) {

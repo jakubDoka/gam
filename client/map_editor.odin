@@ -1,6 +1,7 @@
 package client
 
 import "../sim"
+import "../util/bit_arr"
 import "../util/packer"
 import orui "../vendored/orui/src"
 import "core:fmt"
@@ -20,7 +21,7 @@ UI_Map_Editor :: struct {
 	expanded:           bool,
 	resizing:           bool,
 	map_hash:           sim.Hash,
-	changed_terrain:    packer.Bit_Set,
+	changed_terrain:    bit_arr.Bit_Set,
 	teams:              [dynamic]sim.Ent_Team,
 	brush:              UI_Map_Editor_Brush,
 	editing_brush:      bool,
@@ -40,7 +41,7 @@ UI_Map_Editor_Brush :: enum int {
 }
 
 ui_map_editor_destroy :: proc(editor: ^UI_Map_Editor) {
-	packer.bit_set_destroy(editor.changed_terrain)
+	bit_arr.destroy(editor.changed_terrain)
 	delete(editor.teams)
 }
 
@@ -57,8 +58,8 @@ ui_map_editor_sync :: proc(client: ^Client) {
 	if new_hash != ctx.map_hash {
 		ctx.map_hash = new_hash
 
-		packer.bit_set_destroy(ctx.changed_terrain)
-		ctx.changed_terrain = packer.bit_set_init(
+		bit_arr.destroy(ctx.changed_terrain)
+		ctx.changed_terrain = bit_arr.init(
 			int(client.ents.width * client.ents.height),
 		)
 
@@ -103,7 +104,7 @@ ui_map_export :: proc(client: ^Client) -> (mapa: sim.Map) {
 		[]int,
 		min(
 			sim.map_tile_storage_size(mapa.width, mapa.height),
-			packer.bit_set_mask_len(ctx.changed_terrain.bit_length),
+			bit_arr.mask_len(ctx.changed_terrain.bit_length),
 		),
 	)
 
@@ -113,18 +114,18 @@ ui_map_export :: proc(client: ^Client) -> (mapa: sim.Map) {
 	}
 
 	if mapa.width != ctx.width || mapa.height != ctx.height {
-		old_tiles := packer.Bit_Set {
+		old_tiles := bit_arr.Bit_Set {
 			raw_data(mapa.tiles),
 			mapa.width * mapa.height,
 		}
-		new_tiles := packer.bit_set_init(ctx.width * ctx.height)
+		new_tiles := bit_arr.init(ctx.width * ctx.height)
 		for y in 0 ..< min(mapa.height, ctx.height) {
 			for x in 0 ..< min(mapa.width, ctx.width) {
-				vl := packer.bit_set_contains_unbounded(
+				vl := bit_arr.contains_unbounded(
 					old_tiles,
 					y * mapa.width + x,
 				)
-				packer.bit_set_set(new_tiles, y * ctx.width + x, vl)
+				bit_arr.set(new_tiles, y * ctx.width + x, vl)
 			}
 		}
 		mapa.width = ctx.width
@@ -451,8 +452,8 @@ ui_map_editor_update :: proc(client: ^Client) {
 
 	if ctx.changed_terrain.bit_length !=
 	   client.ents.width * client.ents.height {
-		packer.bit_set_destroy(ctx.changed_terrain)
-		ctx.changed_terrain = packer.bit_set_init(
+		bit_arr.destroy(ctx.changed_terrain)
+		ctx.changed_terrain = bit_arr.init(
 			client.ents.width * client.ents.height,
 		)
 	}
@@ -470,7 +471,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 	}
 
 	server_current := sim.map_tile_is_solid(&client.ents, pos)
-	client_current := packer.bit_set_contains_unbounded(
+	client_current := bit_arr.contains_unbounded(
 		ctx.changed_terrain,
 		pos.x + pos.y * client.ents.width,
 	)
@@ -489,7 +490,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 			if sim.ents_building_get(&client.ents, pos) != sim.NIL_ENT do break
 
 			server_current ~= ctx.brush == .Wall
-			packer.bit_set_set_unbounded(
+			bit_arr.set_unbounded(
 				ctx.changed_terrain,
 				pos.x + pos.y * client.ents.width,
 				server_current,
@@ -502,7 +503,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		#partial switch ctx.brush {
 		case .Building:
 		case .Wall, .Floor:
-			packer.bit_set_set(
+			bit_arr.set(
 				ctx.changed_terrain,
 				pos.x + pos.y * client.ents.width,
 				false,
@@ -589,7 +590,7 @@ map_draw :: proc(client: ^Client) {
 			}
 
 			if ctx.expanded {
-				if packer.bit_set_contains_unbounded(
+				if bit_arr.contains_unbounded(
 					ctx.changed_terrain,
 					x + y * client.ents.width,
 				) {
@@ -623,7 +624,7 @@ map_draw :: proc(client: ^Client) {
 					}
 					for dir, i in dirs {
 						pos: sim.Map_Pos = {x, y} + dir
-						if !packer.bit_set_contains_unbounded(
+						if !bit_arr.contains_unbounded(
 							ctx.changed_terrain,
 							pos.x + pos.y * client.ents.width,
 						) {
