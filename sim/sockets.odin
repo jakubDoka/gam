@@ -1,6 +1,7 @@
 package sim
 
 import "../util/hot"
+import "core:fmt"
 import "core:log"
 import "core:nbio"
 import "core:reflect"
@@ -171,7 +172,7 @@ packet_buffer_alloc :: proc(
 		}
 
 		en: if buf, e, ok := begin_crypt_packet(chunk.data[chunk.used:]); ok {
-			header_serialize(packet, &e) or_break en
+			serialize(packet, &e) or_break en
 			len := end_crypt_packet(sk, buf, e)
 			chunk.used += len
 			final_bytes = buf[:len]
@@ -324,7 +325,7 @@ tcp_connection_send :: proc(
 	l: ^nbio.Event_Loop,
 ) -> bool {
 	if LATENCY != 0 {
-		buf := header_serialize_to_bytes(packet)
+		buf := serialize_to_bytes(packet)
 
 		nbio.timeout_poly2(
 			LATENCY * time.Millisecond,
@@ -350,7 +351,7 @@ tcp_connection_send_no_delay :: proc(
 	l: ^nbio.Event_Loop,
 ) -> bool {
 	buf, e := begin_crypt_packet(conn.send_buf[conn.buffered:]) or_return
-	header_serialize(packet, &e) or_return
+	serialize(packet, &e) or_return
 	len := end_crypt_packet(&conn.secret, buf, e)
 	conn.buffered += len
 

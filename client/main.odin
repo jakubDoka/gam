@@ -738,11 +738,7 @@ client_on_ping :: proc(client: ^Client) {
 			username = selected_user.name,
 		}
 
-		enc: sim.Encoder
-		sim.client_packet_encode(packet, &enc)
-
-		buf := make([]u8, sim.encoded_len(&enc), context.temp_allocator)
-		sim.client_packet_encode(packet, buf)
+		buf := sim.serialize_to_bytes(packet, context.temp_allocator)
 
 		new_hash: sim.Hash
 		sim.hash(buf, &new_hash)

@@ -156,9 +156,10 @@ game_add_player :: proc(game: ^Game, conn: ^Connection) {
 
 	sim.dl_push(&game.players, &conn.in_game)
 
-	game->tcp_send(conn, sim.Server_Map{game.map_buf})
+	server_tcp_send(game, conn, sim.Server_Map{game.map_buf})
 	stats := game.ents.stats[:]
-	game->tcp_send(
+	server_tcp_send(
+		game,
 		conn,
 		sim.Server_Stats{stats = sim.custom_encoding_stats(&stats)},
 	)
@@ -176,7 +177,8 @@ game_tick :: proc(game: ^Game) {
 
 		cursor := game.players.first
 		for p in player_next(&cursor) {
-			server->tcp_send(
+			server_tcp_send(
+				server,
 				p,
 				sim.Server_Cmd {
 					type = .Laser,
@@ -239,11 +241,7 @@ game_tick :: proc(game: ^Game) {
 		packet: sim.Server_Packet,
 		subject: string,
 	) {
-		enc: sim.Encoder
-		sim.server_packet_encode(packet, &enc)
-
-		buf := make([]u8, sim.encoded_len(&enc), context.temp_allocator)
-		sim.server_packet_encode(packet, buf)
+		buf := sim.serialize_to_bytes(packet, context.temp_allocator)
 
 		new_hash: sim.Hash
 		sim.hash(buf, &new_hash)
@@ -252,7 +250,7 @@ game_tick :: proc(game: ^Game) {
 			hash^ = new_hash
 			cursor := game.players.first
 			for c in player_next(&cursor) {
-				game->tcp_send_bytes(c, buf)
+				sim.tcp_connection_send(&c.hctx, buf, game.hr.l)
 			}
 		}
 	}
@@ -398,17 +396,6 @@ Server :: struct #align (8) {
 	hr:                      ^hot.Reloader,
 	did_shutdown:            bool,
 	last_ping:               time.Time,
-	tcp_send:                proc(
-		_: ^Server,
-		_: ^Connection,
-		_: sim.Server_Packet,
-	),
-	tcp_send_bytes:          proc(_: ^Server, _: ^Connection, _: []u8),
-	udp_send:                proc(
-		_: ^Server,
-		_: ^Connection,
-		_: sim.Server_Packet,
-	),
 }
 
 server_add_violation :: proc(server: ^Server, ip: Saved_IP) {
@@ -440,7 +427,7 @@ server_handle_packet :: proc(
 	#assert(offset_of(Connection, hctx) == 0)
 	#assert(offset_of(Handshake, tcp) == 0)
 
-	packet := sim.client_packet_decode(packet_bytes) or_return
+	packet := sim.unmarshall_as(sim.Client_Packet, packet_bytes) or_return
 
 	reason := ""
 	defer if !ok do log.warn("invalid packet from client (", reason, "):", packet)
@@ -466,7 +453,8 @@ server_handle_packet :: proc(
 				append(&players, p.input.keys)
 			}
 
-			server->udp_send(
+			server_udp_send(
+				server,
 				from,
 				sim.Server_State {
 					tps = server.tps,
@@ -718,8 +706,8 @@ server_handle_packet :: proc(
 		token: sim.Hash
 		crypto.rand_bytes(token[:])
 
-		payload, _ := mem.alloc_bytes(len(packet_bytes), 8)
-		copy(payload, packet_bytes)
+		payload, _ := mem.alloc_bytes(len(packet_bytes) - 8, 8)
+		copy(payload, packet_bytes[8:])
 		defer delete(payload)
 
 		count := 0
@@ -748,15 +736,8 @@ server_handle_packet :: proc(
 				assets = new_sprites[:],
 			}
 
-			e: sim.Encoder
-			sim.client_packet_encode(body, &e)
-
 			delete(payload)
-			payload, _ = mem.alloc_bytes(sim.encoded_len(&e), 8)
-			e = {payload}
-
-			ok := sim.client_packet_encode(body, &e)
-			assert(ok)
+			payload = sim.serialize_to_bytes(body)
 		} else {
 			count += len(p.assets)
 			for s in p.assets {
@@ -788,8 +769,8 @@ server_handle_packet :: proc(
 			},
 		)
 	case sim.Client_Asset_Upload:
-		payload, _ := mem.alloc_bytes(len(packet_bytes), 8)
-		copy(payload, packet_bytes)
+		payload, _ := mem.alloc_bytes(len(packet_bytes) - 8, 8)
+		copy(payload, packet_bytes[8:])
 
 		lru.set(
 			&server.asset_requests,
@@ -918,7 +899,7 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 
 	cursor := game.players.first
 	for c in player_next(&cursor) {
-		game.server->tcp_send(c, sim.Server_Map{buf})
+		server_tcp_send(game, c, sim.Server_Map{buf})
 	}
 }
 
@@ -1180,8 +1161,7 @@ send_content :: proc(
 
 	conn.request_state.payload = payload
 
-	any_body := sim.client_packet_decode(payload) or_return
-	body := any_body.(sim.Client_Asset_Request)
+	body := sim.unmarshall_as(sim.Client_Asset_Request, payload) or_return
 	conn.request_state.requested_assets = body.assets
 	conn.request_state.buf = make([]u8, 4096)
 
@@ -1317,8 +1297,7 @@ recv_content :: proc(
 	ass_req.value.payload = {}
 
 	conn.request_state.payload = payload
-	any_body := sim.client_packet_decode(payload) or_return
-	body := any_body.(sim.Client_Asset_Upload)
+	body := sim.unmarshall_as(sim.Client_Asset_Upload, payload) or_return
 	conn.request_state.assets = body.metas
 	conn.request_state.buf = make([]u8, sim.UPLOAD_BUFFER_SIZE)
 	conn.request_state.requester = ass_req.value.conn
@@ -1368,7 +1347,8 @@ recv_content :: proc(
 				state.written = 0
 				state.rcvd_assets += 1
 
-				server->tcp_send(
+				server_tcp_send(
+					server,
 					state.requester,
 					sim.Server_Event{type = .File_Uploaded, hash = curr.hash},
 				)
@@ -1856,29 +1836,6 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	}
 
 	init_net: {
-		if FUZZING {
-			server.tcp_send = proc(
-				_: ^Server,
-				_: ^Connection,
-				_: sim.Server_Packet,
-			) {}
-			server.tcp_send_bytes = proc(
-				_: ^Server,
-				_: ^Connection,
-				_: []u8,
-			) {}
-			server.udp_send = proc(
-				_: ^Server,
-				_: ^Connection,
-				_: sim.Server_Packet,
-			) {}
-			break init_net
-		} else {
-			server.tcp_send = server_tcp_send
-			server.tcp_send_bytes = server_tcp_send_bytes
-			server.udp_send = server_udp_send
-		}
-
 		udp_sock, create_err := nbio.create_udp_socket(.IP4)
 		log.assertf(
 			create_err == nil,
@@ -1950,20 +1907,11 @@ server_tcp_send :: proc(
 	sim.tcp_connection_send(&conn.hctx, packet, server.hr.l)
 }
 
-server_tcp_send_bytes :: proc(
-	server: ^Server,
-	conn: ^Connection,
-	packet: []u8,
-) {
-	sim.tcp_connection_send(&conn.hctx, packet, server.hr.l)
-}
-
 server_udp_send :: proc(
 	server: ^Server,
 	conn: ^Connection,
 	packet: sim.Server_Packet,
 ) {
-
 	if conn.udp_endpoint == {} do return
 	ok := sim.udp_connection_send(
 		&server.udp,
@@ -2113,7 +2061,7 @@ server_on_ping :: proc(server: ^Server) {
 			p.id,
 			Ping_Entry{secret = p.sk, conn = conn},
 		)
-		server->udp_send(conn, p)
+		server_udp_send(server, conn, p)
 	}
 
 	for killed_conns != nil {
@@ -2157,9 +2105,6 @@ server_rewire :: proc(server: ^Server) {
 	server.udp.host.on_packet = server_on_udp_packet
 	server.udp.host.on_ping = server_on_udp_ping
 	server.udp.host.decrypt = server_decrypt_packet
-
-	server.tcp_send = server_tcp_send
-	server.udp_send = server_udp_send
 }
 
 server_shutdown :: proc(server: ^Server) {

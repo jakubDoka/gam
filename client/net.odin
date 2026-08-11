@@ -8,6 +8,7 @@ import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
 import "core:crypto/blake2s"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:nbio"
@@ -893,7 +894,7 @@ client_on_udp_packet :: proc(
 	bytes: []u8,
 ) -> bool {
 	client := (^Client)(conn.host.asoc_data)
-	packet := sim.server_packet_decode(bytes) or_return
+	packet := sim.unmarshall_as(sim.Server_Packet, bytes) or_return
 	client_handle_packet(client, packet)
 	return true
 }
@@ -904,7 +905,7 @@ client_on_tcp_packet :: proc(
 	bytes: []u8,
 ) -> bool {
 	client := (^Client)(conn.host.asoc_data)
-	packet := sim.server_packet_decode(bytes) or_return
+	packet := sim.unmarshall_as(sim.Server_Packet, bytes) or_return
 	client_handle_packet(client, packet)
 	return true
 }

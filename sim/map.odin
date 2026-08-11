@@ -133,7 +133,7 @@ map_load :: proc(
 ) {
 	assert(mem.is_aligned(raw_data(raw), FILE_ALIGNMENT))
 
-	header_populate(mapa, raw) or_return
+	unmarshall(mapa, raw) or_return
 
 	if len(mapa.teams) == 0 do return
 	if len(mapa.ents) == 0 do return
@@ -154,7 +154,7 @@ map_load :: proc(
 }
 
 map_store :: proc(mapa: Map, e: ^Encoder) -> (ok: bool) {
-	header_serialize(mapa, e) or_return
+	serialize(mapa, e) or_return
 	return true
 }
 

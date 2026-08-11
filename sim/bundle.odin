@@ -51,7 +51,13 @@ match_slice :: proc(
 	)
 }
 
-header_populate :: proc(header: any, data: []u8) -> (ok: bool) {
+unmarshall_as :: proc($T: typeid, data: []u8) -> (res: T, ok: bool) {
+	unmarshall(res, data) or_return
+	ok = true
+	return
+}
+
+unmarshall :: proc(header: any, data: []u8) -> (ok: bool) {
 	if bytes, ok := &header.([]u8); ok {
 		bytes^ = data
 		return true
@@ -129,27 +135,25 @@ Any_Encoding :: struct {
 	encode: proc(data: rawptr, encoder: ^Encoder) -> bool,
 }
 
-header_serialize_to_bytes :: proc(
+serialize_to_bytes :: proc(
 	header: any,
 	allocator := context.allocator,
 ) -> []u8 {
 	e: Encoder
 
-	ok := header_serialize(header, &e)
+	ok := serialize(header, &e)
 	assert(ok)
 
-	assert(context.allocator != context.temp_allocator)
-
-	buf := make([]u8, encoded_len(&e))
+	buf, _ := mem.alloc_bytes(encoded_len(&e), 8, allocator)
 
 	e = {buf}
-	ok = header_serialize(header, &e)
+	ok = serialize(header, &e)
 	assert(ok)
 
 	return buf
 }
 
-header_serialize :: proc(
+serialize :: proc(
 	header: any,
 	e: ^Encoder,
 	buffer_len: int = -1,
@@ -358,7 +362,7 @@ test_serialize_populate :: proc(t: ^testing.T) {
 	buf: [256]u8
 	e := Encoder{buf[:]}
 
-	okk := header_serialize(files, &e)
+	okk := serialize(files, &e)
 	testing.expect(t, okk)
 
 	bufa := buf[:len(buf) - len(e.remining)]
@@ -367,7 +371,7 @@ test_serialize_populate :: proc(t: ^testing.T) {
 	nfiles, ok := decode(&d, Bundle_Header)
 	testing.expect(t, ok)
 
-	ok = header_populate(nfiles, bufa)
+	ok = unmarshall(nfiles, bufa)
 	testing.expect(t, ok)
 	testing.expect(t, slice.equal(nfiles.cust.raw, []u8{0}))
 }
