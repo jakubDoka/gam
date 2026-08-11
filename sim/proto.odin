@@ -280,11 +280,6 @@ Decrypt_Error :: enum {
 	Incomplete,
 }
 
-Any_Packet :: struct {
-	data:   rawptr,
-	encode: proc(packet: rawptr, en: ^Encoder) -> bool,
-}
-
 Ping_ID :: distinct [16]u8
 Ping_Tag :: distinct Hash
 

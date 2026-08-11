@@ -1947,7 +1947,7 @@ server_tcp_send :: proc(
 	conn: ^Connection,
 	packet: sim.Server_Packet,
 ) {
-	sim.tcp_connection_send_server(&conn.hctx, packet, server.hr.l)
+	sim.tcp_connection_send(&conn.hctx, packet, server.hr.l)
 }
 
 server_tcp_send_bytes :: proc(
@@ -1955,7 +1955,7 @@ server_tcp_send_bytes :: proc(
 	conn: ^Connection,
 	packet: []u8,
 ) {
-	sim.tcp_connection_send_arbitrary(&conn.hctx, packet, server.hr.l)
+	sim.tcp_connection_send(&conn.hctx, packet, server.hr.l)
 }
 
 server_udp_send :: proc(
@@ -1965,15 +1965,14 @@ server_udp_send :: proc(
 ) {
 
 	if conn.udp_endpoint == {} do return
-	assert(
-		sim.udp_connection_send_server(
-			&server.udp,
-			conn.udp_endpoint,
-			&conn.hctx.secret,
-			packet,
-			server.hr.l,
-		),
+	ok := sim.udp_connection_send(
+		&server.udp,
+		conn.udp_endpoint,
+		&conn.hctx.secret,
+		packet,
+		server.hr.l,
 	)
+	assert(ok)
 }
 
 @(export)
@@ -2136,11 +2135,7 @@ server_on_ping :: proc(server: ^Server) {
 	) {
 		if conn.request_state.last_info != info {
 			conn.request_state.last_info = info
-			sim.tcp_connection_send_arbitrary(
-				&conn.hctx,
-				reflect.as_bytes(info),
-				server.hr.l,
-			)
+			sim.tcp_connection_send(&conn.hctx, info, server.hr.l)
 		}
 	}
 

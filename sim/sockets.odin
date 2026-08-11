@@ -67,13 +67,7 @@ udp_connection_boot :: proc(
 				if new_tag, more := conn.host.on_ping(conn, ping); more {
 					ping.tag = new_tag
 					slc := reflect.as_bytes(ping)
-					udp_connection_send(
-						conn,
-						op.recv.source,
-						nil,
-						{&slc, arbitrary_packet_encode_dyn},
-						op.l,
-					)
+					udp_connection_send(conn, op.recv.source, nil, slc, op.l)
 				}
 
 				kill = false
@@ -104,47 +98,11 @@ udp_connection_kill :: proc(conn: ^UDP_Connection, l: ^nbio.Event_Loop = nil) {
 	conn.receiver = nil
 }
 
-@(require_results)
-udp_connection_send_client :: proc(
-	conn: ^UDP_Connection,
-	to: nbio.Endpoint,
-	secret: ^Secret_Key,
-	packet: Client_Packet,
-	l: ^nbio.Event_Loop,
-) -> bool {
-	packet := packet
-	return udp_connection_send(
-		conn,
-		to,
-		secret,
-		{&packet, client_packet_encode_dyn},
-		l = l,
-	)
-}
-
-@(require_results)
-udp_connection_send_server :: proc(
-	conn: ^UDP_Connection,
-	to: nbio.Endpoint,
-	secret: ^Secret_Key,
-	packet: Server_Packet,
-	l: ^nbio.Event_Loop,
-) -> bool {
-	packet := packet
-	return udp_connection_send(
-		conn,
-		to,
-		secret,
-		{&packet, server_packet_encode_dyn},
-		l,
-	)
-}
-
 udp_connection_send :: proc(
 	conn: ^UDP_Connection,
 	to: nbio.Endpoint,
 	secret: ^Secret_Key,
-	packet: Any_Packet,
+	packet: any,
 	l: ^nbio.Event_Loop = nil,
 ) -> bool {
 	bytes, rc := packet_buffer_alloc(&conn.send_buf, secret, packet) or_return
@@ -197,7 +155,7 @@ Packet_Buffer :: struct {
 packet_buffer_alloc :: proc(
 	buf: ^Packet_Buffer,
 	sk: ^Secret_Key,
-	packet: Any_Packet,
+	packet: any,
 ) -> (
 	res: []u8,
 	within: ^Buffer_Chunk,
@@ -213,7 +171,7 @@ packet_buffer_alloc :: proc(
 		}
 
 		en: if buf, e, ok := begin_crypt_packet(chunk.data[chunk.used:]); ok {
-			packet.encode(packet.data, &e) or_break en
+			header_serialize(packet, &e) or_break en
 			len := end_crypt_packet(sk, buf, e)
 			chunk.used += len
 			final_bytes = buf[:len]
@@ -360,53 +318,13 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	)
 }
 
-tcp_connection_send_client :: proc(
-	conn: ^TCP_Connection,
-	packet: Client_Packet,
-	l: ^nbio.Event_Loop,
-) -> bool {
-	packet := packet
-	return tcp_connection_send(conn, {&packet, client_packet_encode_dyn}, l)
-}
-
-tcp_connection_send_server :: proc(
-	conn: ^TCP_Connection,
-	packet: Server_Packet,
-	l: ^nbio.Event_Loop,
-) -> bool {
-	packet := packet
-	return tcp_connection_send(conn, {&packet, server_packet_encode_dyn}, l)
-}
-
-tcp_connection_send_arbitrary :: proc(
-	conn: ^TCP_Connection,
-	packet: []u8,
-	l: ^nbio.Event_Loop,
-) -> bool {
-	packet := packet
-	return tcp_connection_send(conn, {&packet, arbitrary_packet_encode_dyn}, l)
-}
-
 tcp_connection_send :: proc(
 	conn: ^TCP_Connection,
-	packet: Any_Packet,
+	packet: any,
 	l: ^nbio.Event_Loop,
 ) -> bool {
 	if LATENCY != 0 {
-		e: Encoder
-
-		ok := packet.encode(packet.data, &e)
-		assert(ok)
-
-		assert(context.allocator != context.temp_allocator)
-
-		buf := make([]u8, encoded_len(&e))
-
-		e = {buf}
-		ok = packet.encode(packet.data, &e)
-		assert(ok)
-
-		assert(conn.sock != 0)
+		buf := header_serialize_to_bytes(packet)
 
 		nbio.timeout_poly2(
 			LATENCY * time.Millisecond,
@@ -414,12 +332,8 @@ tcp_connection_send :: proc(
 			buf,
 			proc(op: ^nbio.Operation, conn: ^TCP_Connection, buf: []u8) {
 				buf := buf
-				tcp_connection_send_no_delay(conn, {&buf, encode_dyn}, op.l)
+				tcp_connection_send_no_delay(conn, buf, op.l)
 				delete(buf)
-
-				encode_dyn :: proc(data: rawptr, e: ^Encoder) -> bool {
-					return encode_slice(e, (^[]u8)(data)^)
-				}
 			},
 			l = l,
 		)
@@ -432,13 +346,11 @@ tcp_connection_send :: proc(
 
 tcp_connection_send_no_delay :: proc(
 	conn: ^TCP_Connection,
-	packet: Any_Packet,
+	packet: any,
 	l: ^nbio.Event_Loop,
 ) -> bool {
 	buf, e := begin_crypt_packet(conn.send_buf[conn.buffered:]) or_return
-
-	packet.encode(packet.data, &e) or_return
-
+	header_serialize(packet, &e) or_return
 	len := end_crypt_packet(&conn.secret, buf, e)
 	conn.buffered += len
 

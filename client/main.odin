@@ -39,7 +39,7 @@ PLACEMENT_BUTTON_RADIUS :: 20
 font_medium: rl.Font
 
 tcp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
-	ok := sim.tcp_connection_send_client(&client.hctx.tcp, packet, client.l)
+	ok := sim.tcp_connection_send(&client.hctx.tcp, packet, client.l)
 	assert(ok)
 }
 
@@ -187,7 +187,7 @@ Ent_Extra :: struct {
 }
 
 client_udp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
-	ok := sim.udp_connection_send_client(
+	ok := sim.udp_connection_send(
 		&client.udp,
 		client.hctx.server_endpoint,
 		&client.hctx.tcp.secret,

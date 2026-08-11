@@ -52,6 +52,11 @@ match_slice :: proc(
 }
 
 header_populate :: proc(header: any, data: []u8) -> (ok: bool) {
+	if bytes, ok := &header.([]u8); ok {
+		bytes^ = data
+		return true
+	}
+
 	copy(reflect.as_bytes(header), data)
 
 	{
@@ -124,6 +129,26 @@ Any_Encoding :: struct {
 	encode: proc(data: rawptr, encoder: ^Encoder) -> bool,
 }
 
+header_serialize_to_bytes :: proc(
+	header: any,
+	allocator := context.allocator,
+) -> []u8 {
+	e: Encoder
+
+	ok := header_serialize(header, &e)
+	assert(ok)
+
+	assert(context.allocator != context.temp_allocator)
+
+	buf := make([]u8, encoded_len(&e))
+
+	e = {buf}
+	ok = header_serialize(header, &e)
+	assert(ok)
+
+	return buf
+}
+
 header_serialize :: proc(
 	header: any,
 	e: ^Encoder,
@@ -131,6 +156,10 @@ header_serialize :: proc(
 ) -> (
 	ok: bool,
 ) {
+	if bytes, ok := header.([]u8); ok {
+		return encode_slice(e, bytes)
+	}
+
 	buffer_len := buffer_len if buffer_len != -1 else len(e.remining)
 
 	header_slot := encoder_reserve(e, reflect.size_of_typeid(header.id))
