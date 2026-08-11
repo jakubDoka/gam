@@ -52,10 +52,6 @@ Ent_ID :: struct {
 NIL_STATS_MEM := Ent_Stats{}
 NIL_STATS := &NIL_STATS_MEM
 
-Ent_Stats_Ref :: struct #raw_union {
-	id: Ent_Stats_ID,
-}
-
 TARGETABLE :: bit_set[Ent_Type]{.Building, .Unit, .PowerSource, .Rocket}
 DRAWS_ENERGY :: bit_set[Ent_Type]{.Building, .Unit, .PowerSource}
 AUTO_RECONNECT :: bit_set[Ent_Type]{.Unit}
@@ -81,7 +77,7 @@ Ent_Stats_Attack :: struct {
 	spread:                     f32 `gam:"round2"`,
 	innaccuracy:                f32 `gam:"round2"`,
 	recoil:                     f32 `gam:"round"`,
-	bullet:                     Ent_Stats_Ref,
+	bullet:                     Ent_Stats_ID,
 	unwind:                     f32 `gam:"round2"`,
 }
 
@@ -94,7 +90,7 @@ Ent_Stats :: struct {
 	tall:             bool,
 	can_spawn_player: bool,
 	kind:             Ent_Type,
-	spawn_unit:       Ent_Stats_Ref,
+	spawn_unit:       Ent_Stats_ID,
 	using physics:    struct {
 		speed:                   f32 `gam:"round"`,
 		friction:                f32 `gam:"round"`,
@@ -222,7 +218,6 @@ Particle_Stats :: struct {
 
 Validation_Context :: struct {
 	stat_count: int,
-	id:         Ent_Stats_ID,
 }
 
 validate :: proc(val: any, ctx: Validation_Context) -> bool {
@@ -230,15 +225,11 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 	case f32, bool, int, Color, u8, Asset_ID, nm.Name:
 		return true
 	case Ent_Stats_ID:
-		if v != ctx.id {
-			log.error("index mismatch")
+		ok := 0 <= v && int(v) < ctx.stat_count
+		if !ok {
+			log.error("ent index mismatch", v)
 		}
-		return v == ctx.id
-	case Ent_Stats_Ref:
-		if 0 > v.id || int(v.id) >= ctx.stat_count {
-			log.error("ent index mismatch", v.id)
-		}
-		return 0 <= v.id && int(v.id) < ctx.stat_count
+		return ok
 	}
 
 	#partial switch info in type_info_of(reflect.typeid_base(val.id)).variant {
@@ -294,7 +285,6 @@ test_validate :: proc(t: ^testing.T) {
 
 	validation_context: Validation_Context
 	validation_context.stat_count = 1
-	validation_context.id = 0
 
 	assert(validate(stat, validation_context))
 }
@@ -330,7 +320,7 @@ test_ent_stat_encode_decode :: proc(t: ^testing.T) {
 	stat.placable = true
 	stat.speed = 10
 	stat.sprite = 1
-	stat.bullet.id = 2
+	stat.bullet = 2
 
 	e := Encoder{buf[:]}
 	assert(ent_stats_encode(stat, &e))
@@ -517,7 +507,7 @@ ents_attack_low :: proc(
 	pos: Vec,
 	next_net_id: ^Ent_Net_ID,
 ) {
-	if s.bullet.id == 0 do return
+	if s.bullet == 0 do return
 
 	e := ents_get(ents, e)
 
@@ -540,14 +530,14 @@ ents_attack_low :: proc(
 	)
 
 	for i in 0 ..< s.bullets_per_shot_minus_one + 1 {
-		bs := ents_stats_get(ents, s.bullet.id)
+		bs := ents_stats_get(ents, s.bullet)
 
 		if bs.kind == .Laser && !ents_is_authoritative(ents) do return
 
 		be := ents_add(ents, next_net_id)
 		if be == NIL_ENT do break
 
-		be.stats = s.bullet.id
+		be.stats = s.bullet
 		be.pos = e.pos
 		be.team = e.team
 		be.parent = e.id
@@ -1112,7 +1102,7 @@ ents_update :: proc(ents: ^Ents) {
 			t := ents_get(ents, best)
 			if t == NIL_ENT do break shoot
 
-			bs := ents_stats_get(ents, s.bullet.id)
+			bs := ents_stats_get(ents, s.bullet)
 			pred_target := predict_target(e.pos, t.pos, t.vel, bs.speed)
 			dir := angle_of(pred_target - e.pos)
 
@@ -1133,7 +1123,7 @@ ents_update :: proc(ents: ^Ents) {
 			)
 		}
 
-		su := ents_stats_get(ents, s.spawn_unit.id)
+		su := ents_stats_get(ents, s.spawn_unit)
 		suradius := su.radius
 		spawn: if su != NIL_STATS {
 			if e.energy_consumed > 0 do break spawn
@@ -1145,7 +1135,7 @@ ents_update :: proc(ents: ^Ents) {
 			ne.pos = e.pos
 			ne.vel =
 				vec_of(math.PI * 2 * rand.float32()) * (sradius + suradius) * 2
-			ne.stats = s.spawn_unit.id
+			ne.stats = s.spawn_unit
 			ne.parent_net_id = e.net_id
 			ne.parent = e.id
 			ne.team = e.team

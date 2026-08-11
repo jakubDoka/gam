@@ -490,7 +490,7 @@ ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 
 	encode(e, ent.age) or_return
 
-	if s.bullet.id != 0 && field_presence_set(&presence, ent.reload > 0) {
+	if s.bullet != 0 && field_presence_set(&presence, ent.reload > 0) {
 		encode(e, ent.reload) or_return
 	}
 
@@ -554,7 +554,7 @@ ent_synced_decode :: proc(
 
 	ent.age = decode(d, f32) or_return
 
-	if s.bullet.id != 0 && field_presence_get(&presence) {
+	if s.bullet != 0 && field_presence_get(&presence) {
 		ent.reload = decode(d, f32) or_return
 	}
 
@@ -616,11 +616,10 @@ ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
 		switch &v in val {
 		case bool:
 			field_presence_set(presence, v)
-		case Ent_Stats_Ref:
-			if field_presence_set(presence, v.id != 0) {
-				encode_leb128(e, int(v.id)) or_return
-			}
 		case Ent_Stats_ID:
+			if field_presence_set(presence, v != 0) {
+				encode_leb128(e, int(v)) or_return
+			}
 		case Asset_ID:
 			if field_presence_set(presence, v != {}) {
 				encode(e, v) or_return
@@ -722,14 +721,11 @@ ent_stats_decode :: proc(
 		switch &v in val {
 		case bool:
 			v = field_presence_get(presence)
-		case Ent_Stats_Ref:
+		case Ent_Stats_ID:
 			if field_presence_get(presence) {
 				vl := decode_leb128(d, int) or_return
-				v = Ent_Stats_Ref {
-					id = Ent_Stats_ID(vl),
-				}
+				v = Ent_Stats_ID(vl)
 			}
-		case Ent_Stats_ID:
 		case Asset_ID:
 			if field_presence_get(presence) {
 				v = decode(d, Asset_ID) or_return

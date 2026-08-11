@@ -1,7 +1,6 @@
 package sim
 
 import "../util/hot"
-import "core:fmt"
 import "core:log"
 import "core:nbio"
 import "core:reflect"

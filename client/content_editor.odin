@@ -330,7 +330,7 @@ ui_content_editor :: proc(client: ^Client) {
 				props: ^[dynamic]Field_Slot,
 			) {
 				if reflect.is_struct(type_info_of(value.id)) &&
-				   value.id != sim.Ent_Stats_Ref &&
+				   value.id != sim.Ent_Stats_ID &&
 				   value.id != sim.Asset_ID {
 					for field in reflect.struct_fields_zipped(value.id) {
 
@@ -725,7 +725,7 @@ ui_stat_editor :: proc(
 		sub_root := orui.to_id(seb.root, i)
 		sub_root_edit := orui.to_id(seb.eidt_root, i)
 		_, is_struct := reflect.type_info_base(type).variant.(rt.Type_Info_Struct)
-		is_struct &= type.id != sim.Ent_Stats_Ref
+		is_struct &= type.id != sim.Ent_Stats_ID
 		is_struct &= type.id != sim.Asset_ID
 
 		dest := reflect.struct_field_value(edited, field)
@@ -841,10 +841,10 @@ ui_content_field_edit :: proc(
 			} else {
 				dest = "<invalid>"
 			}
-		case sim.Ent_Stats_Ref:
-			if int(v.id) < len(client.ents.stats) {
-				dest = nm.str(&client.ents.stats[v.id].name)
-				if v.id == 0 do dest = "<none>"
+		case sim.Ent_Stats_ID:
+			if int(v) < len(client.ents.stats) {
+				dest = nm.str(&client.ents.stats[v].name)
+				if v == 0 do dest = "<none>"
 			} else {
 				dest = "<invalid>"
 			}
@@ -948,7 +948,7 @@ ui_content_field_edit :: proc(
 			seb.current_field = 0
 			seb.last_field = 0
 		}
-	case sim.Ent_Stats_Ref:
+	case sim.Ent_Stats_ID:
 		res, should_close := ui_select(
 			id("ent-ref-picker", sub_root),
 			&seb.string_field,
@@ -968,7 +968,7 @@ ui_content_field_edit :: proc(
 		}
 
 		if res >= 0 {
-			v.id = sim.Ent_Stats_ID(res)
+			v = sim.Ent_Stats_ID(res)
 			seb.current_field = 0
 			seb.last_field = 0
 		}

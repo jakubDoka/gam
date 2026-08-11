@@ -221,11 +221,9 @@ load_config :: proc(loader: ^Asset_Loader) {
 				vl = vl << 8 | 0xFF
 			}
 			a = Color(vl)
-		case Ent_Stats_Ref:
+		case Ent_Stats_ID:
 			append(&loader.ent_ref_names, value)
-			a = {
-				id = Ent_Stats_ID(len(loader.ent_ref_names) - 1),
-			}
+			a = Ent_Stats_ID(len(loader.ent_ref_names) - 1)
 		case Asset_ID:
 			id, load_err := loader.load_sprite(loader, value)
 			if len(load_err) != 0 {
@@ -269,8 +267,8 @@ load_config :: proc(loader: ^Asset_Loader) {
 		path, source: string,
 	) {
 		switch &v in dest {
-		case Ent_Stats_Ref:
-			name := loader.ent_ref_names[v.id]
+		case Ent_Stats_ID:
+			name := loader.ent_ref_names[v]
 
 			id := 0
 			for &e, i in all {
@@ -288,18 +286,10 @@ load_config :: proc(loader: ^Asset_Loader) {
 				)
 			}
 
-			v = {
-				id = Ent_Stats_ID(id),
-			}
+			v = Ent_Stats_ID(id)
+
 			return
-		case bool,
-		     f32,
-		     int,
-		     Asset_ID,
-		     Ent_Stats_ID,
-		     Ent_Type,
-		     Ent_Stats_Name,
-		     Color:
+		case bool, f32, int, Asset_ID, Ent_Type, Ent_Stats_Name, Color:
 			return
 		case:
 		}
@@ -308,6 +298,11 @@ load_config :: proc(loader: ^Asset_Loader) {
 			type_info_of(reflect.typeid_base(dest.id)).variant {
 		case rt.Type_Info_Struct:
 			for field in reflect.struct_fields_zipped(dest.id) {
+				if strings.contains(
+					reflect.struct_tag_get(field.tag, "gam"),
+					"hidden",
+				) {continue}
+
 				value := reflect.struct_field_value(dest, field)
 				post_proces_stats(loader, value, all, path, source)
 			}
@@ -482,7 +477,7 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 		     bool,
 		     Color,
 		     Asset_ID,
-		     Ent_Stats_Ref,
+		     Ent_Stats_ID,
 		     Ent_Type,
 		     Ent_Stats_Name:
 			write_string(out, " ")
@@ -499,8 +494,8 @@ store_config :: proc(ctx: Store_Ctx, out: io.Writer) -> (err: io.Error) {
 			fmt.wprintf(out, "#%x", cl)
 		case Asset_ID:
 			write_string(out, ctx.sprite_name(ctx.asoc_data, v))
-		case Ent_Stats_Ref:
-			io.write_full(out, nm.bytes(&ctx.stats[v.id].name))
+		case Ent_Stats_ID:
+			io.write_full(out, nm.bytes(&ctx.stats[v].name))
 		case:
 			matched = false
 		}

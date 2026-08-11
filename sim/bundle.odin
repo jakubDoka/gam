@@ -1,6 +1,5 @@
 package sim
 
-import "../util/nm"
 import "base:intrinsics"
 import "base:runtime"
 import "core:log"

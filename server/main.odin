@@ -619,7 +619,7 @@ server_handle_packet :: proc(
 
 			sim.validate(
 				stats,
-				{stat_count = len(game.ents.stats) + 1, id = stats.id},
+				{stat_count = len(game.ents.stats) + 1},
 			) or_return
 
 			append(&game.ents.stats, stats)
@@ -629,10 +629,7 @@ server_handle_packet :: proc(
 			stats := p.stats
 
 			reason = "validation failed"
-			sim.validate(
-				stats,
-				{stat_count = len(game.ents.stats), id = stats.id},
-			) or_return
+			sim.validate(stats, {stat_count = len(game.ents.stats)}) or_return
 
 			game.ents.stats[stats.id] = stats
 
