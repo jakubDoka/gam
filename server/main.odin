@@ -120,19 +120,19 @@ Connection :: struct {
 }
 
 Connection_Request_State :: struct {
-	payload:           []u8,
-	sprites:           []sim.Asset_ID,
-	sent_sprite_metas: int,
-	sent_sprites:      int,
-	buf:               []u8,
-	last_info:         sim.Server_Info,
-	assets:            []sim.Asset,
-	rcvd_assets:       int,
-	written:           int,
-	recvd:             int,
-	write_file:        nbio.Handle,
-	file_hash_ctx:     blake2s.Context,
-	requester:         ^Connection,
+	payload:          []u8,
+	requested_assets: []sim.Asset_ID,
+	sent_asset_metas: int,
+	sent_assets:      int,
+	buf:              []u8,
+	last_info:        sim.Server_Info,
+	assets:           []sim.Asset,
+	rcvd_assets:      int,
+	written:          int,
+	recvd:            int,
+	write_file:       nbio.Handle,
+	file_hash_ctx:    blake2s.Context,
+	requester:        ^Connection,
 }
 
 Game :: struct {
@@ -378,6 +378,7 @@ Server :: struct #align (8) {
 	ping_seq:                int,
 	udp:                     sim.UDP_Connection,
 	tcp:                     nbio.TCP_Socket,
+	file_tcp:                nbio.TCP_Socket,
 	acceptor:                ^nbio.Operation,
 	ping_interval:           ^nbio.Operation,
 	tick_interval:           ^nbio.Operation,
@@ -1100,14 +1101,14 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 			_: ^sim.Client_Request_Header,
 		) -> bool
 
-		handlers := #partial [sim.Client_Request_Type]Handler_Proc {
+		handlers := [sim.Client_Request_Type]Handler_Proc {
 			.Download_Content  = send_content,
 			.Play              = boot_player,
 			.Watch_Server_Info = stream_server_info,
 			.Upload_Content    = recv_content,
 		}
 
-		if len(handlers) <= int(request.kind) {
+		if len(handlers) < int(request.kind) {
 			log.warn(
 				"received out of range Client_Request_Type:",
 				request.kind,
@@ -1181,7 +1182,7 @@ send_content :: proc(
 
 	any_body := sim.client_packet_decode(payload) or_return
 	body := any_body.(sim.Client_Asset_Request)
-	conn.request_state.sprites = body.assets
+	conn.request_state.requested_assets = body.assets
 	conn.request_state.buf = make([]u8, 4096)
 
 	do_progress(conn)
@@ -1192,13 +1193,13 @@ send_content :: proc(
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
 		state := &conn.request_state
 
-		assert(len(state.sprites) != 0)
+		assert(len(state.requested_assets) != 0)
 
 		e := sim.Encoder{state.buf}
 
 		log.debug("asset fetch doing progress")
 
-		for s in state.sprites[state.sent_sprite_metas:] {
+		for s in state.requested_assets[state.sent_asset_metas:] {
 			asset, ok := server_get_asset(server, s)
 			if !ok {
 				log.warn("requested unknown asset:", s)
@@ -1206,7 +1207,7 @@ send_content :: proc(
 			}
 
 			sim.encode(&e, asset.base) or_break
-			state.sent_sprite_metas += 1
+			state.sent_asset_metas += 1
 		}
 
 		buff_written := len(state.buf) - len(e.remining)
@@ -1224,11 +1225,11 @@ send_content :: proc(
 			return true
 		}
 
-		if state.sent_sprites < len(state.sprites) {
+		if state.sent_assets < len(state.requested_assets) {
 			log.debug("sending sprite")
 
-			s := state.sprites[state.sent_sprites]
-			state.sent_sprites += 1
+			s := state.requested_assets[state.sent_assets]
+			state.sent_assets += 1
 
 			asset, ok := server_get_asset(server, s)
 			assert(ok)
@@ -1683,6 +1684,7 @@ visit_files :: proc(
 	log.assertf(dir_err == nil, "failed to join path: %v", dir_err)
 
 	walker := os.walker_create(dir)
+	defer os.walker_destroy(&walker)
 	for entry in os.walker_walk(&walker) {
 		if entry.type != .Regular do continue
 		if !strings.has_suffix(entry.fullpath, ext) do continue
@@ -1884,7 +1886,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			create_err,
 		)
 
-		bind_err := nbio.bind(udp_sock, {nbio.IP4_Any, 1234})
+		bind_err := nbio.bind(udp_sock, {nbio.IP4_Any, sim.GAME_PORT})
 		log.assertf(bind_err == nil, "failed to bind udp socket: %v", bind_err)
 
 		server.udp.sock = udp_sock
@@ -1899,7 +1901,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		sim.udp_connection_boot(&server.udp, true, server.hr.l)
 
 		tcp_sock, listen_err := nbio.listen_tcp(
-			{nbio.IP4_Any, 1234},
+			{nbio.IP4_Any, sim.GAME_PORT},
 			l = server.hr.l,
 		)
 		log.assertf(
@@ -2186,6 +2188,7 @@ server_shutdown :: proc(server: ^Server) {
 
 	sim.udp_connection_kill(&server.udp, server.hr.l)
 	nbio.close(server.tcp, l = server.hr.l)
+	nbio.close(server.file_tcp, l = server.hr.l)
 }
 
 @(export)
@@ -2265,7 +2268,6 @@ main_proc :: proc() {
 	hr.watch_dirs = {"server", "sim"}
 	hr.extra_args = {
 		"-define:TRACK_ALLOCATIONS=true",
-		"-define:RAYLIB_SHARED=true",
 		"-define:SQLITE_SHARED=true",
 	}
 	hr.dyn_defs = {{"LATENCY", sim.LATENCY}, {"LOCAL", sim.LOCAL}}

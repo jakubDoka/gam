@@ -1,5 +1,6 @@
 core:
   placable: true
+  tall: true
   can_spawn_player: true
   physics:
     radius: 64
@@ -31,7 +32,7 @@ snipa:
       innaccuracy: 1
       bullet: snip-shot
   turret:
-    aim_speed: 8.1999998
+    aim_speed: 8.2
     reload: 1
   health:
     energy: 30
@@ -52,6 +53,7 @@ snip-shot:
       lifetime: 0.3
 node:
   placable: true
+  guards: true
   physics:
     radius: 32
     sprite: node
@@ -92,7 +94,7 @@ spawner:
   physics:
     radius: 32
     sprite: spawner
-    spin: 1.65999997
+    spin: 1.66
   health:
     energy: 11
     recharge_speed: 2

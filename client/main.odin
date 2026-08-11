@@ -522,15 +522,7 @@ has_valid_bs :: proc(client: ^Client) -> bool {
 	tile := sim.map_vec_to_pos(pos)
 	snapped_pos := sim.map_pos_to_vec(tile)
 
-	if linalg.distance(snapped_pos, se.pos) > ss.bind_range &&
-	   !client.map_editing.expanded {return false}
-
-	t, _, _ := sim.map_wall_collision(
-		&client.ents,
-		se.pos,
-		snapped_pos - se.pos,
-	)
-	if t != 1 do return false
+	if !sim.can_connect(&client.ents, se.id, snapped_pos) do return false
 
 	be := sim.ents_building_get(&client.ents, tile)
 
@@ -934,7 +926,17 @@ client_update :: proc(client: ^Client) {
 		x.trail_cooldown -= client.ents.delta
 		t := sim.ents_team_get(&client.ents, e.team)
 		sradius := sim.ents_radius(&client.ents, e.id)
+
+		if s.kind == .Beam {
+			px := client_ent_extra_get(client, e.parent)
+			it := sim.beam_walk_init(&client.ents, e.id, px.rot_smoothing)
+			for pp in sim.beam_walk_next(&client.ents, &it) {}
+			t = sim.ents_team_get(&client.ents, e.team)
+			x.pos_smoothing = 0
+		}
+
 		pos := e.pos + x.pos_smoothing
+
 		if x.trail_cooldown < 0 {
 			x.trail_cooldown = s.trail.spacing
 			spec := &s.trail.particle
@@ -950,7 +952,7 @@ client_update :: proc(client: ^Client) {
 						s.trail.spawn_innaccuracy
 				p.radius = (1 - spec.one_minus_radius_ratio) * sradius
 				p.stats = spec^
-				p.color = client_ent_color(client, e.id)
+				p.color = get_color(t.color)
 			}
 		}
 	}
@@ -1058,6 +1060,24 @@ client_update :: proc(client: ^Client) {
 					parent.pos +
 					client_ent_extra_get(client, e.parent).pos_smoothing
 				rl.DrawLineEx(parent_pos, pos, 5, get_color(t.color))
+
+				if s.guards {
+					for i in 0 ..< 2 {
+						sign := -1 + f32(2 * i)
+						offset :=
+							linalg.orthogonal(
+								linalg.normalize0(parent_pos - pos),
+							) *
+							sign *
+							10
+						rl.DrawLineEx(
+							parent_pos + offset,
+							pos + offset,
+							5,
+							get_color(t.color),
+						)
+					}
+				}
 			}
 
 			beam: if s.kind == .Beam {
@@ -1066,29 +1086,17 @@ client_update :: proc(client: ^Client) {
 				px := client_ent_extra_get(client, e.parent)
 				if pe == sim.NIL_ENT do break beam
 
-				step := sim.vec_of(pe.rot) * s.speed
-				_, tm := sim.ents_find_beam_collider(
-					&client.ents,
-					e.team,
-					pe.pos,
-					step,
-				)
-				step *= tm
-
 				rad := s.radius * f32((math.sin(rl.GetTime() * 50) + 5) / 6)
-				start :=
-					pe.pos +
-					px.pos_smoothing +
-					sim.vec_of(pe.rot) * (ps.radius + rad)
 
-				rl.DrawCircleV(start, rad, get_color(t.color))
+				it := sim.beam_walk_init(&client.ents, e.id, px.rot_smoothing)
+				t = sim.ents_team_get(&client.ents, e.team)
+				for pp in sim.beam_walk_next(&client.ents, &it) {
+					rl.DrawCircleV(pp, rad, get_color(t.color))
 
-				rl.DrawLineEx(
-					start,
-					e.pos + x.pos_smoothing,
-					rad * 2,
-					get_color(t.color),
-				)
+					rl.DrawLineEx(pp, e.pos, rad * 2, get_color(t.color))
+					t = sim.ents_team_get(&client.ents, e.team)
+				}
+
 			}
 		}
 

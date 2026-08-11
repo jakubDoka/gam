@@ -6,6 +6,9 @@ import "core:nbio"
 import "core:reflect"
 import "core:time"
 
+GAME_PORT :: 6012
+FILE_PORT :: 6013
+
 INACTIVE_SECRET :: Secret_Key{}
 PING_INTERVAL :: 400 * time.Millisecond
 BUFFER_CHUNK_SIZE :: (1 << 16) - size_of(int) * 4

@@ -3,8 +3,8 @@ package client
 import "../sim"
 import "../util/arna"
 import "../util/b58"
-import "../util/nm"
 import "../util/bit_arr"
+import "../util/nm"
 import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
@@ -632,7 +632,7 @@ ui_connection_menu :: proc(client: ^Client) {
 	)
 
 	{box(id("ip-row"), {width = orui.grow(), gap = PADDING})
-		defaut_ip := "127.0.0.1:1234" when sim.LOCAL else "95.217.156.80:1234"
+		defaut_ip := "127.0.0.1" when sim.LOCAL else "95.217.156.80"
 
 		ip, confirmed := ui_text_input(
 			id("ip-input"),
@@ -641,7 +641,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				width = orui.grow(),
 				height = orui.fixed(ROW_HEIGHT),
 				placeholder = "127.0...",
-				default_text = defaut_ip,
+				default_text = fmt.tprintf("%v:%v", defaut_ip, sim.GAME_PORT),
 			},
 		)
 
@@ -2030,7 +2030,10 @@ ui_build :: proc(client: ^Client) {
 	}
 }
 
-fuzzy_rank_new_bitset :: proc(name: string, query: string) -> ^bit_arr.Bit_Set {
+fuzzy_rank_new_bitset :: proc(
+	name: string,
+	query: string,
+) -> ^bit_arr.Bit_Set {
 	matched_chars := new(bit_arr.Bit_Set, context.temp_allocator)
 	matched_chars^ = bit_arr.init(len(name), context.temp_allocator)
 	fuzzy_rank(name, query, matched_chars^)

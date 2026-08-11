@@ -112,6 +112,10 @@ Ent_Stats :: struct {
 		bounce_age_reduction:    f32 `gam:"round1"`,
 	},
 	using attack:     Ent_Stats_Attack,
+	dash:             struct {
+		impact:   f32 `gam:"round"`,
+		cooldonw: f32 `gam:"round2"`,
+	},
 	parry:            struct {
 		invincibility: f32 `gam:"round1"`,
 		duration:      f32,
@@ -416,12 +420,14 @@ Ents :: struct {
 	delta:         f32,
 	on_remove:     proc(_: ^Ents, _: ^Ent),
 	on_laser:      proc(_: ^Ents, _: ^Ent),
+	on_deflect:    proc(_: ^Ents, target: ^Ent, by: ^Ent),
 	stats:         [dynamic]Ent_Stats,
 	using mapa:    Map,
 	spawn_seq:     ^Ent_Net_ID,
 	quad_tree:     Quad_Tree,
 	spatial_map:   Spatial_Map,
 	buildings:     []u32,
+	guarded:       bit_arr.Bit_Set,
 }
 
 team_spawnable :: proc(team: Ent_Team_ID, counts: []int) -> bool {
@@ -1020,10 +1026,26 @@ eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 	}
 }
 
+can_connect :: proc(ents: ^Ents, from: Ent_ID, to: Vec) -> bool {
+	from := ents_get(ents, from)
+	fs := ents_stats_get(ents, from.stats)
+
+	if linalg.length2(from.pos - to) >
+	   fs.bind_range * fs.bind_range {return false}
+
+	if !fs.tall {
+		p_coff, _, _ := map_wall_collision(ents, from.pos, to - from.pos)
+		if p_coff != 1 do return false
+	}
+
+	return true
+}
+
 ents_update :: proc(ents: ^Ents) {
 	ents_move(ents, ents.delta)
 
-	found_spawner := make([]bool, len(ents.teams), context.temp_allocator)
+	ents.guarded = bit_arr.init(len(ents.slots), context.temp_allocator)
+
 	for &e in ents_iter(ents) {
 		s := ents_stats_get(ents, e.stats)
 
@@ -1034,8 +1056,9 @@ ents_update :: proc(ents: ^Ents) {
 		e.parry_progress -= ents.delta
 		e.parent_net_id = ents_get(ents, e.parent).net_id
 		e.rot += ents.delta * s.spin
-		if s.can_spawn_player {
 
+		if s.guards && e.parent != {} {
+			bit_arr.set(ents.guarded, e.parent.index)
 		}
 	}
 
@@ -1051,25 +1074,16 @@ ents_update :: proc(ents: ^Ents) {
 
 		p := ents_get(ents, e.parent)
 		ps := ents_stats_get(ents, p.stats)
-		p_coff, _, _ := map_wall_collision(ents, e.pos, p.pos - e.pos)
-		if (linalg.distance(p.pos, e.pos) > ps.bind_range || p_coff != 1) &&
-		   s.kind in DRAWS_ENERGY {
+		if !can_connect(ents, p.id, e.pos) && s.kind in DRAWS_ENERGY {
 			e.parent = {}
 		}
 
 		reconnect_iter := ents_query(ents, e.pos, s.bind_range)
 		for oe in ents_query_next(&reconnect_iter) {
+			if oe.id == e.id do continue
 			os := ents_stats_get(ents, oe.stats)
 			if oe.parent == {} && os.kind in AUTO_RECONNECT {
-				oe_coff, _, _ := map_wall_collision(
-					ents,
-					e.pos,
-					oe.pos - e.pos,
-				)
-
-				if linalg.distance(oe.pos, e.pos) < s.bind_range &&
-				   e.team == oe.team &&
-				   oe_coff == 1 {
+				if can_connect(ents, e.id, oe.pos) && e.team == oe.team {
 					oe.parent = e.id
 				}
 			}
@@ -1202,11 +1216,8 @@ ents_update :: proc(ents: ^Ents) {
 		}
 
 		if s.kind == .Beam {
-			step := vec_of(p.rot) * s.speed
-
-			col, t := ents_find_beam_collider(ents, e.team, p.pos, step)
-			ents_collision(ents, e, col)
-			e.pos = p.pos + step * t
+			it := beam_walk_init(ents, e.id)
+			for _ in beam_walk_next(ents, &it) {}
 		}
 
 		if s.kind == .Rocket && p != NIL_ENT {
@@ -1384,6 +1395,49 @@ ents_update :: proc(ents: ^Ents) {
 	}
 }
 
+Beam_Walk :: struct {
+	e:    Ent_ID,
+	step: Vec,
+}
+
+beam_walk_init :: proc(
+	ents: ^Ents,
+	e: Ent_ID,
+	smoothing: f32 = 0,
+) -> Beam_Walk {
+	e := ents_get(ents, e)
+	p := ents_get(ents, e.parent)
+	s := ents_stats_get(ents, e.stats)
+	e.pos = p.pos
+	e.team = p.team
+	return {step = vec_of(p.rot + smoothing) * s.speed, e = e.id}
+}
+
+beam_walk_next :: proc(ents: ^Ents, bw: ^Beam_Walk) -> (Vec, bool) {
+	e := ents_get(ents, bw.e)
+	p := ents_get(ents, e.parent)
+	s := ents_stats_get(ents, e.stats)
+
+	if bw.step == 0 do return {}, false
+
+	col, t := ents_find_beam_collider(ents, e.team, e.pos, bw.step)
+	prev_team := e.team
+	ents_collision(ents, e, col)
+	prev_pos := e.pos
+	e.pos += bw.step * t
+
+	if prev_team == e.team {
+		bw.step = 0
+	}
+
+	bw.step = linalg.reflect(
+		bw.step * (1 - t),
+		linalg.normalize0(e.pos - col.pos),
+	)
+
+	return prev_pos, true
+}
+
 ents_find_beam_collider :: proc(
 	ents: ^Ents,
 	team: Ent_Team_ID,
@@ -1433,6 +1487,10 @@ ents_collision :: proc(
 		sbody_damage := ents_damage(ents, e.id) * damage_mult
 		if sbody_damage == 0 do break apply_damage
 		if e.team == target.team do break apply_damage
+		if bit_arr.contains(ents.guarded, target.id.index) {
+			e.team = target.team
+			break apply_damage
+		}
 
 		if target.parry_progress >
 		   ts.parry.cooldown + ts.parry.duration + ts.parry.attack.unwind {

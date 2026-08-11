@@ -44,7 +44,6 @@ Client_Request_Header :: struct {
 
 Client_Request_Type :: enum int {
 	Watch_Server_Info,
-	Download_Content_Headers,
 	Download_Content,
 	Upload_Content,
 	Play,

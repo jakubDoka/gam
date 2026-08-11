@@ -2,7 +2,6 @@ package client
 
 import "../sim"
 import "../util/bit_arr"
-import "../util/packer"
 import orui "../vendored/orui/src"
 import "core:fmt"
 import la "core:math/linalg"
@@ -121,10 +120,7 @@ ui_map_export :: proc(client: ^Client) -> (mapa: sim.Map) {
 		new_tiles := bit_arr.init(ctx.width * ctx.height)
 		for y in 0 ..< min(mapa.height, ctx.height) {
 			for x in 0 ..< min(mapa.width, ctx.width) {
-				vl := bit_arr.contains_unbounded(
-					old_tiles,
-					y * mapa.width + x,
-				)
+				vl := bit_arr.contains_unbounded(old_tiles, y * mapa.width + x)
 				bit_arr.set(new_tiles, y * ctx.width + x, vl)
 			}
 		}
@@ -440,6 +436,34 @@ ui_map_editor :: proc(client: ^Client) {
 				&ctx.teams,
 				sim.Ent_Team{color = sim.Color(rand.uint32() | 0x000000FF)},
 			)
+		}
+	}
+
+	{box(
+			id("map-editor-teams"),
+			{
+				layout = .Grid,
+				cols = 2,
+				rows = i32((len(ctx.teams) + 1 + 1) / 2),
+			},
+		)
+
+		if ui_icon_button(
+			id("map-export"),
+			TEAM_SIZE,
+			.ICON_FILE_EXPORT,
+			"Export map to a file",
+		) {
+
+		}
+
+		if ui_icon_button(
+			id("map-save"),
+			TEAM_SIZE,
+			.ICON_FILE_EXPORT,
+			"Export map to a file",
+		) {
+
 		}
 	}
 }

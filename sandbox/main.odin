@@ -457,6 +457,7 @@ sandbox_update :: proc(ents: ^Ents) {
 
 move :: proc(ents: ^Ents, delta: f32) {
 	worklist: queue.Queue(^Ent)
+	queue.init(&worklist, allocator = context.temp_allocator)
 	{context.allocator = context.temp_allocator
 		ents.quad_tree = {}
 		sim.spatial_map_init(&ents.spatial_map, ents.width, ents.height)

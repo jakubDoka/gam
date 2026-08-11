@@ -200,8 +200,9 @@ finalize :: proc {
 }
 
 finalize_stmt :: proc(statement: Statement) {
+	db := db_handle(statement)
 	res := _finalize(statement)
-	assert_ok(statement, res)
+	assert_ok(db, res)
 }
 
 finalize_struct :: proc(statements: any) {

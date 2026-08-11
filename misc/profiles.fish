@@ -27,7 +27,6 @@ set SERVER_DEV_FLAGS\
 	-default-to-nil-allocator\
 	-define:LATENCY=$LATENCY\
 	-define:HOT_RELOAD=true\
-	-define:RAYLIB_SHARED=true\
 	-define:SQLITE_SHARED=true\
 	-define:TRACK_ALLOCATIONS=true
 
