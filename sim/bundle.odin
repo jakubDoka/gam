@@ -26,15 +26,15 @@ DIR_BY_TYPE := [Asset_Type]string {
 	.Sprite = SPRITE_DIR,
 }
 
-Relative_File_Slice :: struct {
+Relative_Slice :: struct {
 	offset: int,
 	len:    int,
 }
 
-Any_File_Slice :: struct #raw_union {
+Any_Slice :: struct #raw_union {
 	custom:      Any_Encoding,
 	absolute:    runtime.Raw_Slice,
-	using inner: Relative_File_Slice,
+	using inner: Relative_Slice,
 }
 
 match_slice :: proc(
@@ -75,7 +75,7 @@ unmarshall :: proc(header: any, data: []u8) -> (ok: bool) {
 
 		pre_slice :: proc(
 			info: ^runtime.Type_Info_Slice,
-			slice: ^Any_File_Slice,
+			slice: ^Any_Slice,
 		) -> bool {
 			info := info
 			data := ([^]u8)(context.user_ptr)[:context.user_index]
@@ -141,19 +141,19 @@ serialize_to_bytes :: proc(
 ) -> []u8 {
 	e: Encoder
 
-	ok := serialize(header, &e)
+	ok := marshall(header, &e)
 	assert(ok)
 
 	buf, _ := mem.alloc_bytes(encoded_len(&e), 8, allocator)
 
 	e = {buf}
-	ok = serialize(header, &e)
+	ok = marshall(header, &e)
 	assert(ok)
 
 	return buf
 }
 
-serialize :: proc(
+marshall :: proc(
 	header: any,
 	e: ^Encoder,
 	buffer_len: int = -1,
@@ -175,7 +175,7 @@ serialize :: proc(
 
 		post_slice :: proc(
 			info: ^runtime.Type_Info_Slice,
-			slice: ^Any_File_Slice,
+			slice: ^Any_Slice,
 		) -> (
 			ok: bool,
 		) {
@@ -224,39 +224,14 @@ serialize :: proc(
 }
 
 Visitor :: struct {
-	pre_slice:  proc(_: ^runtime.Type_Info_Slice, _: ^Any_File_Slice) -> bool,
-	post_slice: proc(_: ^runtime.Type_Info_Slice, _: ^Any_File_Slice) -> bool,
+	pre_slice:  proc(_: ^runtime.Type_Info_Slice, _: ^Any_Slice) -> bool,
+	post_slice: proc(_: ^runtime.Type_Info_Slice, _: ^Any_Slice) -> bool,
 	enum_:      proc(_: ^runtime.Type_Info_Enum, _: int) -> bool,
 }
 
 traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
-	switch &h in header {
-	case int,
-	     [2]int,
-	     Color,
-	     Ent_Team_ID,
-	     Ent_ID,
-	     Ent_Stats_ID,
-	     Vec,
-	     u32,
-	     f32,
-	     nm.Name,
-	     Hash,
-	     Secret_Key,
-	     Ping_ID,
-	     Ping_Tag,
-	     bool,
-	     Ent_Stats_Ref,
-	     Identity,
-	     Player_Permissions,
-	     bit_set[Client_Input_Key],
-	     Asset_ID,
-	     [Map_Sprite_Kind]Asset_ID:
-		return true
-	}
-
 	if slice_info, ok := match_slice(header.id); ok {
-		slice := (^Any_File_Slice)(header.data)
+		slice := (^Any_Slice)(header.data)
 
 		if visitor.pre_slice != nil do visitor.pre_slice(slice_info, slice) or_return
 
@@ -275,10 +250,10 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 		return true
 	}
 
-	#partial switch &info in
-		type_info_of(reflect.typeid_base(header.id)).variant {
+	tif := type_info_of(header.id)
+	#partial switch &info in tif.variant {
 	case runtime.Type_Info_Struct:
-		if .raw_union in info.flags do break
+		if .raw_union in info.flags do return true
 
 		for field in reflect.struct_fields_zipped(header.id) {
 			value := reflect.struct_field_value(header, field)
@@ -307,6 +282,16 @@ traverse_recur :: proc(header: any, visitor: Visitor) -> (ok: bool) {
 		} else {
 			return true
 		}
+	case runtime.Type_Info_Named:
+		return traverse_recur({header.data, info.base.id}, visitor)
+	case runtime.Type_Info_Integer,
+	     runtime.Type_Info_Boolean,
+	     runtime.Type_Info_Float,
+	     runtime.Type_Info_Bit_Set,
+	     runtime.Type_Info_Bit_Field,
+	     runtime.Type_Info_Array,
+	     runtime.Type_Info_Enumerated_Array:
+		return .Comparable in tif.flags
 	}
 
 	log.error("unhandled type for serialization:", header.id)
@@ -362,7 +347,7 @@ test_serialize_populate :: proc(t: ^testing.T) {
 	buf: [256]u8
 	e := Encoder{buf[:]}
 
-	okk := serialize(files, &e)
+	okk := marshall(files, &e)
 	testing.expect(t, okk)
 
 	bufa := buf[:len(buf) - len(e.remining)]

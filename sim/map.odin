@@ -154,7 +154,7 @@ map_load :: proc(
 }
 
 map_store :: proc(mapa: Map, e: ^Encoder) -> (ok: bool) {
-	serialize(mapa, e) or_return
+	marshall(mapa, e) or_return
 	return true
 }
 

@@ -172,7 +172,7 @@ packet_buffer_alloc :: proc(
 		}
 
 		en: if buf, e, ok := begin_crypt_packet(chunk.data[chunk.used:]); ok {
-			serialize(packet, &e) or_break en
+			marshall(packet, &e) or_break en
 			len := end_crypt_packet(sk, buf, e)
 			chunk.used += len
 			final_bytes = buf[:len]
@@ -351,7 +351,7 @@ tcp_connection_send_no_delay :: proc(
 	l: ^nbio.Event_Loop,
 ) -> bool {
 	buf, e := begin_crypt_packet(conn.send_buf[conn.buffered:]) or_return
-	serialize(packet, &e) or_return
+	marshall(packet, &e) or_return
 	len := end_crypt_packet(&conn.secret, buf, e)
 	conn.buffered += len
 

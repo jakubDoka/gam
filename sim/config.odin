@@ -12,12 +12,13 @@ import "core:strings"
 import "core:testing"
 
 Asset_Loader :: struct {
-	asoc_data:   rawptr,
-	load_sprite: proc(_: ^Asset_Loader, _: string) -> (Asset_ID, string),
-	path:        string,
-	source:      string,
-	line:        int,
-	stats:       [dynamic]Ent_Stats,
+	asoc_data:     rawptr,
+	load_sprite:   proc(_: ^Asset_Loader, _: string) -> (Asset_ID, string),
+	path:          string,
+	source:        string,
+	line:          int,
+	stats:         [dynamic]Ent_Stats,
+	ent_ref_names: [dynamic]string,
 }
 
 report :: proc(loader: ^Asset_Loader, fmt_str: string, args: ..any) {
@@ -29,6 +30,7 @@ report :: proc(loader: ^Asset_Loader, fmt_str: string, args: ..any) {
 load_config :: proc(loader: ^Asset_Loader) {
 	clear(&loader.stats)
 	append(&loader.stats, Ent_Stats{})
+	loader.ent_ref_names = make([dynamic]string, 1, context.temp_allocator)
 
 	segments: [dynamic; 8]any
 	line_iter := loader.source
@@ -220,8 +222,9 @@ load_config :: proc(loader: ^Asset_Loader) {
 			}
 			a = Color(vl)
 		case Ent_Stats_Ref:
+			append(&loader.ent_ref_names, value)
 			a = {
-				name = value,
+				id = Ent_Stats_ID(len(loader.ent_ref_names) - 1),
 			}
 		case Asset_ID:
 			id, load_err := loader.load_sprite(loader, value)
@@ -250,29 +253,38 @@ load_config :: proc(loader: ^Asset_Loader) {
 	}
 
 	for &e in loader.stats {
-		post_proces_stats(e, loader.stats[:], loader.path, loader.source)
+		post_proces_stats(
+			loader,
+			e,
+			loader.stats[:],
+			loader.path,
+			loader.source,
+		)
 	}
 
 	post_proces_stats :: proc(
+		loader: ^Asset_Loader,
 		dest: any,
 		all: []Ent_Stats,
 		path, source: string,
 	) {
 		switch &v in dest {
 		case Ent_Stats_Ref:
+			name := loader.ent_ref_names[v.id]
+
 			id := 0
 			for &e, i in all {
-				if string(v.name[:]) == nm.str(&e.name) do id = i
+				if name == nm.str(&e.name) do id = i
 			}
 
-			if id == 0 && v.name != "" {
-				index := uintptr(raw_data(v.name)) - uintptr(raw_data(source))
+			if id == 0 && name != "" {
+				index := uintptr(raw_data(name)) - uintptr(raw_data(source))
 				line_idx := strings.count(source[:index], "\n")
 				log.warnf(
 					"%s:%v: the reference %s does not exist",
 					path,
 					line_idx,
-					v.name,
+					name,
 				)
 			}
 
@@ -297,7 +309,7 @@ load_config :: proc(loader: ^Asset_Loader) {
 		case rt.Type_Info_Struct:
 			for field in reflect.struct_fields_zipped(dest.id) {
 				value := reflect.struct_field_value(dest, field)
-				post_proces_stats(value, all, path, source)
+				post_proces_stats(loader, value, all, path, source)
 			}
 		case:
 			log.error("unhandled type for post processing:", dest.id)

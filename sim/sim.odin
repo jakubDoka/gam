@@ -53,8 +53,7 @@ NIL_STATS_MEM := Ent_Stats{}
 NIL_STATS := &NIL_STATS_MEM
 
 Ent_Stats_Ref :: struct #raw_union {
-	name: string,
-	id:   Ent_Stats_ID,
+	id: Ent_Stats_ID,
 }
 
 TARGETABLE :: bit_set[Ent_Type]{.Building, .Unit, .PowerSource, .Rocket}
