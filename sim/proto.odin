@@ -401,16 +401,16 @@ Encoder :: struct {
 	remining: []u8,
 }
 
-encoder_reserve :: proc(e: ^Encoder, size: int) -> []u8 {
+encoder_reserve :: proc(e: ^Encoder, size: int) -> ([]u8, bool) {
 	if encoder_is_measuring(e) {
 		_ = encoder_add_measurement(e, size)
-		return nil
+		return nil, true
 	}
 
-	if len(e.remining) < size do return nil
+	if len(e.remining) < size do return nil, false
 
 	defer e.remining = e.remining[size:]
-	return e.remining[:size]
+	return e.remining[:size], true
 }
 
 encode :: proc(d: ^Encoder, v: $T) -> bool {
@@ -467,7 +467,7 @@ encode_leb128 :: proc(d: ^Encoder, v: $T) -> bool {
 ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 	s := ents_stats_get(ents, ent.stats)
 
-	set_slot := encoder_reserve(e, ENT_SYNCED_PRESENCE_CAP / 8)
+	set_slot := encoder_reserve(e, ENT_SYNCED_PRESENCE_CAP / 8) or_return
 
 	slots: [1]int
 	presence: Field_Presence
@@ -595,7 +595,7 @@ ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
 	slot: [2]int
 	field_presence_init(&ctx.presence, slot[:])
 
-	reserved := encoder_reserve(e, size_of(slot))
+	reserved := encoder_reserve(e, size_of(slot)) or_return
 	context.user_ptr = &ctx
 	recurse(stat, visit) or_return
 	copy(reserved, mem.slice_data_cast([]u8, slot[:]))

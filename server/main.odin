@@ -10,7 +10,6 @@ import rt "base:runtime"
 import "core:container/lru"
 import "core:crypto"
 import "core:crypto/blake2s"
-import "core:fmt"
 import "core:io"
 import "core:log"
 import "core:mem"
@@ -1368,7 +1367,6 @@ recv_content :: proc(
 
 			if state.recvd > 0 {
 				tag, source := sim.split_crypt_tag(state.buf, state.recvd)
-				fmt.println(len(source))
 
 				ok := sim.decrypt(&conn.tcp.secret, tag, source)
 				if !ok {

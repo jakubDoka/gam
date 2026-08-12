@@ -165,7 +165,10 @@ marshall :: proc(
 
 	buffer_len := buffer_len if buffer_len != -1 else len(e.remining)
 
-	header_slot := encoder_reserve(e, reflect.size_of_typeid(header.id))
+	header_slot := encoder_reserve(
+		e,
+		reflect.size_of_typeid(header.id),
+	) or_return
 
 	{
 		context.user_ptr = e

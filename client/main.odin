@@ -172,6 +172,7 @@ Client :: struct {
 	asset_loader:          ^Req,
 	asset_uploader:        ^Req,
 	player_idx:            int,
+	last_app:              time.Time,
 }
 
 @(rodata)
