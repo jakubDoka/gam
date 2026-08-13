@@ -32,15 +32,29 @@ Chat_Msg :: struct {
 	content: string,
 }
 
+Server_Init_Data :: struct {
+	conn_id: int,
+}
+
 Client_Request_Header_Fields :: struct {
-	kind:           Client_Request_Type,
-	content_length: int,
+	kind:    Client_Request_Type,
+	conn_id: int,
 }
 
 Client_Request_Header :: struct {
-	using _:     Client_Request_Header_Fields,
-	inline_body: [size_of(Payload) - size_of(Client_Request_Header_Fields)]u8,
+	using _: Client_Request_Header_Fields,
+	using _: struct #raw_union {
+		inline_body:      [size_of(Payload) -
+		size_of(Client_Request_Header_Fields)]u8,
+		download_content: Client_Download_Content_Request,
+	},
 }
+
+Client_Download_Content_Request :: struct {
+	id: Asset_ID,
+}
+
+#assert(size_of(Client_Request_Header) == size_of(Payload))
 
 Client_Request_Type :: enum int {
 	Watch_Server_Info,
@@ -91,6 +105,7 @@ Client_Input_Key :: enum {
 	Left,
 	Shoot,
 	Parry,
+	Dash,
 }
 
 Client_Cmd_Type :: enum i32 {
@@ -145,8 +160,6 @@ Client_Packet :: union #no_nil {
 	Client_Cold_State,
 	Client_Content_Action,
 	Client_Map_Edit,
-	Client_Asset_Request,
-	Client_Asset_Upload,
 	Broadcast_Packet,
 }
 
@@ -215,19 +228,16 @@ Server_Cold_State :: struct {
 // TODO: the naming is lacking
 Server_Cmd_Type :: enum int {
 	Laser,
-	Token,
 	Ack,
 }
 
 Server_Cmd :: struct {
-	type:        Server_Cmd_Type,
-	pos:         Vec,
-	dir:         f32,
-	team:        Ent_Team_ID,
-	stats:       Ent_Stats_ID,
-	token:       Hash,
-	global_hash: Hash,
-	count:       int,
+	type:  Server_Cmd_Type,
+	pos:   Vec,
+	dir:   f32,
+	team:  Ent_Team_ID,
+	stats: Ent_Stats_ID,
+	count: int,
 }
 
 Server_Stats :: struct {
@@ -498,6 +508,10 @@ ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 		encode(e, ent.parry_progress) or_return
 	}
 
+	if field_presence_set(&presence, ent.dash_cooldown > 0) {
+		encode(e, ent.dash_cooldown) or_return
+	}
+
 	if field_presence_set(&presence, ent.rot != 0) {
 		encode(e, ent.rot) or_return
 	}
@@ -513,7 +527,7 @@ ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
 		encode_leb128(e, ent.counter) or_return
 	}
 
-	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 12)
+	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 13)
 	assert(presence.cursor <= ENT_SYNCED_PRESENCE_CAP)
 
 	copy(set_slot, mem.slice_data_cast([]u8, slots[:]))
@@ -563,6 +577,10 @@ ent_synced_decode :: proc(
 	}
 
 	if field_presence_get(&presence) {
+		ent.dash_cooldown = decode(d, f32) or_return
+	}
+
+	if field_presence_get(&presence) {
 		ent.rot = decode(d, f32) or_return
 	}
 
@@ -576,7 +594,7 @@ ent_synced_decode :: proc(
 		ent.counter = decode_leb128(d, int) or_return
 	}
 
-	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 12)
+	#assert(intrinsics.type_struct_field_count(Ent_Synced) == 13)
 	assert(presence.cursor <= ENT_SYNCED_PRESENCE_CAP)
 
 	ok = true

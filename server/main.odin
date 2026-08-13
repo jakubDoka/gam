@@ -9,7 +9,7 @@ import "../util/sqlite"
 import rt "base:runtime"
 import "core:container/lru"
 import "core:crypto"
-import "core:crypto/blake2s"
+import "core:fmt"
 import "core:io"
 import "core:log"
 import "core:mem"
@@ -17,7 +17,6 @@ import "core:mem/tlsf"
 import "core:nbio"
 import "core:os"
 import "core:reflect"
-import "core:slice"
 import "core:sort"
 import "core:strings"
 import "core:sync"
@@ -119,19 +118,14 @@ Connection :: struct {
 }
 
 Connection_Request_State :: struct {
-	payload:          []u8,
-	requested_assets: []sim.Asset_ID,
-	sent_asset_metas: int,
-	sent_assets:      int,
-	buf:              []u8,
-	last_info:        sim.Server_Info,
-	assets:           []sim.Asset,
-	rcvd_assets:      int,
-	written:          int,
-	recvd:            int,
-	write_file:       nbio.Handle,
-	file_hash_ctx:    blake2s.Context,
-	requester:        ^Connection,
+	payload:        []u8,
+	download:       sim.Client_Download_Content_Request,
+	last_info:      sim.Server_Info,
+	requester:      ^Connection,
+	read_file:      nbio.Handle,
+	read_file_size: int,
+	red:            int,
+	asset:          sim.Asset,
 }
 
 Game :: struct {
@@ -698,87 +692,6 @@ server_handle_packet :: proc(
 		game_set_map(game, buf)
 
 		server_bundle_refresh(server)
-	case sim.Client_Asset_Request:
-		token: sim.Hash
-		crypto.rand_bytes(token[:])
-
-		payload, _ := mem.alloc_bytes(len(packet_bytes) - 8, 8)
-		copy(payload, packet_bytes[8:])
-		defer delete(payload)
-
-		count := 0
-		config_hash_ctx: blake2s.Context
-		blake2s.init(&config_hash_ctx)
-
-		if p.inverted {
-			new_sprites := make([dynamic]sim.Asset_ID, context.temp_allocator)
-
-			asset_q, stmt := sqlite.query(
-				server.select_assets,
-				Saved_Asset,
-				sim.Asset_Type.Sprite,
-				0,
-			)
-			for asset in sqlite.query_next(&asset_q) {
-				_, found := slice.linear_search(p.assets, asset.id)
-				if found do continue
-				blake2s.update(&config_hash_ctx, asset.hash[:])
-				append(&new_sprites, asset.id)
-				count += 1
-			}
-			sqlite.reset(stmt)
-
-			body := sim.Client_Asset_Request {
-				assets = new_sprites[:],
-			}
-
-			delete(payload)
-			payload = sim.serialize_to_bytes(body)
-		} else {
-			count += len(p.assets)
-			for s in p.assets {
-				asset := server_get_asset(server, s) or_return
-				blake2s.update(&config_hash_ctx, asset.hash[:])
-			}
-		}
-
-		global_hash: sim.Hash
-		blake2s.final(&config_hash_ctx, global_hash[:])
-
-		if count > 0 {
-			lru.set(
-				&server.asset_requests,
-				token,
-				Asset_Request{payload = payload, conn = from},
-			)
-		}
-		payload = {}
-
-		server_tcp_send(
-			server,
-			from,
-			sim.Server_Cmd {
-				type = .Token,
-				token = token,
-				global_hash = global_hash,
-				count = count,
-			},
-		)
-	case sim.Client_Asset_Upload:
-		payload, _ := mem.alloc_bytes(len(packet_bytes) - 8, 8)
-		copy(payload, packet_bytes[8:])
-
-		lru.set(
-			&server.asset_requests,
-			p.token,
-			Asset_Request{payload = payload, conn = from},
-		)
-
-		server_tcp_send(
-			server,
-			from,
-			sim.Server_Cmd{type = .Ack, token = p.token},
-		)
 	case sim.Broadcast_Packet:
 		cursor := game.players.first
 		for player in player_next(&cursor) {
@@ -935,6 +848,15 @@ hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
 		}
 
 		log.debug("sending server hello")
+
+		conn_id := int(
+			(uintptr(hctx) - uintptr(raw_data(server.conn_buf))) /
+			size_of(Connection),
+		)
+		(^sim.Server_Init_Data)(raw_data(&hctx.sh.payload))^ = {
+			conn_id = conn_id,
+		}
+
 		sim.server_handshake_init(&server.pk, &hctx.xpk, &hctx.ch, &hctx.sh)
 		nbio.send_poly2(
 			hctx.sock,
@@ -1072,6 +994,30 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 
 		request := (^sim.Client_Request_Header)(&conn.ch.payload)
 
+		REQUIRES_AUTH :: ~bit_set[sim.Client_Request_Type] {
+			.Play,
+			.Watch_Server_Info,
+		}
+
+		if request.kind in REQUIRES_AUTH {
+			if request.conn_id >= len(server.conn_buf) {
+				log.warn("oob request conn id")
+				return
+			}
+
+			other := &server.conn_buf[request.conn_id]
+			if other.ch.id == {} {
+				log.warn("trying to referece invalid connection")
+				return
+			}
+
+			if crypto.compare_constant_time(other.ch.id[:], conn.ch.id[:]) ==
+			   0 {
+				log.warn("identity mismatch for the request")
+				return
+			}
+		}
+
 		Handler_Proc :: proc(
 			_: ^Server,
 			_: ^Connection,
@@ -1079,13 +1025,13 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 		) -> bool
 
 		handlers := [sim.Client_Request_Type]Handler_Proc {
-			.Download_Content  = send_content,
+			.Download_Content  = send_asset,
 			.Play              = boot_player,
 			.Watch_Server_Info = stream_server_info,
-			.Upload_Content    = recv_content,
+			.Upload_Content    = nil,
 		}
 
-		if len(handlers) < int(request.kind) {
+		if len(handlers) <= int(request.kind) {
 			log.warn(
 				"received out of range Client_Request_Type:",
 				request.kind,
@@ -1139,86 +1085,21 @@ boot_player :: proc(
 	return true
 }
 
-send_content :: proc(
+send_asset :: proc(
 	server: ^Server,
 	conn: ^Connection,
 	request: ^sim.Client_Request_Header,
 ) -> bool {
-	conn.hctx.tcp.timeout = 5 * time.Second
+	asset := server_get_asset(server, request.download_content.id) or_return
+	fmt.println(asset)
+	conn.request_state.asset = asset
+	assert(asset != {})
 
-	token: sim.Hash
-	copy(token[:], request.inline_body[:])
+	path := asset_path(&asset)
 
-	ass_req := server.asset_requests.entries[token] or_return
-	// TODO: ratelimit this
+	conn.tcp.send_buf = make([]u8, sim.DONWLOAD_BUF_SIZE)
 
-	payload := ass_req.value.payload
-	ass_req.value.payload = {}
-
-	conn.request_state.payload = payload
-
-	body := sim.unmarshall_as(sim.Client_Asset_Request, payload) or_return
-	conn.request_state.requested_assets = body.assets
-	conn.request_state.buf = make([]u8, 4096)
-
-	do_progress(conn)
-
-	return true
-
-	do_progress :: proc(conn: ^Connection) -> bool {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-
-		assert(len(state.requested_assets) != 0)
-
-		e := sim.Encoder{state.buf}
-
-		log.debug("asset fetch doing progress")
-
-		for s in state.requested_assets[state.sent_asset_metas:] {
-			asset, ok := server_get_asset(server, s)
-			if !ok {
-				log.warn("requested unknown asset:", s)
-				return false
-			}
-
-			sim.encode(&e, asset.base) or_break
-			state.sent_asset_metas += 1
-		}
-
-		buff_written := len(state.buf) - len(e.remining)
-
-		if buff_written != 0 {
-			log.debug("sending meta")
-			nbio.send_poly(
-				conn.hctx.sock,
-				{state.buf[:buff_written]},
-				conn,
-				on_meta_sent,
-				all = true,
-				l = server.hr.l,
-			)
-			return true
-		}
-
-		if state.sent_assets < len(state.requested_assets) {
-			log.debug("sending sprite")
-
-			s := state.requested_assets[state.sent_assets]
-			state.sent_assets += 1
-
-			asset, ok := server_get_asset(server, s)
-			assert(ok)
-
-			path := asset_path(&asset)
-
-			nbio.open_poly(path, conn, on_open, l = server.hr.l)
-
-			return true
-		}
-
-		return false
-	}
+	nbio.open_poly(path, conn, on_open, l = server.hr.l)
 
 	on_open :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
@@ -1233,231 +1114,118 @@ send_content :: proc(
 			return
 		}
 
-		nbio.sendfile_poly(
-			conn.hctx.tcp.sock,
-			op.open.handle,
-			conn,
-			on_file_sent,
-			l = op.l,
-		)
-
-		state.write_file = op.open.handle
+		nbio.stat_poly(op.open.handle, conn, on_stat, l = op.l)
+		state.read_file = op.open.handle
 
 		kill = false
 	}
 
-	on_file_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
+	on_stat :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-		defer nbio.close(op.sendfile.file, l = op.l)
-
-		if op.sendfile.err != nil {
-			log.error("failed to send asset file:", op.sendfile.err)
-			return
-		}
-
-		kill = !do_progress(conn)
-	}
-
-	on_meta_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+		state := &conn.request_state
 
 		kill := true
 		defer if kill do conn.hctx->on_fail(server)
 
-		if op.send.err != nil {
-			log.error("fialed to send meta chunk:", op.send.err)
+		if op.stat.err != nil {
+			log.error("failed to stat:", op.stat.err)
 			return
 		}
 
+		state.read_file_size = int(op.stat.size)
+
 		kill = !do_progress(conn)
 	}
-}
-
-recv_content :: proc(
-	server: ^Server,
-	conn: ^Connection,
-	request: ^sim.Client_Request_Header,
-) -> bool {
-	conn.hctx.tcp.timeout = 5 * time.Second
-
-	token: sim.Hash
-	copy(token[:], request.inline_body[:])
-
-	ass_req := server.asset_requests.entries[token] or_return
-	// TODO: ratelimit this
-
-	payload := ass_req.value.payload
-	ass_req.value.payload = {}
-
-	conn.request_state.payload = payload
-	body := sim.unmarshall_as(sim.Client_Asset_Upload, payload) or_return
-	conn.request_state.assets = body.metas
-	conn.request_state.buf = make([]u8, sim.UPLOAD_BUFFER_SIZE)
-	conn.request_state.requester = ass_req.value.conn
-
-	log.debug("starting content download:", body.metas)
-
-	do_progress(conn)
-
-	return true
 
 	do_progress :: proc(conn: ^Connection) -> bool {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-
 		state := &conn.request_state
 
-		for state.rcvd_assets < len(state.assets) {
-			curr := &state.assets[state.rcvd_assets]
-
-			remining := curr.size - state.written
-
-			if remining == 0 {
-				hash: sim.Hash
-				blake2s.final(&state.file_hash_ctx, hash[:])
-
-				if hash != curr.hash {
-					log.error(
-						"got corrupted file, considering we" +
-						" are encrypting, this is a bug",
-					)
-					return false
-				}
-
-				_, sares := sqlite.exec(
-					server.save_asset,
-					sim.hash_prefix(&curr.hash),
-					nm.str(&curr.name),
-					curr.hash,
-					curr.size,
-					curr.type,
-				)
-				sqlite.assert_ok(server.save_asset, sares)
-
-				if state.write_file != 0 {
-					nbio.close(state.write_file, l = server.hr.l)
-				}
-				state.write_file = 0
-				state.written = 0
-				state.rcvd_assets += 1
-
-				server_tcp_send(
-					server,
-					state.requester,
-					sim.Server_Event{type = .File_Uploaded, hash = curr.hash},
-				)
-
-				continue
-			}
-
-			if state.write_file == 0 {
-				blake2s.init(&state.file_hash_ctx)
-				path := asset_path(curr)
-				nbio.open_poly(
-					path,
-					conn,
-					on_open,
-					{.Write, .Create, .Trunc},
-					l = server.hr.l,
-				)
-				return true
-			}
-
-			if state.recvd > 0 {
-				tag, source := sim.split_crypt_tag(state.buf, state.recvd)
-
-				ok := sim.decrypt(&conn.tcp.secret, tag, source)
-				if !ok {
-					log.warn(
-						"received corrupted file chunk, deleting the file:",
-						source,
-					)
-					err := os.remove(asset_path(curr))
-					if err != nil {
-						log.error("failed to delete the corrupt file")
-					}
-					return false
-				}
-
-				blake2s.update(&state.file_hash_ctx, source)
-
-				nbio.write_poly(
-					state.write_file,
-					state.written,
-					source,
-					conn,
-					on_write,
-					all = true,
-					l = server.hr.l,
-				)
-				return true
-			}
-
-			nbio.recv_poly(
-				conn.tcp.sock,
-				{state.buf[:min(remining + size_of(sim.Tag), len(state.buf))]},
+		if state.asset != {} {
+			buf := sim.tcp_connection_send_buffer(conn)
+			copy(buf, mem.ptr_to_bytes(&state.asset))
+			sim.tcp_connection_send_filled(
 				conn,
-				on_recv,
+				size_of(state.asset),
+				first_on_sent,
+				l = server.hr.l,
+			)
+			state.asset = {}
+
+			return true
+		}
+
+		if state.red < state.read_file_size {
+			buf := sim.tcp_connection_send_buffer(conn)
+			to_read := min(state.read_file_size - state.red, len(buf))
+			nbio.read_poly(
+				state.read_file,
+				state.red,
+				buf[:to_read],
+				conn,
+				on_read,
 				all = true,
 				l = server.hr.l,
-				timeout = conn.tcp.timeout,
 			)
+
 			return true
 		}
 
 		return false
 	}
 
-	on_open :: proc(op: ^nbio.Operation, conn: ^Connection) {
+	first_on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-		defer delete(op.open.path)
-
-		if op.open.err != nil {
-			log.warn("failed to create", op.open.path, ":", op.open.err)
-			return
-		}
-
-		conn.request_state.write_file = op.open.handle
-		kill = !do_progress(conn)
-	}
-
-	on_recv :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+		state := &conn.request_state
+		conn.tcp.sender = nil
 
 		kill := true
 		defer if kill do conn.hctx->on_fail(server)
 
-		if op.recv.err != nil {
-			log.warn("failed to recv from client:", op.recv.err)
+		if op.send.err != nil {
+			log.error("failed to send initial packet:", op.send.err)
 			return
 		}
 
-		_, source := sim.split_crypt_tag(op.recv.bufs[0])
-
-		conn.request_state.recvd = len(source)
 		kill = !do_progress(conn)
 	}
 
-	on_write :: proc(op: ^nbio.Operation, conn: ^Connection) {
+	on_read :: proc(op: ^nbio.Operation, conn: ^Connection) {
 		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+		state := &conn.request_state
 
 		kill := true
 		defer if kill do conn.hctx->on_fail(server)
 
-		if op.write.err != nil {
-			log.warn("failed to write to disk:", op.write.err)
+		if op.read.err != nil {
+			log.error("failed to stat:", op.read.err)
 			return
 		}
 
-		conn.request_state.recvd = 0
-		conn.request_state.written += len(op.write.buf)
+		sim.tcp_connection_send_filled(conn, op.read.read, on_sent, l = op.l)
+
+		kill = false
+	}
+
+	on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
+		server := (^Server)(conn.hctx.tcp.host.asoc_data)
+		state := &conn.request_state
+		conn.tcp.sender = nil
+
+		kill := true
+		defer if kill do conn.hctx->on_fail(server)
+
+		if op.send.err != nil {
+			log.error("failed to send chunk:", op.send.err)
+			return
+		}
+
+		state.red += op.send.sent
+
 		kill = !do_progress(conn)
 	}
+
+	return true
 }
 
 asset_path :: proc(asset: ^sim.Asset) -> string {
@@ -1476,7 +1244,11 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 	return path
 }
 
-server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
+server_on_tcp_kill :: proc(
+	conn: ^sim.TCP_Connection,
+	l: ^nbio.Event_Loop,
+	natural: bool,
+) {
 	server := (^Server)(conn.host.asoc_data)
 	conn := (^Connection)(conn)
 	game := conn.game
@@ -1496,9 +1268,8 @@ server_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
 	}
 
 	delete(conn.request_state.payload)
-	delete(conn.request_state.buf)
-	if conn.request_state.write_file != 0 {
-		nbio.close(conn.request_state.write_file, l = l)
+	if conn.request_state.read_file != 0 {
+		nbio.close(conn.request_state.read_file, l = l)
 	}
 
 	log.debug("killed the connection")
@@ -1797,7 +1568,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			buf: [4096]u8
 			for m in DEFAULT_MAPS {
 				e := sim.Encoder{buf[:]}
-				sim.map_text_to_bin(m.spec, &e, 1)
+				sim.map_text_to_bin(m.spec, &e, "", "")
 				final := buf[:len(buf) - len(e.remining)]
 
 				full_path, fperr := os.join_path(

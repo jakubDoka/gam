@@ -2,11 +2,15 @@ package sim
 
 import "base:intrinsics"
 import rt "base:runtime"
+import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
-import str "core:strings"
+import "core:net"
+import "core:reflect"
+import "core:strconv"
+import "core:strings"
 import "core:testing"
 
 FILE_ALIGNMENT :: size_of(int)
@@ -17,7 +21,8 @@ TILE_RECIPRO :: 1.0 / TILE_SIZE
 Map_Pos :: [2]int
 
 Ent_Team :: struct {
-	color: Color,
+	color:      Color,
+	selectable: bool,
 }
 
 Map_Ent :: struct {
@@ -38,31 +43,186 @@ Map_Sprite_Kind :: enum {
 	Core,
 }
 
+Asset_Loc_Scheme :: enum int {
+	gamps,
+	https,
+}
+
+Asset_Loc :: struct {
+	scheme:    Asset_Loc_Scheme,
+	host_endp: net.Endpoint,
+	path:      string,
+	id:        Asset_ID,
+	error:     string,
+}
+
+// NOTE: this will optionally block on a DNS resolution
+asset_loc_parse :: proc(str: string) -> (res: Asset_Loc, ok: bool) {
+	str := str
+
+	res.error = "missing '://'"
+	scheme_str := strings.split_iterator(&str, "://") or_return
+
+	res.error = "unsupported scheme, only supports 'gamps' and 'https'"
+	res.scheme = reflect.enum_from_name(Asset_Loc_Scheme, scheme_str) or_return
+
+	host_str: string
+	has_path := strings.contains(str, "/")
+	if has_path {
+		host_str = strings.split_iterator(&str, "/") or_return
+	} else {
+		// NOTE: this also handles the case where there is no '#'
+		host_str, _ = strings.split_iterator(&str, "#")
+	}
+
+	res.error = "dns resolution failed"
+	ipv4, ipv6, err := net.resolve(host_str)
+	if err != nil {
+		log.warn("failed to resolve dns:", err)
+		return
+	}
+
+	res.host_endp = ipv4
+	if ipv4 == {} {
+		res.host_endp = ipv6
+	}
+
+	if res.host_endp.port == 0 {
+		res.host_endp.port = GAME_PORT
+	}
+
+	if has_path {
+		res.path, _ = strings.split_iterator(&str, "#")
+	}
+
+	if str != "" {
+		res.error = "invalid asset ID"
+		vl := strconv.parse_uint(str, 16) or_return
+
+		res.error = "asset id is too big, it can only be up to 8 hex chars"
+		if vl > uint(~u32(0)) do return
+
+		res.id = Asset_ID(vl)
+	}
+
+	res.error = ""
+	ok = true
+	return
+}
+
+@(test)
+asset_loc_sanity :: proc(t: ^testing.T) {
+	Case :: struct {
+		input:          string,
+		using expected: Asset_Loc,
+		ok:             bool,
+	}
+
+	cases := [?]Case {
+		{input = ""},
+		{input = "inv://"},
+		{input = "gamps://"},
+		{
+			input = "gamps://127.0.0.1:1234",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Loopback, 1234},
+		},
+		{
+			input = "gamps://depell.mlokis.dev",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Address{172, 67, 207, 210}, 6012},
+		},
+		{
+			input = "gamps://depell.mlokis.dev:1111/foob/bar",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Address{172, 67, 207, 210}, 1111},
+			path = "foob/bar",
+		},
+		{
+			input = "gamps://depell.mlokis.dev:1111/foob/bar#66666666",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Address{172, 67, 207, 210}, 1111},
+			path = "foob/bar",
+			id = 0x66666666,
+		},
+		{
+			input = "gamps://depell.mlokis.dev:1111/#66666666",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Address{172, 67, 207, 210}, 1111},
+			id = 0x66666666,
+		},
+		{
+			input = "gamps://depell.mlokis.dev:1111#66666666",
+			ok = true,
+			scheme = .gamps,
+			host_endp = {net.IP4_Address{172, 67, 207, 210}, 1111},
+			id = 0x66666666,
+		},
+		{input = "gamps://depell.mlokis.dev:1111111#66666666"},
+		{input = "gamps://depell.mlokis.dev:1111#66666666gh"},
+		{input = "gamps://depell.mlokis.dev:1111#66666666ab"},
+	}
+
+	for cs in cases {
+		res, ok := asset_loc_parse(cs.input)
+		testing.expect_value(t, cs.ok, ok)
+		if ok {
+			if res != cs.expected {
+				// NOTE: somehow the adress changes each run, but it oscilates
+				res, ok = asset_loc_parse(cs.input)
+			}
+			testing.expect_value(t, res, cs.expected)
+		} else {
+			testing.expect(t, res.error != "")
+			log.info(res.error)
+		}
+	}
+}
+
+Asset_Loc_Entry :: struct {
+	id:  Asset_ID,
+	loc: string,
+}
+
 Map :: struct {
-	version:  int,
-	width:    int,
-	height:   int,
-	sprites:  [Map_Sprite_Kind]Asset_ID,
-	tiles:    []int,
-	ents:     []Map_Ent,
-	chargers: []Map_Charger,
-	teams:    []Ent_Team,
+	version:    int,
+	width:      int,
+	height:     int,
+	sprites:    [Map_Sprite_Kind]Asset_ID,
+	tiles:      []int,
+	ents:       []Map_Ent,
+	chargers:   []Map_Charger,
+	teams:      []Ent_Team,
+	asoc_stats: []Ent_Stats,
+	asset_locs: []Asset_Loc_Entry,
 }
 
 map_is_initialized :: proc(mapa: ^Map) -> bool {
 	return mapa.width * mapa.height != 0
 }
 
-map_text_to_bin :: proc(text: string, e: ^Encoder, core_stat: Ent_Stats_ID) {
+map_text_to_bin :: proc(
+	text: string,
+	e: ^Encoder,
+	core_stat: string,
+	stats: string,
+) {
 	context.allocator = context.temp_allocator
 
-	text := str.trim(text, "\n")
+	loader: Asset_Loader
+
+	text := strings.trim(text, "\n")
 
 	mapa: Map
 
-	mapa.width = str.index_byte(text, '\n')
-	mapa.height = str.count(text, "\n") + 1
-	charger_count := str.count(text, "a")
+	mapa.width = strings.index_byte(text, '\n')
+	mapa.height = strings.count(text, "\n") + 1
+	charger_count := strings.count(text, "a")
 
 	core_count := 0
 	for c in text do if '0' <= c && c <= '9' {
@@ -76,7 +236,7 @@ map_text_to_bin :: proc(text: string, e: ^Encoder, core_stat: Ent_Stats_ID) {
 	mapa.chargers = make([]Map_Charger, charger_count)
 
 	y, charger_idx: int
-	for row in str.split_iterator(&text, "\n") {
+	for row in strings.split_iterator(&text, "\n") {
 		x: int
 		for c in row {
 			switch c {
@@ -89,9 +249,9 @@ map_text_to_bin :: proc(text: string, e: ^Encoder, core_stat: Ent_Stats_ID) {
 				mapa.ents[idx] = {
 					pos  = {x, y},
 					team = idx,
-					stat = core_stat,
+					stat = 1,
 				}
-				mapa.teams[idx] = {Color(rand.uint32() | 0x000000FF)}
+				mapa.teams[idx] = {Color(rand.uint32() | 0x000000FF), true}
 			case 'a':
 				mapa.chargers[charger_idx] = {
 					pos    = {x, y},

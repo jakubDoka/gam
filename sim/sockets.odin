@@ -14,6 +14,8 @@ PING_INTERVAL :: 400 * time.Millisecond
 BUFFER_CHUNK_SIZE :: (1 << 16) - size_of(int) * 4
 LATENCY :: #config(LATENCY, 0)
 
+DONWLOAD_BUF_SIZE :: 4096 * 4
+
 UDP_Connection :: struct {
 	sock:     nbio.UDP_Socket,
 	send_buf: Packet_Buffer,
@@ -90,10 +92,14 @@ udp_connection_boot :: proc(
 	}
 }
 
-udp_connection_kill :: proc(conn: ^UDP_Connection, l: ^nbio.Event_Loop = nil) {
+udp_connection_kill :: proc(
+	conn: ^UDP_Connection,
+	l: ^nbio.Event_Loop = nil,
+	natural := false,
+) {
 	hot.sip.io_remove(conn.receiver)
 	if conn.sock != 0 do nbio.close(conn.sock, l = l)
-	if conn.host.on_kill != nil do conn.host.on_kill(conn, l)
+	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, natural)
 	conn.sock = 0
 	conn.receiver = nil
 }
@@ -231,11 +237,19 @@ buffer_chunk_drop :: proc(buf: ^Buffer_Chunk) {
 }
 
 Host :: struct($T: typeid) {
-	asoc_data: rawptr,
-	on_packet: proc(_: ^T, _: ^nbio.Event_Loop, _: []u8) -> bool,
-	on_kill:   proc(_: ^T, _: ^nbio.Event_Loop),
-	decrypt:   proc(_: ^T, _: nbio.Endpoint, _: []u8) -> ([]u8, Decrypt_Error),
-	on_ping:   proc(_: ^T, id: Ping) -> (Ping_Tag, bool),
+	asoc_data:       rawptr,
+	on_packet:       proc(_: ^T, _: ^nbio.Event_Loop, _: []u8) -> bool,
+	on_kill:         proc(_: ^T, _: ^nbio.Event_Loop, natural: bool),
+	decrypt:         proc(
+		_: ^T,
+		_: nbio.Endpoint,
+		_: []u8,
+	) -> (
+		[]u8,
+		Decrypt_Error,
+	),
+	on_ping:         proc(_: ^T, id: Ping) -> (Ping_Tag, bool),
+	on_buffer_flush: proc(_: ^T, _: ^nbio.Event_Loop, free_size: int),
 }
 
 TCP_Connection :: struct {
@@ -259,7 +273,8 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	assert(conn.sock != 0)
 
 	kill := true
-	defer if kill do tcp_connection_kill(conn, op.l)
+	natural := false
+	defer if kill do tcp_connection_kill(conn, op.l, natural)
 
 	if op.recv.err != nil {
 		log.error("encoungered connection error:", op.recv.err)
@@ -267,7 +282,7 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	}
 
 	if op.recv.received == 0 {
-		log.error("unexpected eof")
+		natural = true
 		return
 	}
 
@@ -359,6 +374,31 @@ tcp_connection_send_no_delay :: proc(
 	return true
 }
 
+tcp_connection_send_buffer :: proc(conn: ^TCP_Connection) -> []u8 {
+	return conn.send_buf[size_of(Crypt_Header):]
+}
+
+tcp_connection_send_filled :: proc(
+	conn: ^TCP_Connection,
+	size: int,
+	on_sent: proc(op: ^nbio.Operation, sock: ^TCP_Connection),
+	l: ^nbio.Event_Loop = nil,
+) {
+	len := size + size_of(Crypt_Header)
+
+	end_crypt_packet(&conn.secret, conn.send_buf[:len], {})
+
+	conn.sender = nbio.send_poly(
+		conn.sock,
+		{conn.send_buf[:len]},
+		conn,
+		on_sent,
+		all = true,
+		timeout = conn.timeout,
+		l = l,
+	)
+}
+
 begin_crypt_packet :: proc(buf: []u8) -> (f: []u8, e: Encoder, ok: bool) {
 	if len(buf) < size_of(Crypt_Header) do return
 	return buf, Encoder{buf[size_of(Crypt_Header):]}, true
@@ -397,7 +437,11 @@ tcp_connection_boot :: proc(
 	)
 }
 
-tcp_connection_kill :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop = nil) {
+tcp_connection_kill :: proc(
+	conn: ^TCP_Connection,
+	l: ^nbio.Event_Loop = nil,
+	natural := false,
+) {
 	assert(!conn.handling_packet)
 	hot.sip.io_remove(conn.reader)
 	hot.sip.io_remove(conn.sender)
@@ -407,7 +451,7 @@ tcp_connection_kill :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop = nil) {
 	conn^ = {
 		host = conn.host,
 	}
-	if conn.host.on_kill != nil do conn.host.on_kill(conn, l)
+	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, true)
 }
 
 tcp_connection_ensure_sending :: proc(
@@ -442,6 +486,14 @@ tcp_connection_on_send :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 
 	copy(conn.send_buf, conn.send_buf[op.send.sent:conn.buffered])
 	conn.buffered -= op.send.sent
+
+	if conn.host.on_buffer_flush != nil {
+		conn.host.on_buffer_flush(
+			conn,
+			op.l,
+			len(conn.send_buf) - conn.buffered,
+		)
+	}
 
 	tcp_connection_ensure_sending(conn, op.l)
 }

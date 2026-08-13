@@ -173,6 +173,8 @@ Client :: struct {
 	asset_uploader:        ^Req,
 	player_idx:            int,
 	last_app:              time.Time,
+	assets_to_fetch:       [dynamic]sim.Asset_ID,
+	inflight_assets:       int,
 }
 
 @(rodata)
@@ -444,6 +446,7 @@ client_compute_input :: proc(client: ^Client) {
 
 	if is_key_down(ui, .Shoot) do input.keys |= {.Shoot}
 	if is_key_down(ui, .Parry) do input.keys |= {.Parry}
+	if is_key_down(ui, .Dash) do input.keys |= {.Dash}
 
 	input.relative_mouse_pos =
 		mouse_pos - sim.ents_get(&client.ents, client.ent).pos
@@ -653,6 +656,7 @@ client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
 	client.content_editor.upload_arena = arna.init_from_buffer(
 		make([]u8, 1 << 14),
 	)
+	client.assets_to_fetch.allocator = hr.init_allocator
 
 	client.input_pool = make([]Deffered_Client_Input, 64)
 	for &ci in client.input_pool {
@@ -1209,6 +1213,19 @@ client_update :: proc(client: ^Client) {
 				coff * 360,
 				i32(coff * 100),
 				color,
+			)
+		}
+
+		if e.dash_cooldown >= 0 {
+			coff := e.dash_cooldown / s.dash.cooldonw
+			rl.DrawRing(
+				pos,
+				sradius + 20,
+				sradius + 25,
+				0,
+				coff * 360,
+				i32(coff * 100),
+				rl.YELLOW,
 			)
 		}
 	}

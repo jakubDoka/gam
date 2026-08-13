@@ -150,6 +150,7 @@ UI_Reactor :: struct {
 	sheet:                   packer.Sheet,
 	orui_ctx:                orui.Context,
 	has_dirty_config:        bool,
+	conn_id:                 int,
 	control_selection_pivot: sim.Vec,
 	events:                  [dynamic]UI_Event,
 	last_key_bind:           Key_Bind,
@@ -201,6 +202,7 @@ Key_Bind :: enum {
 	Right,
 	Shoot,
 	Parry,
+	Dash,
 	Map_Place,
 	Map_Erase,
 	Build_Select_Start,
@@ -236,6 +238,7 @@ BIND_TO_KEY := [Key_Bind]Key {
 	.Right               = .D,
 	.Shoot               = Mb.LEFT,
 	.Parry               = Mb.RIGHT,
+	.Dash                = .LEFT_SHIFT,
 	.Map_Place           = Mb.LEFT,
 	.Map_Erase           = Mb.RIGHT,
 	.Build_Select_Start  = Mb.LEFT,
@@ -363,7 +366,11 @@ fetch_server_info :: proc(
 		return true
 	}
 
-	on_kill :: proc(ctx: ^UI_Server_Info_Listener, l: ^nbio.Event_Loop) {
+	on_kill :: proc(
+		ctx: ^UI_Server_Info_Listener,
+		l: ^nbio.Event_Loop,
+		natural: bool,
+	) {
 		ctx.state = .Disconnected
 		if ctx.gc do free(ctx)
 	}
@@ -1281,20 +1288,6 @@ ui_game_hud :: proc(client: ^Client) {
 		},
 	)
 
-	if client.asset_loader != nil {
-		ui_label(
-			id("asset-load-inicator"),
-			{
-				label = fmt.tprint(
-					"loading:",
-					len(client.asset_loader.metas) -
-					client.asset_loader.files_recvd,
-				),
-				height = orui.fixed(ROW_HEIGHT),
-			},
-		)
-	}
-
 	{box(
 			id("hud-spacer"),
 			{width = orui.grow(), height = orui.fixed(ROW_HEIGHT)},
@@ -1549,10 +1542,7 @@ fetch_all_assets :: proc(client: ^Client) {
 	}
 	sqlite.reset(stmt)
 
-	tcp_send(
-		client,
-		sim.Client_Asset_Request{inverted = true, assets = present_assets[:]},
-	)
+	panic("TODO")
 }
 
 ui_is_interacting :: proc(

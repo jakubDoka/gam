@@ -610,13 +610,17 @@ ui_file_upload :: proc(client: ^Client) {
 			token: sim.Hash
 			crypto.rand_bytes(token[:])
 
-			tcp_send(
-				client,
-				sim.Client_Asset_Upload {
-					token = token,
-					metas = ctx.dropped_assets.base[:len(ctx.dropped_assets)],
-				},
-			)
+			when false {
+				tcp_send(
+					client,
+					sim.Client_Asset_Upload {
+						token = token,
+						metas = ctx.dropped_assets.base[:len(
+							ctx.dropped_assets,
+						)],
+					},
+				)
+			}
 		}
 
 		if ui_button(

@@ -144,6 +144,8 @@ Ent_Stats :: struct {
 	},
 }
 
+#assert(size_of(Ent_Stats) <= 0x160)
+
 add_asset :: proc(buf: ^[dynamic]Asset_ID, sprite: Asset_ID) -> Asset_Idx {
 	for s, i in buf {
 		if s == sprite {
@@ -344,6 +346,7 @@ Ent_Synced :: struct {
 	age:             f32,
 	reload:          f32,
 	parry_progress:  f32,
+	dash_cooldown:   f32,
 	rot:             f32,
 	team:            Ent_Team_ID,
 	energy_consumed: f32,
@@ -473,7 +476,9 @@ ents_integrate_input :: proc(
 
 	s := ents_stats_get(ents, e.stats)
 
-	e.vel += input_movement_dir(input.keys) * s.speed * ents.delta
+	dir := input_movement_dir(input.keys)
+
+	e.vel += dir * s.speed * ents.delta
 
 	e.objective.pos = e.pos + input.relative_mouse_pos
 
@@ -498,6 +503,11 @@ ents_integrate_input :: proc(
 		rtt,
 		&input.next_net_id,
 	)
+
+	if .Dash in input.keys && e.dash_cooldown <= 0 {
+		e.dash_cooldown = s.dash.cooldonw
+		e.vel += dir * s.dash.impact
+	}
 }
 
 ents_attack_low :: proc(
@@ -603,6 +613,7 @@ ents_parry :: proc(
 
 	if e.parried {
 		e.parried = false
+		e.dash_cooldown = 0
 		ents_attack_low(ents, e.id, s.parry.attack, pos, next_net_id)
 	}
 }
@@ -1042,6 +1053,7 @@ ents_update :: proc(ents: ^Ents) {
 		if abs(e.vel.x) + abs(e.vel.y) < 0.1 do e.vel = {}
 		e.age += ents.delta
 		e.reload -= ents.delta
+		e.dash_cooldown -= ents.delta
 		e.parry_progress -= ents.delta
 		e.parent_net_id = ents_get(ents, e.parent).net_id
 		e.rot += ents.delta * s.spin

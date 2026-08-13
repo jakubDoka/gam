@@ -7,9 +7,8 @@ import "../util/nm"
 import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
-import "core:crypto/blake2s"
+import "core:fmt"
 import "core:log"
-import "core:mem"
 import "core:nbio"
 import "core:net"
 import "core:os"
@@ -187,12 +186,10 @@ client_handle_packet :: proc(
 		mapa, _ := sim.map_load(client.map_buf)
 		client.ents.mapa = mapa
 
-		to_fetch := client_find_missing_assets(
+		client_fetch_missig_assets(
 			client,
 			slice.enumerated_array(&client.ents.sprites),
 		)
-
-		tcp_send(client, sim.Client_Asset_Request{assets = to_fetch[:]})
 	case sim.Server_Cold_State:
 		clear(&client.players)
 
@@ -247,8 +244,7 @@ client_handle_packet :: proc(
 			}
 		}
 
-		to_fetch := client_find_missing_assets(client, assets[:])
-		tcp_send(client, sim.Client_Asset_Request{assets = to_fetch[:]})
+		client_fetch_missig_assets(client, assets[:])
 	case sim.Server_Cmd:
 		switch p.type {
 		case .Laser:
@@ -262,10 +258,8 @@ client_handle_packet :: proc(
 			l.team = p.team
 			l.stats = p.stats
 			l.lifetime = ls.lifetime
-		case .Token:
-			fetch_assets(client, &p)
 		case .Ack:
-			upload_assets(client, &p)
+			panic("Asset Upload")
 		}
 	case sim.Broadcast_Packet:
 		switch &p in p {
@@ -293,44 +287,32 @@ client_handle_packet :: proc(
 		}
 	}
 
-	client_find_missing_assets :: proc(
-		client: ^Client,
-		set: []sim.Asset_ID,
-	) -> []sim.Asset_ID {
-		to_fetch := make(
-			[dynamic]sim.Asset_ID,
-			0,
-			len(set),
-			context.temp_allocator,
-		)
+	client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 		for &s in set {
 			if s == 0 do continue
 
 			name := asset_path(client, s)
 
 			if _, err := os.stat(name, context.temp_allocator); err != nil {
-				append(&to_fetch, s)
+				append(&client.assets_to_fetch, s)
 			}
 		}
-
-		return to_fetch[:]
+		ensure_fetch_assets(client)
 	}
 
 	return
 }
 
 Req :: struct {
-	using hctx:       Handshake,
-	metas:            []sim.Asset,
-	paths:            []string,
-	buf:              []u8,
-	files_recvd:      int,
-	files_uploaded:   int,
-	red_portion:      int,
-	buffered_portion: int,
-	read_file:        nbio.Handle,
-	global_hash:      sim.Hash,
-	pk:               sim.Private_Key,
+	using hctx:     Handshake,
+	asset:          sim.Asset_ID,
+	buf:            []u8,
+	files_recvd:    int,
+	files_uploaded: int,
+	written:        int,
+	asset_meta:     sim.Asset,
+	out_file:       nbio.Handle,
+	pk:             sim.Private_Key,
 }
 
 #assert(offset_of(Req, hctx) == 0)
@@ -347,19 +329,22 @@ req_connect :: proc(
 	req.on_fail = on_fail
 	req.get_pk = get_pk
 	req.on_boot = on_boot
-	client.asset_loader = req
 
 	hctx_connect(req, client.hctx.server_endpoint, client.l)
 
 	return req, (^sim.Client_Request_Header)(&req.ch.payload)
 
 	get_pk :: proc(req: ^Req) -> sim.Private_Key {
-		return req.pk
+		client := (^Client)(req.host.asoc_data)
+		prof := get_selected_user(client)
+		return prof.pk
 	}
 
 	on_fail :: proc(req: ^Req, reason: string) {
 		client := (^Client)(req.host.asoc_data)
+		nested := req.tcp.host.on_kill != nil
 		sim.tcp_connection_kill(&req.tcp, l = client.l)
+		if nested do return
 
 		if len(reason) != 0 {
 			log.error(reason)
@@ -368,267 +353,138 @@ req_connect :: proc(
 		if client.asset_loader == req do client.asset_loader = nil
 		if client.asset_uploader == req do client.asset_uploader = nil
 
-		delete(req.metas)
+		if req.out_file != 0 {
+			nbio.close(req.out_file, l = client.l)
+		}
+
 		delete(req.buf)
 
 		free(req)
 	}
 }
 
-upload_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
-	ctx := &client.content_editor
+ensure_fetch_assets :: proc(client: ^Client) {
+	MAX_INFLIGHT_ASSETS :: 5
 
-	if len(ctx.dropped_assets) == 0 {
-		log.warn("we are trying to upload assets but nothing is dropped")
-		return
-	}
+	for client.inflight_assets < MAX_INFLIGHT_ASSETS {
+		next, ok := pop_safe(&client.assets_to_fetch)
+		if !ok {
+			refresh_sheet(client)
+			return
+		}
 
-	req, req_slot := req_connect(client, on_boot)
+		fetch_asset(client, {id = next}, on_kill)
+		client.inflight_assets += 1
 
-	req_slot.kind = .Upload_Content
-	copy(req_slot.inline_body[:], p.token[:])
-	req.metas = slice.clone(ctx.dropped_assets.base[:len(ctx.dropped_assets)])
-	req.paths = ctx.dropped_assets.path[:len(ctx.dropped_assets)]
-	req.buf = make([]u8, sim.UPLOAD_BUFFER_SIZE)
+		on_kill :: proc(req: ^Req, l: ^nbio.Event_Loop, natural: bool) {
+			assert(natural)
 
-	client.asset_uploader = req
+			client := (^Client)(req.host.asoc_data)
+			client.inflight_assets -= 1
+			req.tcp.host.on_kill = nil
+			req->on_fail("")
 
-	on_boot :: proc(req: ^Req, l: ^nbio.Event_Loop) {
-		do_progress(req)
-	}
+			fmt.println(req.asset_meta)
 
-	do_progress :: proc(req: ^Req) -> bool {
-		client := (^Client)(req.host.asoc_data)
-
-		for req.files_uploaded < len(req.metas) {
-			path := req.paths[req.files_uploaded]
-			curr := req.metas[req.files_uploaded]
-
-			remining := curr.size - req.red_portion
-
-			if remining == 0 {
-				if req.read_file != 0 {
-					nbio.close(req.read_file, l = client.l)
-				}
-				req.red_portion = 0
-				req.read_file = 0
-				req.files_uploaded += 1
-				continue
-			}
-
-			if req.read_file == 0 {
-				nbio.open_poly(path, req, on_open, l = client.l)
-				return true
-			}
-
-			if req.buffered_portion > 0 {
-				req.red_portion += req.buffered_portion
-
-				tag, source := sim.split_crypt_tag(
-					req.buf,
-					req.buffered_portion,
-				)
-
-				sim.encrypt(&req.secret, tag, source)
-
-				nbio.send_poly(
-					req.sock,
-					{req.buf[:size_of(sim.Tag) + req.buffered_portion]},
-					req,
-					on_send,
-					l = client.l,
-				)
-				return true
-			}
-
-			_, buf := sim.split_crypt_tag(req.buf, remining)
-
-			nbio.read_poly(
-				req.read_file,
-				req.red_portion,
-				buf,
-				req,
-				on_read,
-				all = true,
-				l = client.l,
+			_, res := sqlite.exec(
+				client.save_asset,
+				req.sh.id,
+				req.asset,
+				nm.str(&req.asset_meta.name),
+				req.asset_meta.type,
 			)
-			return true
+			sqlite.assert_ok(client.save_asset, res)
+
+			ensure_fetch_assets(client)
 		}
-
-		req->on_fail("")
-		return true
-	}
-
-	on_open :: proc(op: ^nbio.Operation, req: ^Req) {
-		kill := true
-		defer if kill do req->on_fail("failed to open file")
-
-		if op.open.err != nil {
-			log.error("failed to open", op.open.path, ":", op.recv.err)
-			return
-		}
-
-		req.read_file = op.open.handle
-		kill = !do_progress(req)
-	}
-
-	on_read :: proc(op: ^nbio.Operation, req: ^Req) {
-		kill := true
-		defer if kill do req->on_fail("failed to read from file")
-
-		if op.read.err != nil {
-			log.error("failed to read file chunk:", op.send.err)
-			return
-		}
-
-		req.buffered_portion = len(op.read.buf)
-		kill = !do_progress(req)
-	}
-
-	on_send :: proc(op: ^nbio.Operation, req: ^Req) {
-		kill := true
-		defer if kill do req->on_fail("failed to send file chunk")
-
-		if op.send.err != nil {
-			log.error("failed to send file chunk:", op.send.err)
-			return
-		}
-
-		req.buffered_portion = 0
-		kill = !do_progress(req)
 	}
 }
 
-fetch_assets :: proc(client: ^Client, p: ^sim.Server_Cmd) {
-	if p.count == 0 {
-		refresh_sheet(client)
-		return
-	}
-
+fetch_asset :: proc(
+	client: ^Client,
+	loc: sim.Asset_Loc,
+	on_kill: proc(_: ^Req, _: ^nbio.Event_Loop, _: bool),
+) {
 	req, req_slot := req_connect(client, on_boot)
-
 	req_slot.kind = .Download_Content
-	copy(req_slot.inline_body[:], p.token[:])
-	req.metas = make([]sim.Asset, p.count)
-	req.global_hash = p.global_hash
+	req_slot.conn_id = client.conn_id
+	req_slot.download_content.id = loc.id
+	req.asset = loc.id
+	req.tcp.host = {
+		asoc_data = client,
+		on_packet = first_on_packet,
+		on_kill   = on_kill,
+	}
 
 	on_boot :: proc(req: ^Req, l: ^nbio.Event_Loop) {
 		client := (^Client)(req.host.asoc_data)
 
-		nbio.recv_poly(
-			req.sock,
-			{mem.slice_data_cast([]u8, req.metas)},
+		path := asset_path(client, req.asset)
+		nbio.open_poly(
+			strings.clone(path),
 			req,
-			on_metas_recv,
-			all = true,
-			timeout = time.Second * 2,
+			on_dest_open,
+			{.Write, .Create},
 			l = l,
 		)
 	}
 
-	on_metas_recv :: proc(op: ^nbio.Operation, req: ^Req) {
+	on_dest_open :: proc(op: ^nbio.Operation, req: ^Req) {
 		kill := true
 		defer if kill do req->on_fail("failed to get metas")
+		defer delete(op.open.path)
 
-		if op.recv.err != nil {
-			log.error("failed to receive metas:", op.recv.err)
+		if op.open.err != nil {
+			log.error("failed to open file for writing:", op.open.err)
 			return
 		}
 
-		config_hash_ctx: blake2s.Context
-		blake2s.init(&config_hash_ctx)
-		for &m in req.metas {
-			blake2s.update(&config_hash_ctx, m.hash[:])
-		}
-		global_hash: sim.Hash
-		blake2s.final(&config_hash_ctx, global_hash[:])
+		req.out_file = op.open.handle
+		req.written = 0
 
-		if global_hash != req.global_hash {
-			log.error("MITM in the asset response")
-			return
-		}
+		req.timeout = time.Second * 5
+		sim.tcp_connection_boot(req, sim.DONWLOAD_BUF_SIZE, 0, l = op.l)
 
-		log.debug("metas received", req.metas)
-
-		kill = !do_progress(req, op.l)
+		kill = false
 	}
 
-	do_progress :: proc(req: ^Req, l: ^nbio.Event_Loop) -> bool {
-		client := (^Client)(req.host.asoc_data)
-
-		if req.files_recvd >= len(req.metas) {
-			req->on_fail("")
-			refresh_sheet(client)
-			return true
-		}
-
-		meta := req.metas[req.files_recvd]
-		req.files_recvd += 1
-
-		if meta.size == 0 {
-			log.error("server sent empty asset")
-			return false
-		}
-
-		buf := make([]u8, meta.size)
-		nbio.recv_poly(
-			req.sock,
-			{buf},
-			req,
-			on_file_recv,
-			timeout = time.Second * 5,
-			all = true,
-			l = l,
-		)
-
-		log.debug("receiving:", meta)
-
+	first_on_packet :: proc(
+		req: ^Req,
+		l: ^nbio.Event_Loop,
+		bytes: []u8,
+	) -> bool {
+		req.asset_meta = slice.to_type(bytes, sim.Asset) or_return
+		fmt.println(req.asset_meta)
+		req.tcp.host.on_packet = on_packet
 		return true
 	}
 
-	on_file_recv :: proc(op: ^nbio.Operation, req: ^Req) {
-		client := (^Client)(req.host.asoc_data)
-
-		buf := op.recv.bufs[0]
-		meta := req.metas[req.files_recvd - 1]
-
-		kill := true
-		defer if kill do req->on_fail("failed to fetch file")
-		defer delete(buf)
-
-		if op.recv.err != nil {
-			log.error("failed to receive an asset file:", op.recv.err)
-			return
-		}
-
-		hash: sim.Hash
-		sim.hash(buf, &hash)
-
-		if hash != meta.hash {
-			log.error("MITM while receiving asset file")
-			return
-		}
-
-		name := asset_path(client, sim.hash_prefix(&meta.hash))
-
-		err := os.write_entire_file(name, buf)
-		if err != nil {
-			log.error("failed to write asset to cache", name, ":", err)
-			return
-		}
-
-		log.debug("written asset to:", name)
-
-		_, res := sqlite.exec(
-			client.save_asset,
-			req.sh.id,
-			sim.hash_prefix(&meta.hash),
-			nm.str(&meta.name),
-			meta.type,
+	on_packet :: proc(req: ^Req, l: ^nbio.Event_Loop, bytes: []u8) -> bool {
+		nbio.write_poly(
+			req.out_file,
+			req.written,
+			slice.clone(bytes),
+			req,
+			on_write,
+			all = true,
+			l = l,
 		)
-		sqlite.assert_ok(client.save_asset, res)
+		req.written += len(bytes)
 
-		kill = !do_progress(req, op.l)
+		return true
+
+		on_write :: proc(op: ^nbio.Operation, req: ^Req) {
+			kill := true
+			defer if kill do req->on_fail("failed to write to disk")
+			defer delete(op.write.buf)
+
+			if op.write.err != nil {
+				log.error("failed to open file for writing:", op.write.err)
+				return
+			}
+
+			kill = false
+		}
 	}
 }
 
@@ -852,6 +708,9 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 	}
 
 	on_boot :: proc(client: ^Client, l: ^nbio.Event_Loop) {
+		client.conn_id =
+			(^sim.Server_Init_Data)(raw_data(&client.sh.payload)).conn_id
+
 		sim.tcp_connection_boot(
 			&client.tcp,
 			sim.CLIENT_RECV_BUF_SIZE,
@@ -877,12 +736,20 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 	}
 }
 
-client_on_tcp_kill :: proc(conn: ^sim.TCP_Connection, l: ^nbio.Event_Loop) {
+client_on_tcp_kill :: proc(
+	conn: ^sim.TCP_Connection,
+	l: ^nbio.Event_Loop,
+	natural: bool,
+) {
 	client := (^Client)(conn.host.asoc_data)
 	client_clear_state(client, "tcp connection terminated", .Tcp)
 }
 
-client_on_udp_kill :: proc(conn: ^sim.UDP_Connection, l: ^nbio.Event_Loop) {
+client_on_udp_kill :: proc(
+	conn: ^sim.UDP_Connection,
+	l: ^nbio.Event_Loop,
+	natural: bool,
+) {
 	client := (^Client)(conn.host.asoc_data)
 	client_clear_state(client, "udp connection terminated", .Udp)
 }
