@@ -15,6 +15,7 @@ import "core:log"
 import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
+import "core:mem"
 import "core:nbio"
 import "core:reflect"
 import "core:strings"
@@ -109,7 +110,7 @@ UI_Statements :: struct {
 			ON CONFLICT (id, server) DO UPDATE SET name = ?3, type = ?4
 	`,
 	get_server_assets:      sqlite.Statement `
-		SELECT id FROM asset WHERE server = ?
+		SELECT * FROM asset WHERE server = ?
 	`,
 	get_asset:              sqlite.Statement `
 		SELECT * FROM asset WHERE id = ?
@@ -297,9 +298,8 @@ UI_Servers :: struct {
 }
 
 UI_Server_Info_Listener :: struct {
-	using inner:       Handshake,
+	using inner:       sim.Handshake,
 	gc:                bool,
-	error:             string,
 	present:           bool,
 	state:             Connection_State,
 	expected_identity: sim.Identity,
@@ -310,7 +310,7 @@ UI_Server_Info_Listener :: struct {
 server_info_close :: proc(ctx: ^UI_Server_Info_Listener, gc := false) {
 	if ctx.state == .Connected {
 		ctx.gc = gc
-		ctx->on_fail("")
+		sim.tcp_connection_kill(&ctx.tcp, ctx.l)
 	} else if ctx.state == .Disconnected {
 		if gc do free(ctx)
 	}
@@ -323,37 +323,28 @@ fetch_server_info :: proc(
 ) -> ^UI_Server_Info_Listener {
 	ctx^ = {}
 	sim.private_key_generate(&ctx.pk)
-	assert(ctx.state == .Disconnected)
+	ctx.l = l
 	ctx.state = .Connecting
-	ctx.host.asoc_data = l
-	ctx.on_fail = on_fail
 	ctx.get_pk = get_pk
 	ctx.on_boot = on_boot
-	ctx.host.on_kill = on_kill
+	ctx.cleanup = on_kill
 	ctx.host.on_packet = on_packet
 
 	header := (^sim.Client_Request_Header)(&ctx.ch.payload)
 	header.kind = .Watch_Server_Info
 
-	hctx_connect(ctx, endp, l)
+	sim.hctx_connect_client(ctx, endp, l)
 
 	return ctx
-
-	on_fail :: proc(ctx: ^UI_Server_Info_Listener, reason: string) {
-		l := (^nbio.Event_Loop)(ctx.host.asoc_data)
-
-		assert(ctx.state == .Connected || ctx.state == .Connecting)
-		sim.tcp_connection_kill(&ctx.tcp, l)
-		ctx.error = reason
-	}
 
 	get_pk :: proc(ctx: ^UI_Server_Info_Listener) -> sim.Private_Key {
 		return ctx.pk
 	}
 
-	on_boot :: proc(ctx: ^UI_Server_Info_Listener, l: ^nbio.Event_Loop) {
-		sim.tcp_connection_boot(&ctx.tcp, 512, 0, l = l)
+	on_boot :: proc(ctx: ^UI_Server_Info_Listener) -> bool {
+		sim.tcp_connection_boot(&ctx.tcp, 512, 0, l = ctx.l)
 		ctx.state = .Connected
+		return true
 	}
 
 	on_packet :: proc(
@@ -362,15 +353,10 @@ fetch_server_info :: proc(
 		bytes: []u8,
 	) -> bool {
 		copy(reflect.as_bytes(ctx.server_info), bytes)
-		assert(ctx.host.asoc_data != nil)
 		return true
 	}
 
-	on_kill :: proc(
-		ctx: ^UI_Server_Info_Listener,
-		l: ^nbio.Event_Loop,
-		natural: bool,
-	) {
+	on_kill :: proc(ctx: ^UI_Server_Info_Listener) {
 		ctx.state = .Disconnected
 		if ctx.gc do free(ctx)
 	}
@@ -399,12 +385,16 @@ UI_Content_Editor :: struct {
 	create_stat_name: strings.Builder,
 	upload_error:     string,
 	upload_arena:     arna.Allocator,
-	dropped_assets:   #soa[dynamic]struct {
-		base:     sim.Asset,
-		path:     string,
-		issue:    string,
-		uploaded: bool,
-	},
+	dropped_assets:   #soa[dynamic]Dropped_Asset,
+	upload_inflight:  int,
+	upload_cursor:    int,
+}
+
+Dropped_Asset :: struct {
+	base:     sim.Asset,
+	path:     string,
+	issue:    string,
+	uploaded: bool,
 }
 
 Stat_Editor_State :: struct {
@@ -963,7 +953,12 @@ ui_connection_menu :: proc(client: ^Client) {
 						"Copy identity",
 						{disabled = already_copied},
 					) {
-						rl.SetClipboardText(strings.clone_to_cstring(b58_id))
+						rl.SetClipboardText(
+							strings.clone_to_cstring(
+								b58_id,
+								context.temp_allocator,
+							),
+						)
 					}
 				}
 
@@ -1288,6 +1283,47 @@ ui_game_hud :: proc(client: ^Client) {
 		},
 	)
 
+	transfere: {
+		Indicator :: struct {
+			name:     string,
+			total:    int,
+			inflight: int,
+			launched: int,
+		}
+
+		ce_ctx := &client.content_editor
+		progresses := [?]Indicator {
+			{
+				"dwn",
+				len(client.assets_to_fetch),
+				client.inflight_assets,
+				client.inflight_asset_cursor,
+			},
+			{
+				"upl",
+				len(ce_ctx.dropped_assets),
+				ce_ctx.upload_inflight,
+				ce_ctx.upload_cursor,
+			},
+		}
+
+		for prog in progresses {
+			if prog.total != 0 {
+				vl := fmt.tprintf(
+					"%v: %v/%v/%v",
+					prog.name,
+					prog.launched - prog.inflight,
+					prog.inflight,
+					prog.total,
+				)
+				ui_label(
+					id("progress"),
+					{label = vl, height = orui.fixed(ROW_HEIGHT)},
+				)
+			}
+		}
+	}
+
 	{box(
 			id("hud-spacer"),
 			{width = orui.grow(), height = orui.fixed(ROW_HEIGHT)},
@@ -1530,19 +1566,28 @@ ui_player_color :: proc(seed: []u8) -> rl.Color {
 }
 
 fetch_all_assets :: proc(client: ^Client) {
-	present_assets := make([dynamic]sim.Asset_ID, context.temp_allocator)
+	req, req_slot := req_connect(client)
+	req_slot.kind = .List_Assets
+	req_slot.conn_id = client.conn_id
+	req.on_boot = on_boot
+	req.cleanup = on_kill
+	req.host.on_packet = on_packet
 
-	query, stmt := sqlite.query(
-		client.get_server_assets,
-		Saved_Asset,
-		client.hctx.sh.id,
-	)
-	for asset in sqlite.query_next(&query) {
-		append(&present_assets, asset.id)
+	on_boot :: proc(req: ^Req) -> bool {
+		sim.tcp_connection_boot(req, sim.ASSET_BUF_SIZE, 0, req.l)
+		return true
 	}
-	sqlite.reset(stmt)
 
-	panic("TODO")
+	on_packet :: proc(req: ^Req, l: ^nbio.Event_Loop, bytes: []u8) -> bool {
+		client := (^Client)(req.host.asoc_data)
+		assets := mem.slice_data_cast([]sim.Asset_ID, bytes)
+		client_fetch_missig_assets(client, assets)
+		return true
+	}
+
+	on_kill :: proc(req: ^Req) {
+		free(req)
+	}
 }
 
 ui_is_interacting :: proc(

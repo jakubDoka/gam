@@ -7,8 +7,8 @@ import "../util/nm"
 import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
-import "core:fmt"
 import "core:log"
+import "core:mem"
 import "core:nbio"
 import "core:net"
 import "core:os"
@@ -258,8 +258,6 @@ client_handle_packet :: proc(
 			l.team = p.team
 			l.stats = p.stats
 			l.lifetime = ls.lifetime
-		case .Ack:
-			panic("Asset Upload")
 		}
 	case sim.Broadcast_Packet:
 		switch &p in p {
@@ -287,50 +285,42 @@ client_handle_packet :: proc(
 		}
 	}
 
-	client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
-		for &s in set {
-			if s == 0 do continue
-
-			name := asset_path(client, s)
-
-			if _, err := os.stat(name, context.temp_allocator); err != nil {
-				append(&client.assets_to_fetch, s)
-			}
-		}
-		ensure_fetch_assets(client)
-	}
-
 	return
 }
 
+client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
+	has_missing := false
+	for &s in set {
+		if s == 0 do continue
+
+		name := asset_path(client, s)
+
+		if _, err := os.stat(name, context.temp_allocator); err != nil {
+			append(&client.assets_to_fetch, s)
+			has_missing = true
+		}
+	}
+
+	if has_missing {
+		fetch_assets(client)
+	}
+}
+
 Req :: struct {
-	using hctx:     Handshake,
-	asset:          sim.Asset_ID,
-	buf:            []u8,
-	files_recvd:    int,
-	files_uploaded: int,
-	written:        int,
-	asset_meta:     sim.Asset,
-	out_file:       nbio.Handle,
-	pk:             sim.Private_Key,
+	using hctx: sim.Handshake,
+	path:       string,
+	idx:        int,
 }
 
 #assert(offset_of(Req, hctx) == 0)
 
-req_connect :: proc(
-	client: ^Client,
-	on_boot: proc(_: ^Req, _: ^nbio.Event_Loop),
-) -> (
-	^Req,
-	^sim.Client_Request_Header,
-) {
+req_connect :: proc(client: ^Client) -> (^Req, ^sim.Client_Request_Header) {
 	req := new(Req)
+	req.l = client.l
 	req.host.asoc_data = client
-	req.on_fail = on_fail
 	req.get_pk = get_pk
-	req.on_boot = on_boot
 
-	hctx_connect(req, client.hctx.server_endpoint, client.l)
+	sim.hctx_connect_client(req, client.hctx.server_endpoint, client.l)
 
 	return req, (^sim.Client_Request_Header)(&req.ch.payload)
 
@@ -339,152 +329,111 @@ req_connect :: proc(
 		prof := get_selected_user(client)
 		return prof.pk
 	}
+}
 
-	on_fail :: proc(req: ^Req, reason: string) {
+upload_assets :: proc(client: ^Client) {
+	MAX_INFLIGHT_ASSETS :: 5
+
+	ctx := &client.content_editor
+
+	for client.inflight_assets < MAX_INFLIGHT_ASSETS {
+		if ctx.upload_cursor >= len(ctx.dropped_assets) do break
+		next := ctx.dropped_assets[ctx.upload_cursor]
+		ctx.upload_cursor += 1
+
+		req, req_slot := req_connect(client)
+		req_slot.kind = .Upload_Content
+		req_slot.conn_id = client.conn_id
+		req.send.asset = next.base
+		req.on_boot = on_boot
+		req.asset_path = asset_path
+		req.path = next.path
+		req.idx = ctx.upload_cursor - 1
+
+		on_boot :: proc(req: ^Req) -> bool {
+			return sim.send_asset(req)
+		}
+
+		asset_path :: proc(hctx: ^Req) -> string {
+			defer hctx.path = ""
+			return strings.clone(hctx.path)
+		}
+
+		client.inflight_assets += 1
+	}
+
+	on_kill :: proc(req: ^Req) {
 		client := (^Client)(req.host.asoc_data)
-		nested := req.tcp.host.on_kill != nil
-		sim.tcp_connection_kill(&req.tcp, l = client.l)
-		if nested do return
+		client.inflight_assets -= 1
 
-		if len(reason) != 0 {
-			log.error(reason)
+		if req.last_error == "" {
+			client.content_editor.dropped_assets[req.idx].uploaded = true
 		}
 
-		if client.asset_loader == req do client.asset_loader = nil
-		if client.asset_uploader == req do client.asset_uploader = nil
+		upload_assets(client)
 
-		if req.out_file != 0 {
-			nbio.close(req.out_file, l = client.l)
-		}
-
-		delete(req.buf)
-
+		delete(req.path)
+		req^ = {}
 		free(req)
 	}
 }
 
-ensure_fetch_assets :: proc(client: ^Client) {
+fetch_assets :: proc(client: ^Client) {
 	MAX_INFLIGHT_ASSETS :: 5
 
 	for client.inflight_assets < MAX_INFLIGHT_ASSETS {
-		next, ok := pop_safe(&client.assets_to_fetch)
-		if !ok {
-			refresh_sheet(client)
-			return
+		if client.inflight_asset_cursor >= len(client.assets_to_fetch) do break
+		next := client.assets_to_fetch[client.inflight_asset_cursor]
+		client.inflight_asset_cursor += 1
+
+		req, req_slot := req_connect(client)
+		req_slot.kind = .Download_Content
+		req_slot.conn_id = client.conn_id
+		req_slot.download_content.id = next
+		req.path = strings.clone(asset_path(client, next))
+		req.asset_path = asset_path_
+		req.cleanup = on_kill
+		sim.fetch_asset(req)
+
+		asset_path_ :: proc(hctx: ^Req) -> string {
+			defer hctx.path = ""
+			return hctx.path
 		}
 
-		fetch_asset(client, {id = next}, on_kill)
 		client.inflight_assets += 1
+	}
 
-		on_kill :: proc(req: ^Req, l: ^nbio.Event_Loop, natural: bool) {
-			assert(natural)
+	if client.inflight_assets == 0 {
+		client.inflight_asset_cursor = 0
+		clear(&client.assets_to_fetch)
+		refresh_sheet(client)
+	}
 
-			client := (^Client)(req.host.asoc_data)
-			client.inflight_assets -= 1
-			req.tcp.host.on_kill = nil
-			req->on_fail("")
+	on_kill :: proc(req: ^Req) {
+		client := (^Client)(req.host.asoc_data)
+		client.inflight_assets -= 1
 
-			fmt.println(req.asset_meta)
-
+		if req.last_error == "" {
 			_, res := sqlite.exec(
 				client.save_asset,
 				req.sh.id,
-				req.asset,
-				nm.str(&req.asset_meta.name),
-				req.asset_meta.type,
+				sim.hash_prefix(&req.fetch.asset_meta.hash),
+				nm.str(&req.fetch.asset_meta.name),
+				req.fetch.asset_meta.type,
 			)
 			sqlite.assert_ok(client.save_asset, res)
-
-			ensure_fetch_assets(client)
-		}
-	}
-}
-
-fetch_asset :: proc(
-	client: ^Client,
-	loc: sim.Asset_Loc,
-	on_kill: proc(_: ^Req, _: ^nbio.Event_Loop, _: bool),
-) {
-	req, req_slot := req_connect(client, on_boot)
-	req_slot.kind = .Download_Content
-	req_slot.conn_id = client.conn_id
-	req_slot.download_content.id = loc.id
-	req.asset = loc.id
-	req.tcp.host = {
-		asoc_data = client,
-		on_packet = first_on_packet,
-		on_kill   = on_kill,
-	}
-
-	on_boot :: proc(req: ^Req, l: ^nbio.Event_Loop) {
-		client := (^Client)(req.host.asoc_data)
-
-		path := asset_path(client, req.asset)
-		nbio.open_poly(
-			strings.clone(path),
-			req,
-			on_dest_open,
-			{.Write, .Create},
-			l = l,
-		)
-	}
-
-	on_dest_open :: proc(op: ^nbio.Operation, req: ^Req) {
-		kill := true
-		defer if kill do req->on_fail("failed to get metas")
-		defer delete(op.open.path)
-
-		if op.open.err != nil {
-			log.error("failed to open file for writing:", op.open.err)
-			return
+		} else {
+			panic("TDOD: show an error")
 		}
 
-		req.out_file = op.open.handle
-		req.written = 0
+		fetch_assets(client)
 
-		req.timeout = time.Second * 5
-		sim.tcp_connection_boot(req, sim.DONWLOAD_BUF_SIZE, 0, l = op.l)
-
-		kill = false
-	}
-
-	first_on_packet :: proc(
-		req: ^Req,
-		l: ^nbio.Event_Loop,
-		bytes: []u8,
-	) -> bool {
-		req.asset_meta = slice.to_type(bytes, sim.Asset) or_return
-		fmt.println(req.asset_meta)
-		req.tcp.host.on_packet = on_packet
-		return true
-	}
-
-	on_packet :: proc(req: ^Req, l: ^nbio.Event_Loop, bytes: []u8) -> bool {
-		nbio.write_poly(
-			req.out_file,
-			req.written,
-			slice.clone(bytes),
-			req,
-			on_write,
-			all = true,
-			l = l,
-		)
-		req.written += len(bytes)
-
-		return true
-
-		on_write :: proc(op: ^nbio.Operation, req: ^Req) {
-			kill := true
-			defer if kill do req->on_fail("failed to write to disk")
-			defer delete(op.write.buf)
-
-			if op.write.err != nil {
-				log.error("failed to open file for writing:", op.write.err)
-				return
-			}
-
-			kill = false
+		if len(req.error) != 0 {
+			log.error(req.error)
 		}
+
+		req^ = {}
+		free(req)
 	}
 }
 
@@ -500,7 +449,8 @@ client_ent_by_net_id :: proc(client: ^Client, id: sim.Ent_Net_ID) -> ^sim.Ent {
 }
 
 asset_path :: proc(client: ^Client, id: sim.Asset_ID) -> string {
-	name := b58.encode(reflect.as_bytes(id))
+	id := id
+	name := b58.encode(mem.ptr_to_bytes(&id))
 	asset_path_no_ext, _ := os.join_path(
 		{client.data_dir, ASSET_CACHE, name},
 		context.temp_allocator,
@@ -514,188 +464,32 @@ asset_path :: proc(client: ^Client, id: sim.Asset_ID) -> string {
 	return asset_path
 }
 
-Handshake :: struct {
-	using tcp:       sim.TCP_Connection,
-	server_endpoint: nbio.Endpoint,
-	using handshake: struct {
-		ch:          sim.Client_Hello,
-		sh:          sim.Server_Hello,
-		ceh:         sim.Client_End_Hello,
-		cached_path: string,
-		xpk:         sim.Private_Key,
-	},
-	on_fail:         proc(hctx: ^Handshake, reason: string),
-	get_pk:          proc(hctx: ^Handshake) -> sim.Private_Key,
-	on_boot:         proc(hctx: ^Handshake, l: ^nbio.Event_Loop),
-}
-
-hctx_connect :: proc(
-	hctx: ^Handshake,
-	endp: nbio.Endpoint,
-	l: ^nbio.Event_Loop,
-) {
-	delete(hctx.handshake.cached_path)
-	hctx.handshake = {
-		ch = {payload = hctx.handshake.ch.payload},
-	}
-
-	nbio.dial_poly(endp, hctx, on_dial, l = l)
-
-	on_dial :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
-		kill := true
-		defer if kill do hctx->on_fail("can't dial the server")
-
-		if op.dial.err != nil {
-			log.errorf("failed to dial %v: %v", op.dial.endpoint, op.dial.err)
-			return
-		}
-
-		hctx.tcp.sock = op.dial.socket
-		hctx.server_endpoint = op.dial.endpoint
-
-		log.debug("dialed server")
-
-		selected_user := hctx->get_pk()
-		sim.client_handshake_init(
-			&selected_user,
-			&hctx.xpk,
-			&hctx.handshake.ch,
-		)
-
-		nbio.send_poly(
-			hctx.tcp.sock,
-			{reflect.as_bytes(hctx.handshake.ch)},
-			hctx,
-			on_hello_sent,
-			all = true,
-			timeout = HANDSHAKE_STAGE_TIMEOUT,
-			l = op.l,
-		)
-
-		kill = false
-	}
-
-	on_hello_sent :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
-		kill := true
-		defer if kill do hctx->on_fail("failed to initiate connection")
-
-		if op.send.err != nil {
-			log.error("failed to send client hello:", op.send.err)
-			return
-		}
-
-		if op.send.sent != size_of(sim.Client_Hello) {
-			log.error("failed to send hello in one chunk:", op.send.err)
-			return
-		}
-
-		log.debug("client hello sent")
-
-		nbio.recv_poly(
-			hctx.tcp.sock,
-			{reflect.as_bytes(hctx.handshake.sh)},
-			hctx,
-			on_server_hello,
-			all = true,
-			timeout = HANDSHAKE_STAGE_TIMEOUT,
-			l = op.l,
-		)
-
-		kill = false
-	}
-
-	on_server_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
-		kill := true
-		defer if kill do hctx->on_fail("server gave bad response")
-
-		if op.send.err != nil {
-			log.error("failed to receive server hello:", op.send.err)
-			return
-		}
-
-		if op.send.sent != size_of(sim.Server_Hello) {
-			log.error("server hello has incorrect length:", op.send.err)
-			return
-		}
-
-		selected_user := hctx->get_pk()
-		ok := sim.client_handshake_end(
-			&selected_user,
-			&hctx.xpk,
-			&hctx.ch,
-			&hctx.sh,
-			&hctx.ceh,
-			&hctx.tcp.secret,
-		)
-		if !ok {
-			log.error("failed to end handshake:", hctx.handshake)
-			return
-		}
-
-		log.debug("server hello is valid")
-
-		nbio.send_poly(
-			hctx.tcp.sock,
-			{reflect.as_bytes(hctx.handshake.ceh)},
-			hctx,
-			on_handshake_finished,
-			all = true,
-			timeout = HANDSHAKE_STAGE_TIMEOUT,
-			l = op.l,
-		)
-
-		kill = false
-	}
-
-	on_handshake_finished :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
-		kill := true
-		defer if kill do hctx->on_fail("handshake did not terminate")
-
-		if op.send.err != nil {
-			log.error("failed to send the end hello:", op.send.err)
-			return
-		}
-
-		log.debug("handshake complete, booting")
-
-		hctx->on_boot(op.l)
-
-		kill = false
-	}
-}
-
 client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 	if client.connection_stage != .Disconnected do return
 	client.connection_stage = .Connecting
 
-	client.hctx.on_fail = on_failure
 	client.hctx.get_pk = get_pk
 	client.hctx.on_boot = on_boot
 
 	{
-		kill := true
-		defer if kill do client.hctx->on_fail("can't open udp socket")
-
 		udp_sock, create_err := nbio.create_udp_socket(.IP4)
-		if create_err != nil {
-			log.error("failed to create udp socket:", create_err)
-			return
-		}
+		sim.hctx_fail_guard(&client.hctx, "can't open udp socket", create_err)
+		if create_err != nil do return
+
 		client.udp.sock = udp_sock
 
 		bind_err := nbio.bind(udp_sock, {nbio.IP4_Any, 0})
-		if bind_err != nil {
-			log.error("failed to bind the udp socket to:", bind_err)
-			return
-		}
+		sim.hctx_fail_ctx(&client.hctx, "can't bind udp socket", bind_err)
+		if bind_err != nil do return
 
-		kill = false
+		client.hctx.error = ""
 	}
 
 	header := (^sim.Client_Request_Header)(&client.hctx.handshake.ch.payload)
 	header.kind = .Play
+	client.tcp.host.asoc_data = client
 
-	hctx_connect(&client.hctx, endp, client.l)
+	sim.hctx_connect_client(&client.hctx, endp, client.l)
 
 	on_failure :: proc(client: ^Client, reason: string) {
 		#assert(offset_of(Client, hctx) == 0)
@@ -707,7 +501,7 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 		return selected_user.pk
 	}
 
-	on_boot :: proc(client: ^Client, l: ^nbio.Event_Loop) {
+	on_boot :: proc(client: ^Client) -> bool {
 		client.conn_id =
 			(^sim.Server_Init_Data)(raw_data(&client.sh.payload)).conn_id
 
@@ -715,15 +509,15 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 			&client.tcp,
 			sim.CLIENT_RECV_BUF_SIZE,
 			sim.SERVER_RECV_BUF_SIZE,
-			l = l,
+			l = client.l,
 		)
 		client.tcp.host = {
 			asoc_data = client,
 			on_packet = client_on_tcp_packet,
-			on_kill   = client_on_tcp_kill,
 		}
+		client.cleanup = client_on_tcp_kill
 
-		sim.udp_connection_boot(&client.udp, l = l)
+		sim.udp_connection_boot(&client.udp, l = client.l)
 		client.udp.host = {
 			asoc_data = client,
 			on_packet = client_on_udp_packet,
@@ -733,15 +527,12 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 
 		client.connection_stage = .Connected
 		client.last_server_packet = time.now()
+
+		return true
 	}
 }
 
-client_on_tcp_kill :: proc(
-	conn: ^sim.TCP_Connection,
-	l: ^nbio.Event_Loop,
-	natural: bool,
-) {
-	client := (^Client)(conn.host.asoc_data)
+client_on_tcp_kill :: proc(client: ^Client) {
 	client_clear_state(client, "tcp connection terminated", .Tcp)
 }
 
@@ -840,7 +631,7 @@ rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
 	pkt.tag = sim.compute_next_ping_tag(&ws.config.sk, nonce)
 	nonce += 1
 
-	wrtn, werr := net.send(socket, reflect.as_bytes(pkt), ws.server)
+	wrtn, werr := net.send(socket, mem.ptr_to_bytes(&pkt), ws.server)
 	if werr != nil {
 		log.warn("failed to initiate ping, state:", ws, werr)
 		return
@@ -848,7 +639,7 @@ rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
 
 	assert(wrtn == size_of(pkt))
 
-	rcvd, remote, rerr := net.recv(socket, reflect.as_bytes(pkt))
+	rcvd, remote, rerr := net.recv(socket, mem.ptr_to_bytes(&pkt))
 	if rerr != nil {
 		log.warn("failed to receive inital ping response, state:", ws, rerr)
 		return
@@ -876,7 +667,7 @@ rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
 	sync.atomic_store(worker.rt, rtt.smoothed(&worker.es))
 
 	pkt.tag = sim.compute_next_ping_tag(&ws.config.sk, nonce)
-	wrtn, werr = net.send(socket, reflect.as_bytes(pkt), ws.server)
+	wrtn, werr = net.send(socket, mem.ptr_to_bytes(&pkt), ws.server)
 	if werr != nil {
 		log.warn("failed to send the final ping response, state:", ws, werr)
 		return

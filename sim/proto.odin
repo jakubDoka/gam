@@ -61,6 +61,7 @@ Client_Request_Type :: enum int {
 	Download_Content,
 	Upload_Content,
 	Play,
+	List_Assets,
 }
 
 Asset_Type :: enum int {
@@ -228,7 +229,6 @@ Server_Cold_State :: struct {
 // TODO: the naming is lacking
 Server_Cmd_Type :: enum int {
 	Laser,
-	Ack,
 }
 
 Server_Cmd :: struct {

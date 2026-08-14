@@ -137,7 +137,7 @@ Laser :: struct {
 Lasers :: Retained_Array(Laser)
 
 Client :: struct {
-	using hctx:            Handshake,
+	using hctx:            sim.Handshake,
 	last_inpulse:          time.Time,
 	data_dir:              string,
 	udp:                   sim.UDP_Connection,
@@ -160,7 +160,6 @@ Client :: struct {
 	last_cold_state_hash:  sim.Hash,
 	debug_on:              bool,
 	using ui:              UI_Reactor,
-	l:                     ^nbio.Event_Loop,
 	config_allocator:      arna.Allocator,
 	input_pool:            []Deffered_Client_Input,
 	tick_interval:         ^nbio.Operation,
@@ -175,6 +174,7 @@ Client :: struct {
 	last_app:              time.Time,
 	assets_to_fetch:       [dynamic]sim.Asset_ID,
 	inflight_assets:       int,
+	inflight_asset_cursor: int,
 }
 
 @(rodata)
@@ -772,6 +772,7 @@ refresh_sheet :: proc(client: ^Client) {
 		client.hctx.sh.id,
 	)
 	for asset in sqlite.query_next(&query) {
+		if asset.type != .Sprite do continue
 		append(&client.assets, asset.id)
 	}
 	sqlite.reset(stmt)
@@ -805,7 +806,7 @@ refresh_sheet :: proc(client: ^Client) {
 		res, stmt := sqlite.query(client.get_asset, asset, sprite)
 		if res == .DONE {
 			has_missing = true
-			log.warn("sprite is in the cache but not in db")
+			log.warn("sprite is in the cache but not in db", sprite, asset)
 			continue
 		}
 		sqlite.assert_ok(stmt, res)
@@ -1302,7 +1303,7 @@ client_update :: proc(client: ^Client) {
 
 @(export)
 client_rewire :: proc(client: ^Client) {
-	client.hctx.tcp.host.on_kill = client_on_tcp_kill
+	client.hctx.cleanup = client_on_tcp_kill
 	client.hctx.tcp.host.on_packet = client_on_tcp_packet
 	client.udp.host.on_kill = client_on_udp_kill
 	client.udp.host.on_packet = client_on_udp_packet
@@ -1335,7 +1336,6 @@ client_deinit :: proc(client: ^Client) {
 
 	delete(client.map_buf)
 	delete(client.players)
-	delete(client.hctx.cached_path)
 	delete(client.assets)
 
 	delete(client.ents.stats)

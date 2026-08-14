@@ -9,7 +9,6 @@ import "../util/sqlite"
 import rt "base:runtime"
 import "core:container/lru"
 import "core:crypto"
-import "core:fmt"
 import "core:io"
 import "core:log"
 import "core:mem"
@@ -38,7 +37,6 @@ MAX_ACTIVE_PINGS :: MAX_CONNECTIONS * 2
 MAX_IP_SIGHTINGS :: 16
 MAX_IP_VIOLATIONS :: 8
 BANNED_IP_LRU_SIZE :: 1 //1024 * 4
-ASSET_REQUEST_LRU_SIZE :: 8
 FRAME_TARGET :: time.Second / 60
 
 Default_Map :: struct {
@@ -87,21 +85,8 @@ DEFAULT_MAPS := [?]Default_Map {
 	},
 }
 
-Handshake :: struct {
-	using tcp:   sim.TCP_Connection,
-	using inner: struct {
-		ch:          sim.Client_Hello,
-		sh:          sim.Server_Hello,
-		ceh:         sim.Client_End_Hello,
-		server_info: sim.Server_Info,
-		xpk:         sim.Private_Key,
-	},
-	on_fail:     proc(_: ^Handshake, _: ^Server),
-	on_boot:     proc(_: ^Handshake, _: ^Server),
-}
-
 Connection :: struct {
-	using hctx:    Handshake,
+	using hctx:    sim.Handshake,
 	tcp_endpoint:  nbio.Endpoint,
 	udp_endpoint:  nbio.Endpoint,
 	last_packet:   time.Time,
@@ -114,18 +99,8 @@ Connection :: struct {
 	listener:      sim.DL_Node,
 	in_game:       sim.DL_Node,
 	game:          ^Game,
-	request_state: Connection_Request_State,
-}
-
-Connection_Request_State :: struct {
-	payload:        []u8,
-	download:       sim.Client_Download_Content_Request,
-	last_info:      sim.Server_Info,
-	requester:      ^Connection,
-	read_file:      nbio.Handle,
-	read_file_size: int,
-	red:            int,
-	asset:          sim.Asset,
+	last_info:     sim.Server_Info,
+	list_stmt:     sqlite.Query(sim.Asset),
 }
 
 Game :: struct {
@@ -315,7 +290,7 @@ Server_Statements :: struct {
 		SELECT count(*) FROM asset
 	`,
 	select_assets:       sqlite.Statement `
-		SELECT * FROM asset WHERE type = ? AND id > ? ORDER BY id
+		SELECT * FROM asset
 	`,
 	get_asset_by_name:   sqlite.Statement `
 		SELECT * FROM asset WHERE name = ? AND type = ?
@@ -333,16 +308,6 @@ Server_Statements :: struct {
 
 Banned_Ip_Entry :: struct {
 	violation_count: int,
-}
-
-Asset_Request_Kind :: enum {
-	Download,
-	Upload,
-}
-
-Asset_Request :: struct {
-	payload: []u8,
-	conn:    ^Connection,
 }
 
 Ping_Entry_Stage :: enum u8 {
@@ -364,7 +329,6 @@ Server :: struct #align (8) {
 	banned_ips:              lru.Cache(Saved_IP, Banned_Ip_Entry),
 	free_conns:              ^Connection,
 	connections:             map[nbio.Endpoint]^Connection,
-	asset_requests:          lru.Cache(sim.Hash, Asset_Request),
 	pk:                      sim.Private_Key,
 	ping_seq:                int,
 	udp:                     sim.UDP_Connection,
@@ -418,7 +382,7 @@ server_handle_packet :: proc(
 	ok: bool,
 ) {
 	#assert(offset_of(Connection, hctx) == 0)
-	#assert(offset_of(Handshake, tcp) == 0)
+	#assert(offset_of(sim.Handshake, tcp) == 0)
 
 	packet := sim.unmarshall_as(sim.Client_Packet, packet_bytes) or_return
 
@@ -427,6 +391,8 @@ server_handle_packet :: proc(
 
 	from := (^Connection)(from)
 	game := from.game
+
+	assert(game != nil)
 
 	from.last_packet = time.now()
 
@@ -812,132 +778,6 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 	}
 }
 
-// TODO: there is no reason for this to be generic
-hctx_connect :: proc(hctx: ^Handshake, server: ^Server) {
-	nbio.recv_poly2(
-		hctx.sock,
-		{reflect.as_bytes(hctx.ch)},
-		hctx,
-		server,
-		on_conn_recv_hello,
-		all = true,
-		timeout = HANDSHAKE_STAGE_TIMEOUT,
-		l = server.hr.l,
-	)
-
-	on_conn_recv_hello :: proc(
-		op: ^nbio.Operation,
-		hctx: ^Handshake,
-		server: ^Server,
-	) {
-		kill := true
-		defer if kill do hctx->on_fail(server)
-
-		assert(hctx.sock != 0)
-
-		if op.recv.err != nil {
-			log.warn("handshake did not arrive:", op.recv.err)
-			return
-		}
-
-		log.debug("received handshake init from:", op.recv.source)
-
-		if op.recv.received != size_of(sim.Client_Hello) {
-			log.warn("received invalid client hello")
-			return
-		}
-
-		log.debug("sending server hello")
-
-		conn_id := int(
-			(uintptr(hctx) - uintptr(raw_data(server.conn_buf))) /
-			size_of(Connection),
-		)
-		(^sim.Server_Init_Data)(raw_data(&hctx.sh.payload))^ = {
-			conn_id = conn_id,
-		}
-
-		sim.server_handshake_init(&server.pk, &hctx.xpk, &hctx.ch, &hctx.sh)
-		nbio.send_poly2(
-			hctx.sock,
-			{reflect.as_bytes(hctx.sh)},
-			hctx,
-			server,
-			on_conn_send_hello,
-			all = true,
-			timeout = HANDSHAKE_STAGE_TIMEOUT,
-			l = op.l,
-		)
-		kill = false
-	}
-
-	on_conn_send_hello :: proc(
-		op: ^nbio.Operation,
-		hctx: ^Handshake,
-		server: ^Server,
-	) {
-
-		kill := true
-		defer if kill do hctx->on_fail(server)
-
-		assert(hctx.sock != 0)
-
-		if op.send.err != nil {
-			log.warn("failed to send the server hello:", op.send.err)
-			return
-		}
-
-		nbio.recv_poly2(
-			hctx.sock,
-			{reflect.as_bytes(hctx.ceh)},
-			hctx,
-			server,
-			on_conn_recv_end_hello,
-			all = true,
-			timeout = HANDSHAKE_STAGE_TIMEOUT,
-			l = op.l,
-		)
-		kill = false
-	}
-
-	on_conn_recv_end_hello :: proc(
-		op: ^nbio.Operation,
-		hctx: ^Handshake,
-		server: ^Server,
-	) {
-		kill := true
-		defer if kill do hctx->on_fail(server)
-
-		assert(hctx.sock != 0)
-
-		if op.recv.err != nil {
-			log.warn("handshake did not arrive:", op.recv.err)
-			return
-		}
-
-		log.debug("received client hello from:", op.recv.source)
-
-		if op.recv.received != size_of(hctx.ceh) {
-			log.warn("received invalid client hello")
-			return
-		}
-
-		ok := sim.server_handshake_end(
-			&server.pk,
-			&hctx.xpk,
-			&hctx.ch,
-			&hctx.sh,
-			&hctx.ceh,
-			&hctx.secret,
-		)
-		if !ok do return
-
-		hctx->on_boot(server)
-
-		kill = false
-	}
-}
-
 server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	assert(op.accept.err == nil)
 
@@ -970,28 +810,35 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	assert(op.accept.client != 0)
 
 	conn^ = {}
+	conn.l = op.l
 	conn.tcp_endpoint = op.accept.client_endpoint
 	conn.last_packet = time.now()
 	conn.hctx.sock = op.accept.client
 	conn.hctx.host.asoc_data = server
-	conn.hctx.host.on_kill = server_on_tcp_kill
+	conn.hctx.cleanup = server_on_tcp_kill
 	conn.hctx.on_boot = on_boot
-	conn.hctx.on_fail = on_fail
+	conn.hctx.get_pk = get_pk
 
-	hctx_connect(&conn.hctx, server)
+	conn_id := int(
+		(uintptr(conn) - uintptr(raw_data(server.conn_buf))) /
+		size_of(Connection),
+	)
+	(^sim.Server_Init_Data)(raw_data(&conn.sh.payload))^ = {
+		conn_id = conn_id,
+	}
+
+	sim.hctx_connect_server(&conn.hctx, server.hr.l)
 
 	kill = false
 
-	on_fail :: proc(hctx: ^Handshake, server: ^Server) {
-		sim.tcp_connection_kill(&hctx.tcp, server.hr.l)
+	get_pk :: proc(conn: ^Connection) -> sim.Private_Key {
+		return conn.xpk
 	}
 
-	on_boot :: proc(conn: ^Connection, server: ^Server) {
-		kill := true
-		defer if kill do conn->on_fail(server)
-
+	on_boot :: proc(conn: ^Connection) -> bool {
 		assert(conn.tcp.sock != 0)
 
+		server := (^Server)(conn.hctx.host.asoc_data)
 		request := (^sim.Client_Request_Header)(&conn.ch.payload)
 
 		REQUIRES_AUTH :: ~bit_set[sim.Client_Request_Type] {
@@ -1001,24 +848,25 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 
 		if request.kind in REQUIRES_AUTH {
 			if request.conn_id >= len(server.conn_buf) {
-				log.warn("oob request conn id")
-				return
+				return sim.hctx_fail(conn, "oob request conn id")
 			}
 
 			other := &server.conn_buf[request.conn_id]
 			if other.ch.id == {} {
-				log.warn("trying to referece invalid connection")
-				return
+				return sim.hctx_fail(
+					conn,
+					"trying to referece invalid connection",
+				)
 			}
 
-			if crypto.compare_constant_time(other.ch.id[:], conn.ch.id[:]) ==
-			   0 {
-				log.warn("identity mismatch for the request")
-				return
+			// NOTE: we are comparing publick key material so time attacks
+			// should not be a problem? We are signed.
+			if other.ch.id != conn.ch.id {
+				return sim.hctx_fail(conn, "identity mismatch for the request")
 			}
 		}
 
-		Handler_Proc :: proc(
+		Handler_Proc :: #type proc(
 			_: ^Server,
 			_: ^Connection,
 			_: ^sim.Client_Request_Header,
@@ -1028,21 +876,24 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 			.Download_Content  = send_asset,
 			.Play              = boot_player,
 			.Watch_Server_Info = stream_server_info,
-			.Upload_Content    = nil,
+			.Upload_Content    = recv_asset,
+			.List_Assets       = list_assets,
 		}
 
 		if len(handlers) <= int(request.kind) {
-			log.warn(
-				"received out of range Client_Request_Type:",
+			return sim.hctx_fail(
+				conn,
+				"received out of range Client_Request_Type",
 				request.kind,
 			)
-			return
 		}
 
 		h := handlers[request.kind]
 		if h != nil {
-			kill = !h(server, conn, request)
+			return h(server, conn, request)
 		}
+
+		return sim.hctx_fail(conn, "unimplemented handler", request.kind)
 	}
 }
 
@@ -1085,144 +936,111 @@ boot_player :: proc(
 	return true
 }
 
+recv_asset :: proc(
+	server: ^Server,
+	conn: ^Connection,
+	request: ^sim.Client_Request_Header,
+) -> bool {
+	conn.asset_path = asset_path_
+	conn.cleanup = on_kill
+
+	sim.fetch_asset(conn)
+	conn->on_boot()
+
+	asset_path_ :: proc(conn: ^Connection) -> string {
+		return asset_path(&conn.fetch.asset_meta)
+	}
+
+	on_kill :: proc(conn: ^Connection) {
+		server := (^Server)(conn.host.asoc_data)
+
+		if conn.last_error == "" {
+			curr := conn.fetch.asset_meta
+			_, sares := sqlite.exec(
+				server.save_asset,
+				sim.hash_prefix(&curr.hash),
+				nm.str(&curr.name),
+				curr.hash,
+				curr.size,
+				curr.type,
+			)
+			sqlite.assert_ok(server.save_asset, sares)
+		}
+
+		server_on_tcp_kill(conn)
+	}
+
+	return true
+}
+
+list_assets :: proc(
+	server: ^Server,
+	conn: ^Connection,
+	request: ^sim.Client_Request_Header,
+) -> bool {
+	stmt: sqlite.Statement
+	sqlite.prepare(
+		&stmt,
+		sqlite.db_handle(server.statements.select_assets),
+		string(sqlite.sql(server.statements.select_assets)),
+	)
+
+	conn.list_stmt, _ = sqlite.query(stmt, sim.Asset)
+	conn.tcp.send_buf = make([]u8, sim.ASSET_BUF_SIZE)
+
+	do_progress(conn)
+	return true
+
+	do_progress :: proc(conn: ^Connection) {
+		if conn.list_stmt.stmt == {} {
+			sim.tcp_connection_kill(conn, l = conn.l)
+			return
+		}
+
+		buf := sim.tcp_connection_send_buffer(conn)
+		elems := mem.slice_data_cast([]sim.Asset_ID, buf)
+		cnt := 0
+		for asset in sqlite.query_next_iter(&conn.list_stmt) {
+			if cnt >= len(elems) do break
+			elems[cnt] = sim.hash_prefix(&asset.hash)
+			cnt += 1
+		}
+
+		if cnt != len(elems) {
+			sqlite.finalize(&conn.list_stmt.stmt)
+		}
+
+		sim.tcp_connection_send_filled(
+			conn,
+			size_of(sim.Asset_ID) * cnt,
+			on_sent,
+			l = conn.l,
+		)
+	}
+
+	on_sent :: proc(op: ^nbio.Operation, sock: ^Connection) {
+		sock.tcp.sender = nil
+		sim.hctx_fail_guard(sock, "failed to send asset chunk", op.send.err)
+		if op.send.err != nil do return
+		do_progress(sock)
+		sock.error = ""
+	}
+}
+
 send_asset :: proc(
 	server: ^Server,
 	conn: ^Connection,
 	request: ^sim.Client_Request_Header,
 ) -> bool {
 	asset := server_get_asset(server, request.download_content.id) or_return
-	fmt.println(asset)
-	conn.request_state.asset = asset
 	assert(asset != {})
 
-	path := asset_path(&asset)
+	conn.send.asset = asset
+	conn.asset_path = asset_path_
+	sim.send_asset(conn)
 
-	conn.tcp.send_buf = make([]u8, sim.DONWLOAD_BUF_SIZE)
-
-	nbio.open_poly(path, conn, on_open, l = server.hr.l)
-
-	on_open :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-		defer delete(op.open.path)
-
-		if op.open.err != nil {
-			log.error("failed to open", op.open.path, ":", op.open.err)
-			return
-		}
-
-		nbio.stat_poly(op.open.handle, conn, on_stat, l = op.l)
-		state.read_file = op.open.handle
-
-		kill = false
-	}
-
-	on_stat :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-
-		if op.stat.err != nil {
-			log.error("failed to stat:", op.stat.err)
-			return
-		}
-
-		state.read_file_size = int(op.stat.size)
-
-		kill = !do_progress(conn)
-	}
-
-	do_progress :: proc(conn: ^Connection) -> bool {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-
-		if state.asset != {} {
-			buf := sim.tcp_connection_send_buffer(conn)
-			copy(buf, mem.ptr_to_bytes(&state.asset))
-			sim.tcp_connection_send_filled(
-				conn,
-				size_of(state.asset),
-				first_on_sent,
-				l = server.hr.l,
-			)
-			state.asset = {}
-
-			return true
-		}
-
-		if state.red < state.read_file_size {
-			buf := sim.tcp_connection_send_buffer(conn)
-			to_read := min(state.read_file_size - state.red, len(buf))
-			nbio.read_poly(
-				state.read_file,
-				state.red,
-				buf[:to_read],
-				conn,
-				on_read,
-				all = true,
-				l = server.hr.l,
-			)
-
-			return true
-		}
-
-		return false
-	}
-
-	first_on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-		conn.tcp.sender = nil
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-
-		if op.send.err != nil {
-			log.error("failed to send initial packet:", op.send.err)
-			return
-		}
-
-		kill = !do_progress(conn)
-	}
-
-	on_read :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-
-		if op.read.err != nil {
-			log.error("failed to stat:", op.read.err)
-			return
-		}
-
-		sim.tcp_connection_send_filled(conn, op.read.read, on_sent, l = op.l)
-
-		kill = false
-	}
-
-	on_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
-		server := (^Server)(conn.hctx.tcp.host.asoc_data)
-		state := &conn.request_state
-		conn.tcp.sender = nil
-
-		kill := true
-		defer if kill do conn.hctx->on_fail(server)
-
-		if op.send.err != nil {
-			log.error("failed to send chunk:", op.send.err)
-			return
-		}
-
-		state.red += op.send.sent
-
-		kill = !do_progress(conn)
+	asset_path_ :: proc(conn: ^Connection) -> string {
+		return asset_path(&conn.send.asset)
 	}
 
 	return true
@@ -1244,13 +1062,8 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 	return path
 }
 
-server_on_tcp_kill :: proc(
-	conn: ^sim.TCP_Connection,
-	l: ^nbio.Event_Loop,
-	natural: bool,
-) {
+server_on_tcp_kill :: proc(conn: ^Connection) {
 	server := (^Server)(conn.host.asoc_data)
-	conn := (^Connection)(conn)
 	game := conn.game
 
 	conn.next_free = server.free_conns
@@ -1267,10 +1080,7 @@ server_on_tcp_kill :: proc(
 		sim.ents_queue_remove(&game.ents, conn.ent)
 	}
 
-	delete(conn.request_state.payload)
-	if conn.request_state.read_file != 0 {
-		nbio.close(conn.request_state.read_file, l = l)
-	}
+	sqlite.finalize(&conn.list_stmt.stmt)
 
 	log.debug("killed the connection")
 }
@@ -1484,31 +1294,16 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	server = new(Server)
 	server.hr = hr
 
-	lru_pool_size ::
-		size_of(lru.Node(Saved_IP, Banned_Ip_Entry)) * BANNED_IP_LRU_SIZE +
-		size_of(lru.Node(sim.Hash, Asset_Request)) * ASSET_REQUEST_LRU_SIZE +
-		size_of(lru.Node(sim.Ping_ID, Ping_Entry)) * MAX_ACTIVE_PINGS
-	server.lru_pool = arna.init_from_buffer(make([]u8, lru_pool_size))
 	lru.init(
 		&server.banned_ips,
 		BANNED_IP_LRU_SIZE,
-		node_allocator = arna.allocator(&server.lru_pool),
-	)
-	lru.init(
-		&server.asset_requests,
-		ASSET_REQUEST_LRU_SIZE,
-		node_allocator = arna.allocator(&server.lru_pool),
+		node_allocator = hr.init_allocator,
 	)
 	lru.init(
 		&server.active_pings,
 		MAX_ACTIVE_PINGS,
-		node_allocator = arna.allocator(&server.lru_pool),
+		node_allocator = hr.init_allocator,
 	)
-	server.asset_requests.on_remove = ass_on_remove
-
-	ass_on_remove :: proc(_: sim.Hash, value: Asset_Request, _: rawptr) {
-		delete(value.payload)
-	}
 
 	if !FUZZING {
 		init_db(&server.statements)
@@ -1847,8 +1642,8 @@ server_on_ping :: proc(server: ^Server) {
 		Connection,
 		offset_of(Connection, listener),
 	) {
-		if conn.request_state.last_info != info {
-			conn.request_state.last_info = info
+		if conn.last_info != info {
+			conn.last_info = info
 			sim.tcp_connection_send(&conn.hctx, info, server.hr.l)
 		}
 	}
@@ -1859,13 +1654,15 @@ server_on_ping :: proc(server: ^Server) {
 
 @(export)
 server_rewire :: proc(server: ^Server) {
+	// TODO: we are not rewiring stuff here, like at all
+
 	sim.rewire_op(server.acceptor, server_on_accept)
 	sim.rewire_interval(server.ping_interval, server_on_ping)
 	server_schedule_tick(server)
 
 	for _, c in server.connections {
 		c.hctx.host.on_packet = server_on_tcp_packet
-		c.hctx.host.on_kill = server_on_tcp_kill
+		c.hctx.cleanup = server_on_tcp_kill
 	}
 
 	server.udp.host.on_packet = server_on_udp_packet

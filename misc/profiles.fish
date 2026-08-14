@@ -16,6 +16,7 @@ set CLIENT_DEV_FLAGS\
 	-define:HOT_RELOAD=true\
 	-define:RAYLIB_SHARED=true\
 	-define:SQLITE_SHARED=true\
+	-define:WUFFS_SHARED=true\
 	-define:TRACK_ALLOCATIONS=true
 
 alias client-dev 'odin build client $CLIENT_DEV_FLAGS &&\

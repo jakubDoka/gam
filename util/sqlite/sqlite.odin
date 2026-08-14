@@ -195,8 +195,15 @@ prepare_struct :: proc(
 }
 
 finalize :: proc {
+	finalize_slot,
 	finalize_stmt,
 	finalize_struct,
+}
+
+finalize_slot :: proc(statement: ^Statement) {
+	if statement^ == {} do return
+	finalize(statement^)
+	statement^ = {}
 }
 
 finalize_stmt :: proc(statement: Statement) {

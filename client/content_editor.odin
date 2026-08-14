@@ -7,7 +7,6 @@ import "../util/nm"
 import "../util/packer"
 import orui "../vendored/orui/src"
 import rt "base:runtime"
-import "core:crypto"
 import "core:fmt"
 import "core:hash"
 import "core:log"
@@ -464,20 +463,6 @@ ui_file_upload :: proc(client: ^Client) {
 				height = orui.grow(),
 			},
 		)
-	} else if client.asset_uploader != nil {
-		ui_label(
-			id("drop-asset-area-text"),
-			{
-				label = fmt.tprintf(
-					"Uploading %v/%v ...",
-					client.asset_uploader.files_uploaded,
-					len(ctx.dropped_assets),
-				),
-				background = .NONE,
-				width = orui.grow(),
-				height = orui.grow(),
-			},
-		)
 	} else {
 		files := rl.LoadDroppedFiles()
 
@@ -607,20 +592,8 @@ ui_file_upload :: proc(client: ^Client) {
 				disabled = all_uploaded,
 			},
 		) {
-			token: sim.Hash
-			crypto.rand_bytes(token[:])
-
-			when false {
-				tcp_send(
-					client,
-					sim.Client_Asset_Upload {
-						token = token,
-						metas = ctx.dropped_assets.base[:len(
-							ctx.dropped_assets,
-						)],
-					},
-				)
-			}
+			ctx.upload_cursor = 0
+			upload_assets(client)
 		}
 
 		if ui_button(

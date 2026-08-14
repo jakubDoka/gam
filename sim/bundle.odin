@@ -159,6 +159,7 @@ marshall :: proc(
 ) -> (
 	ok: bool,
 ) {
+
 	if bytes, ok := header.([]u8); ok {
 		return encode_slice(e, bytes)
 	}

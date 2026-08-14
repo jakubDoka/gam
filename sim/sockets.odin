@@ -1,20 +1,532 @@
 package sim
 
 import "../util/hot"
+import "base:runtime"
+import "core:fmt"
 import "core:log"
+import "core:mem"
 import "core:nbio"
-import "core:reflect"
+import "core:slice"
 import "core:time"
 
 GAME_PORT :: 6012
 FILE_PORT :: 6013
 
+ASSET_BUF_SIZE :: size_of(Crypt_Header) + 128 * size_of(Asset_ID)
+HANDSHAKE_STAGE_TIMEOUT :: 500 * time.Millisecond
 INACTIVE_SECRET :: Secret_Key{}
 PING_INTERVAL :: 400 * time.Millisecond
 BUFFER_CHUNK_SIZE :: (1 << 16) - size_of(int) * 4
 LATENCY :: #config(LATENCY, 0)
 
 DONWLOAD_BUF_SIZE :: 4096 * 4
+
+Fetch_State :: struct {
+	written:    int,
+	asset_meta: Asset,
+}
+
+Send_State :: struct {
+	asset:     Asset,
+	file_size: int,
+	red:       int,
+}
+
+send_asset :: proc(conn: ^Handshake) -> bool {
+	conn.tcp.send_buf = make([]u8, DONWLOAD_BUF_SIZE)
+
+	path := conn->asset_path()
+	nbio.open_poly(path, conn, on_open, l = conn.l)
+
+	on_open :: proc(op: ^nbio.Operation, conn: ^Handshake) {
+		hctx_fail_guard(
+			conn,
+			"failed to open source file",
+			op.open.path,
+			op.open.err,
+		)
+		defer delete(op.open.path)
+
+		if op.open.err != nil do return
+
+		nbio.stat_poly(op.open.handle, conn, on_stat, l = op.l)
+		conn.file = op.open.handle
+
+		conn.error = ""
+	}
+
+	on_stat :: proc(op: ^nbio.Operation, conn: ^Handshake) {
+		hctx_fail_guard(conn, "failed to stat the source file", op.stat.err)
+		if op.stat.err != nil do return
+
+		conn.send.file_size = int(op.stat.size)
+
+		do_progress(conn)
+		conn.error = ""
+	}
+
+	do_progress :: proc(conn: ^Handshake) {
+		state := &conn.send
+
+		if state.asset != {} {
+			buf := tcp_connection_send_buffer(conn)
+			copy(buf, mem.ptr_to_bytes(&state.asset))
+			tcp_connection_send_filled(
+				conn,
+				size_of(state.asset),
+				first_on_sent,
+				l = conn.l,
+			)
+			state.asset = {}
+
+			return
+		}
+
+		if state.red < state.file_size {
+			buf := tcp_connection_send_buffer(conn)
+			to_read := min(state.file_size - state.red, len(buf))
+			nbio.read_poly(
+				conn.file,
+				state.red,
+				buf[:to_read],
+				conn,
+				on_read,
+				all = true,
+				l = conn.l,
+			)
+
+			return
+		}
+
+		tcp_connection_kill(conn, conn.l, natural = true)
+	}
+
+	first_on_sent :: proc(op: ^nbio.Operation, conn: ^Handshake) {
+		conn.tcp.sender = nil
+
+		hctx_fail_guard(conn, "failed to send initial packet", op.send.err)
+		if op.send.err != nil do return
+
+		do_progress(conn)
+		conn.error = ""
+	}
+
+	on_read :: proc(op: ^nbio.Operation, conn: ^Handshake) {
+		hctx_fail_guard(
+			conn,
+			"failed to read chunk",
+			op.read.err,
+			conn.send.red,
+		)
+		if op.read.err != nil do return
+
+		tcp_connection_send_filled(conn, op.read.read, on_sent, l = op.l)
+		conn.error = ""
+	}
+
+	on_sent :: proc(op: ^nbio.Operation, conn: ^Handshake) {
+		conn.tcp.sender = nil
+
+		hctx_fail_guard(conn, "failed to read chunk", op.send.err)
+		if op.send.err != nil do return
+
+		conn.send.red += op.send.sent
+
+		do_progress(conn)
+		conn.error = ""
+	}
+
+	return true
+}
+
+fetch_asset :: proc(req: ^Handshake) {
+	req.tcp.host.on_packet = first_on_packet
+	req.on_boot = on_boot
+
+	on_boot :: proc(req: ^Handshake) -> bool {
+		req.timeout = time.Second * 5
+		req.one_shot_recv = true
+		tcp_connection_boot(req, DONWLOAD_BUF_SIZE, 0, l = req.l)
+
+		return true
+	}
+
+	first_on_packet :: proc(
+		req: ^Handshake,
+		l: ^nbio.Event_Loop,
+		bytes: []u8,
+	) -> bool {
+		MAX_ASSET_SIZE :: 1024 * 1024 * 8
+
+		req.fetch.asset_meta = slice.to_type(bytes, Asset) or_return
+		if req.fetch.asset_meta.size > MAX_ASSET_SIZE {
+			return hctx_fail(
+				req,
+				"asset size too large",
+				req.fetch.asset_meta.size,
+			)
+		}
+
+		path := req->asset_path()
+		nbio.open_poly(path, req, on_dest_open, {.Write, .Create}, l = req.l)
+
+		return true
+	}
+
+	on_dest_open :: proc(op: ^nbio.Operation, req: ^Handshake) {
+		hctx_fail_guard(
+			req,
+			"failed to open destination file for assset download",
+			op.open.path,
+			op.open.err,
+		)
+		defer delete(op.open.path)
+
+		if op.open.err != nil {
+			return
+		}
+
+		req.file = op.open.handle
+		req.fetch.written = 0
+
+		req.tcp.host.on_packet = on_packet
+		req.one_shot_recv = false
+		tcp_connection_poll_packets(req, req.l)
+
+		req.error = ""
+	}
+
+	on_packet :: proc(
+		hctx: ^Handshake,
+		l: ^nbio.Event_Loop,
+		bytes: []u8,
+	) -> bool {
+		nbio.write_poly(
+			hctx.file,
+			hctx.fetch.written,
+			slice.clone(bytes),
+			hctx,
+			on_write,
+			all = true,
+			l = l,
+		)
+		hctx_ref(hctx)
+		hctx.fetch.written += len(bytes)
+
+		if hctx.fetch.written > hctx.fetch.asset_meta.size {
+			return hctx_fail(
+				hctx,
+				"written asset size exceeded the advertized size",
+			)
+		}
+
+		return true
+
+		on_write :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+			delete(op.write.buf)
+			defer hctx_drop_ref(hctx)
+
+			hctx_fail_guard(hctx, "failed to write to disk", op.write.err)
+			if op.write.err != nil do return
+			hctx.error = ""
+		}
+	}
+}
+
+Handshake :: struct {
+	using tcp:       TCP_Connection,
+	server_endpoint: nbio.Endpoint,
+	using handshake: struct {
+		ch:  Client_Hello,
+		sh:  Server_Hello,
+		ceh: Client_End_Hello,
+		xpk: Private_Key,
+	},
+	get_pk:          proc(hctx: ^Handshake) -> Private_Key,
+	on_boot:         proc(hctx: ^Handshake) -> bool,
+	// NOTE: the string will be deallocated by the caller
+	asset_path:      proc(hctx: ^Handshake) -> string,
+	cleanup:         proc(_: ^Handshake),
+	l:               ^nbio.Event_Loop,
+	last_error:      string,
+	error:           string,
+	ctx:             [dynamic]any,
+	file:            nbio.Handle,
+	rc:              int,
+	using stt:       struct #raw_union {
+		fetch: Fetch_State,
+		send:  Send_State,
+	},
+}
+
+hctx_drop_ref :: proc(hctx: ^Handshake) {
+	hctx.rc -= 1
+	if hctx.rc >= 0 do return
+
+	if hctx.file != 0 do nbio.close(hctx.file, l = hctx.l)
+	hctx->cleanup()
+}
+
+hctx_ref :: proc(hctx: ^Handshake) {
+	hctx.rc += 1
+}
+
+@(deferred_in = hctx_fail_guard_end)
+hctx_fail_guard :: proc(
+	hctx: ^Handshake,
+	error: string,
+	ctx: ..any,
+	loc := #caller_location,
+) {
+	assert(hctx.error == "")
+	hctx.error = error
+	hctx.ctx = slice.to_dynamic(ctx, context.temp_allocator)
+}
+
+hctx_fail_ctx :: proc(hctx: ^Handshake, error: string, ctx: ..any) {
+	hctx.error = error
+	append(&hctx.ctx, ..ctx)
+}
+
+hctx_fail_guard_end :: #force_inline proc(
+	hctx: ^Handshake,
+	_: string,
+	_: ..any,
+	loc := #caller_location,
+) {
+	if hctx.error != "" {
+		hctx.last_error = hctx.error
+		log.error(hctx.error, hctx.ctx, location = loc)
+		tcp_connection_kill(hctx, hctx.l)
+		hctx_drop_ref(hctx)
+	}
+}
+
+@(require_results)
+hctx_fail :: proc(
+	hctx: ^Handshake,
+	error: string,
+	ctx: ..any,
+	loc := #caller_location,
+) -> bool {
+	hctx_fail_ctx(hctx, error, ..ctx)
+	log.error(hctx.error, hctx.ctx, location = loc)
+	return false
+}
+
+hctx_on_kill :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop, natural: bool) {
+	hctx_drop_ref(hctx)
+}
+
+hctx_connect_client :: proc(
+	hctx: ^Handshake,
+	endp: nbio.Endpoint,
+	l: ^nbio.Event_Loop,
+) {
+	hctx.l = l
+	hctx.host.on_kill = hctx_on_kill
+	hctx.handshake = {
+		ch = {payload = hctx.handshake.ch.payload},
+	}
+
+	nbio.dial_poly(endp, hctx, on_dial, l = l)
+
+	on_dial :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(
+			hctx,
+			"failed to dial the server",
+			op.dial.err,
+			op.dial.endpoint,
+		)
+		if op.dial.err != nil do return
+
+		hctx.tcp.sock = op.dial.socket
+		hctx.server_endpoint = op.dial.endpoint
+
+		log.debug("dialed server")
+
+		selected_user := hctx->get_pk()
+		client_handshake_init(&selected_user, &hctx.xpk, &hctx.handshake.ch)
+
+		nbio.send_poly(
+			hctx.tcp.sock,
+			{mem.ptr_to_bytes(&hctx.handshake.ch)},
+			hctx,
+			on_hello_sent,
+			all = true,
+			timeout = HANDSHAKE_STAGE_TIMEOUT,
+			l = op.l,
+		)
+
+		hctx.error = ""
+	}
+
+	on_hello_sent :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(hctx, "failed to send cleint hello", op.send.err)
+		if op.send.err != nil do return
+
+		hctx_fail_ctx(
+			hctx,
+			"client hello was only partially sent",
+			op.send.sent,
+		)
+		if op.send.sent != size_of(Client_Hello) do return
+
+		log.debug("client hello sent")
+
+		nbio.recv_poly(
+			hctx.tcp.sock,
+			{mem.ptr_to_bytes(&hctx.handshake.sh)},
+			hctx,
+			on_server_hello,
+			all = true,
+			timeout = HANDSHAKE_STAGE_TIMEOUT,
+			l = op.l,
+		)
+
+		hctx.error = ""
+	}
+
+	on_server_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(hctx, "failed to receive server hello", op.recv.err)
+		if op.recv.err != nil do return
+
+		hctx_fail_ctx(
+			hctx,
+			"server hello has incorrect length",
+			op.recv.received,
+		)
+		if op.recv.received != size_of(Server_Hello) do return
+
+		selected_user := hctx->get_pk()
+		ok := client_handshake_end(
+			&selected_user,
+			&hctx.xpk,
+			&hctx.ch,
+			&hctx.sh,
+			&hctx.ceh,
+			&hctx.tcp.secret,
+		)
+		hctx_fail_ctx(hctx, "failed to end handshake", hctx.handshake)
+		if !ok do return
+
+		log.debug("server hello is valid")
+
+		nbio.send_poly(
+			hctx.tcp.sock,
+			{mem.ptr_to_bytes(&hctx.handshake.ceh)},
+			hctx,
+			on_handshake_finished,
+			all = true,
+			timeout = HANDSHAKE_STAGE_TIMEOUT,
+			l = op.l,
+		)
+
+		hctx.error = ""
+	}
+
+	on_handshake_finished :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(hctx, "handshake did not terminate", op.send.err)
+		if op.send.err != nil do return
+
+		log.debug("handshake complete, booting")
+
+		hctx->on_boot()
+
+		hctx.error = ""
+	}
+}
+
+hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
+	hctx.host.on_kill = hctx_on_kill
+
+	nbio.recv_poly(
+		hctx.sock,
+		{mem.ptr_to_bytes(&hctx.ch)},
+		hctx,
+		on_conn_recv_hello,
+		all = true,
+		timeout = HANDSHAKE_STAGE_TIMEOUT,
+		l = l,
+	)
+
+	on_conn_recv_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(hctx, "handhake did no arrive", op.recv.err)
+		if op.recv.err != nil do return
+
+		log.debug("received handshake init from:", op.recv.source)
+
+		hctx_fail_ctx(hctx, "received invalid client hello", op.recv.received)
+		if op.recv.received != size_of(Client_Hello) do return
+
+		log.debug("sending server hello")
+
+		pk := hctx->get_pk()
+
+		server_handshake_init(&pk, &hctx.xpk, &hctx.ch, &hctx.sh)
+		nbio.send_poly(
+			hctx.sock,
+			{mem.ptr_to_bytes(&hctx.sh)},
+			hctx,
+			on_conn_send_hello,
+			all = true,
+			timeout = HANDSHAKE_STAGE_TIMEOUT,
+			l = op.l,
+		)
+
+		hctx.error = ""
+	}
+
+	on_conn_send_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(hctx, "failed to send the server hello", op.send.err)
+		if op.send.err != nil do return
+
+		nbio.recv_poly(
+			hctx.sock,
+			{mem.ptr_to_bytes(&hctx.ceh)},
+			hctx,
+			on_conn_recv_end_hello,
+			all = true,
+			timeout = HANDSHAKE_STAGE_TIMEOUT,
+			l = op.l,
+		)
+
+		hctx.error = ""
+	}
+
+	on_conn_recv_end_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		hctx_fail_guard(
+			hctx,
+			"failed to receive client termination",
+			op.recv.err,
+		)
+		if op.recv.err != nil do return
+
+		log.debug("received client hello from:", op.recv.source)
+
+		hctx_fail_ctx(
+			hctx,
+			"received incomplete client termination",
+			op.recv.received,
+		)
+		if op.recv.received != size_of(hctx.ceh) do return
+
+		pk := hctx->get_pk()
+
+		ok := server_handshake_end(
+			&pk,
+			&hctx.xpk,
+			&hctx.ch,
+			&hctx.sh,
+			&hctx.ceh,
+			&hctx.secret,
+		)
+		if !ok do return
+
+		hctx->on_boot()
+		hctx.error = ""
+	}
+}
 
 UDP_Connection :: struct {
 	sock:     nbio.UDP_Socket,
@@ -47,7 +559,7 @@ udp_connection_boot :: proc(
 
 		kill := true
 		defer if kill && !is_server {
-			udp_connection_kill(conn)
+			udp_connection_kill(conn, l = op.l)
 		} else {
 			conn.receiver = nbio.recv_poly2(
 				conn.sock,
@@ -68,7 +580,7 @@ udp_connection_boot :: proc(
 			if ping, is := crypt_header_to_ping(conn.recv_buf); is {
 				if new_tag, more := conn.host.on_ping(conn, ping); more {
 					ping.tag = new_tag
-					slc := reflect.as_bytes(ping)
+					slc := mem.ptr_to_bytes(&ping)
 					udp_connection_send(conn, op.recv.source, nil, slc, op.l)
 				}
 
@@ -176,17 +688,30 @@ packet_buffer_alloc :: proc(
 			chunk.used = 0
 		}
 
-		en: if buf, e, ok := begin_crypt_packet(chunk.data[chunk.used:]); ok {
-			marshall(packet, &e) or_break en
-			len := end_crypt_packet(sk, buf, e)
-			chunk.used += len
-			final_bytes = buf[:len]
-			assert(chunk.used <= BUFFER_CHUNK_SIZE)
-			break
+		me: Encoder
+		ok := marshall(packet, &me)
+		assert(ok)
+
+		if len(chunk.data) - (chunk.used + size_of(Crypt_Header)) <
+		   encoded_len(&me) {
+
+			chunk.used = BUFFER_CHUNK_SIZE
+			chunk = chunk.next_free
+			continue
 		}
 
-		chunk.used = BUFFER_CHUNK_SIZE
-		chunk = chunk.next_free
+		buf, e, oka := begin_crypt_packet(chunk.data[chunk.used:])
+		assert(oka)
+
+		okaa := marshall(packet, &e)
+		assert(okaa)
+
+		len := end_crypt_packet(sk, buf, e)
+		chunk.used += len
+		final_bytes = buf[:len]
+		assert(chunk.used <= BUFFER_CHUNK_SIZE)
+
+		break
 	}
 
 	buf.free_chunks = chunk
@@ -260,6 +785,7 @@ TCP_Connection :: struct {
 	red:             int,
 	handled:         int,
 	handling_packet: bool,
+	one_shot_recv:   bool,
 	timeout:         time.Duration,
 	sender:          ^nbio.Operation,
 	send_buf:        []u8,
@@ -288,6 +814,15 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 
 	conn.red += op.recv.received
 
+	kill = !tcp_connection_poll_packets(conn, op.l)
+}
+
+tcp_connection_poll_packets :: proc(
+	conn: ^TCP_Connection,
+	l: ^nbio.Event_Loop,
+) -> bool {
+	should_stop := false
+
 	b: for {
 		packet_bytes, err := decrypt_packet(
 			&conn.secret,
@@ -297,7 +832,7 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 		switch err {
 		case .Auth:
 			log.warn("packet is not authenticated, dropping connection")
-			return
+			return false
 		case .Incomplete:
 			if len(conn.recv_buf) == conn.red {
 				if conn.handled == 0 {
@@ -305,7 +840,7 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 						"packet does not fit in the buffer,",
 						"dropping connection",
 					)
-					return
+					return false
 				}
 				copy(conn.recv_buf, conn.recv_buf[conn.handled:])
 				conn.red -= conn.handled
@@ -314,23 +849,21 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 			break b
 		case .Ok:
 			conn.handling_packet = true
-			res := conn.host.on_packet(conn, op.l, packet_bytes)
+			res := conn.host.on_packet(conn, l, packet_bytes)
+			should_stop = conn.one_shot_recv
 			conn.handling_packet = false
-			if !res do return
+			if !res do return false
 			conn.handled += len(packet_bytes) + size_of(Crypt_Header)
 			assert(conn.handled <= conn.red)
+			if should_stop do break b
 		}
 	}
 
-	kill = false
-	conn.reader = nbio.recv_poly(
-		conn.sock,
-		{conn.recv_buf[conn.red:]},
-		conn,
-		tcp_connection_recv,
-		timeout = conn.timeout,
-		l = op.l,
-	)
+	if !should_stop {
+		tcp_connection_boot_recv(conn, l)
+	}
+
+	return true
 }
 
 tcp_connection_send :: proc(
@@ -427,9 +960,17 @@ tcp_connection_boot :: proc(
 	recv_buf_size := max(recv_buf_size, 1) // empty buffer would immediatelly panic
 	conn.recv_buf = make([]u8, recv_buf_size, loc = loc)
 	conn.send_buf = make([]u8, send_buf_size, loc = loc)
+	tcp_connection_boot_recv(conn, l)
+}
+
+tcp_connection_boot_recv :: proc(
+	conn: ^TCP_Connection,
+	l: ^nbio.Event_Loop = nil,
+) {
+	fmt.assertf(len(conn.recv_buf) != conn.red, "%v", conn)
 	conn.reader = nbio.recv_poly(
 		conn.sock,
-		{conn.recv_buf},
+		{conn.recv_buf[conn.red:]},
 		conn,
 		tcp_connection_recv,
 		timeout = conn.timeout,
@@ -451,7 +992,7 @@ tcp_connection_kill :: proc(
 	conn^ = {
 		host = conn.host,
 	}
-	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, true)
+	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, natural)
 }
 
 tcp_connection_ensure_sending :: proc(
