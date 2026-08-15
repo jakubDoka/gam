@@ -2,19 +2,15 @@
     .name = .corss_compilation,
     .version = "0.0.0",
     .fingerprint = 0xe9e60300a4b2cdff,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .raylib = .{
-            .url = "git+https://github.com/raysan5/raylib?ref=master#720dd22491cdc4a29ec0ea87b572d9380872198c",
-            .hash = "raylib-5.6.0-dev-whq8uMVQCgVTgRxG3REWgBBSi2BR-nf4bq6eqANxImt7",
+            .url = "git+https://github.com/raysan5/raylib#dad422a430815ec595a5b241d65934ca612e5920",
+            .hash = "raylib-6.0.0-whq8uIPTKwXybRNNu7BJNM6bxip5fYUgAh-bctTa7oHR",
         },
         .sqlite = .{
             .url = "https://sqlite.org/2026/sqlite-amalgamation-3530000.zip",
             .hash = "N-V-__8AAAzxrQBNeXdRXqDQlfE8r_r9PGiSWKATj50chaqM",
-        },
-        .raygui = .{
-            .url = "git+https://github.com/raysan5/raygui.git#6d2b28ff748158be0d63d07988d5d0672905dedf",
-            .hash = "N-V-__8AADHzbwBbCMOBo0iC8HRrZA67K-zyJMrov3DL0zXN",
         },
     },
     .paths = .{

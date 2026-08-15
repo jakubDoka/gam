@@ -17,6 +17,7 @@ import "core:mem/tlsf"
 import "core:nbio"
 import "core:os"
 import "core:reflect"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sync/chan"
@@ -190,6 +191,8 @@ Ent_Extra :: struct {
 }
 
 client_udp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
+	assert(client.hctx.server_endpoint != {})
+
 	ok := sim.udp_connection_send(
 		&client.udp,
 		client.hctx.server_endpoint,
@@ -430,6 +433,8 @@ client_draw_input :: proc(client: ^Client) {
 }
 
 client_compute_input :: proc(client: ^Client) {
+	if client.connection_stage != .Connected do return
+
 	prev_input := client.current_input
 	input := &client.current_input
 	input.inner = {
@@ -455,8 +460,6 @@ client_compute_input :: proc(client: ^Client) {
 		client_udp_send(client, client.current_input.inner)
 		client.current_input.inner.seq += 1
 	}
-
-	return
 }
 
 ui_build_selection_update :: proc(client: ^Client) {
@@ -761,8 +764,7 @@ client_on_tick :: proc(client: ^Client) {
 }
 
 refresh_sheet :: proc(client: ^Client) {
-	packer.sheet_destroy(client.sheet)
-
+	prev_assets := slice.clone(client.assets[:], context.temp_allocator)
 	clear(&client.assets)
 	append(&client.assets, 0)
 
@@ -776,6 +778,12 @@ refresh_sheet :: proc(client: ^Client) {
 		append(&client.assets, asset.id)
 	}
 	sqlite.reset(stmt)
+
+	if slice.equal(prev_assets, client.assets[:]) {
+		return
+	}
+
+	packer.sheet_destroy(client.sheet)
 
 	images := make([]rl.Image, len(client.assets), context.temp_allocator)
 	defer for i in images do rl.UnloadImage(i)
@@ -1303,8 +1311,8 @@ client_update :: proc(client: ^Client) {
 
 @(export)
 client_rewire :: proc(client: ^Client) {
-	client.hctx.cleanup = client_on_tcp_kill
-	client.hctx.tcp.host.on_packet = client_on_tcp_packet
+	client.cleanup = client_on_tcp_kill
+	client.host.on_packet = client_on_tcp_packet
 	client.udp.host.on_kill = client_on_udp_kill
 	client.udp.host.on_packet = client_on_udp_packet
 	client.udp.host.decrypt = client_decrypt_packet

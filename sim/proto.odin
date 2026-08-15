@@ -193,6 +193,7 @@ Server_State :: struct {
 	you:              Ent_Net_ID,
 	your_next_net_id: Ent_Net_ID,
 	ents:             Custom_Encoding,
+	stat_hash:        Hash,
 	players:          []Client_Input_Keys,
 }
 
@@ -475,6 +476,8 @@ encode_leb128 :: proc(d: ^Encoder, v: $T) -> bool {
 }
 
 ent_synced_encode :: proc(ent: ^Ent, ents: ^Ents, e: ^Encoder) -> (ok: bool) {
+	assert(ent.net_id.seq != 0)
+
 	s := ents_stats_get(ents, ent.stats)
 
 	set_slot := encoder_reserve(e, ENT_SYNCED_PRESENCE_CAP / 8) or_return

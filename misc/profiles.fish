@@ -44,3 +44,5 @@ set SANDBOX_DEV_FLAGS\
 
 alias sandbox-dev 'odin build sandbox $SANDBOX_DEV_FLAGS &&
 	gdb sandbox.bin $GDB_FLAGS'
+
+alias measure 'rg --files --glob "*.odin" --glob "!vendored" | xargs cloc'

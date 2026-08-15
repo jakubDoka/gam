@@ -148,6 +148,7 @@ UI_Reactor :: struct {
 	using ui_statements:     UI_Statements,
 	selected_team:           sim.Ent_Team_ID,
 	selected_units:          [dynamic]sim.Ent_ID,
+	sheet_sum:               sim.Asset_ID,
 	sheet:                   packer.Sheet,
 	orui_ctx:                orui.Context,
 	has_dirty_config:        bool,

@@ -165,7 +165,7 @@ fetch_asset :: proc(req: ^Handshake) {
 	) -> bool {
 		MAX_ASSET_SIZE :: 1024 * 1024 * 8
 
-		req.fetch.asset_meta = slice.to_type(bytes, Asset) or_return
+		req.fetch.asset_meta = unmarshall_as(Asset, bytes) or_return
 		if req.fetch.asset_meta.size > MAX_ASSET_SIZE {
 			return hctx_fail(
 				req,
@@ -864,7 +864,7 @@ tcp_connection_send :: proc(
 	packet: any,
 	l: ^nbio.Event_Loop,
 ) -> bool {
-	if LATENCY != 0 {
+	when LATENCY != 0 {
 		buf := serialize_to_bytes(packet)
 
 		nbio.timeout_poly2(

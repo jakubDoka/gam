@@ -45,12 +45,10 @@ pub fn build(b: *std.Build) !void {
     const raylib = b.dependency("raylib", .{
         .target = win_target,
         .optimize = optimize,
+        .raygui = true,
     });
 
-    const raylib_lib = @import("raylib");
-    raylib_lib.addRaygui(b, raylib.artifact("raylib"), b.dependency("raygui", .{}), .{});
-
-    var project_dir = try std.fs.cwd().openDir("..", .{ .iterate = true });
+    var project_dir = try std.Io.Dir.cwd().openDir(b.graph.io, "..", .{ .iterate = true });
     var walker = try project_dir.walk(b.allocator);
 
     const compile_client = b.addSystemCommand(&.{
@@ -66,7 +64,7 @@ pub fn build(b: *std.Build) !void {
         "-build-mode=object",
     });
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(b.graph.io)) |entry| {
         if (std.mem.endsWith(u8, entry.basename, ".odin")) {
             compile_client.addFileInput(
                 b.path(try std.fs.path.join(b.allocator, &.{ "..", entry.path })),
@@ -94,6 +92,8 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     win.root_module.addObjectFile(client);
+    win.root_module.addCSourceFile(.{ .file = b.path("raylib_shim.c") });
+    win.root_module.addIncludePath(raylib.path("src"));
     win.root_module.linkLibrary(raylib.artifact("raylib"));
     win.root_module.linkLibrary(sqlite_lib);
     win.root_module.linkSystemLibrary("ws2_32", .{});

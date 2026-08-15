@@ -420,6 +420,7 @@ server_handle_packet :: proc(
 					you = e.net_id,
 					your_next_net_id = from.input.next_net_id,
 					ents = {value = {&game.ents, encode_state}},
+					stat_hash = game.last_stats_hash,
 					players = players[:],
 				},
 			)
@@ -428,6 +429,7 @@ server_handle_packet :: proc(
 				ents := (^sim.Ents)(data)
 				iter := sim.ents_iter(ents)
 				for ent in sim.ents_iter_next(&iter) {
+					assert(ent.team >= 0)
 					sim.ent_synced_encode(ent, ents, e) or_return
 				}
 				return true

@@ -7,6 +7,7 @@ import "../util/nm"
 import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:nbio"
@@ -63,6 +64,18 @@ client_handle_packet :: proc(
 	case sim.Server_State:
 		client.tps = p.tps
 
+		{
+			stats := client.ents.stats[:]
+			packet: sim.Server_Packet = sim.Server_Stats {
+				stats = sim.custom_encoding_stats(&stats),
+			}
+
+			buf := sim.serialize_to_bytes(packet, context.temp_allocator)
+			stats_hash: sim.Hash
+			sim.hash(buf, &stats_hash)
+			if stats_hash != p.stat_hash do break
+		}
+
 		present := bit_arr.init(len(client.ents.slots), context.temp_allocator)
 		new := bit_arr.init(len(client.ents.slots), context.temp_allocator)
 
@@ -87,7 +100,7 @@ client_handle_packet :: proc(
 
 			ne := net_id_to_ent[synced.net_id]
 			if ne == nil {
-				assert(synced.net_id.seq != 0)
+				fmt.assertf(synced.net_id.seq != 0, "%v", synced)
 				synced.net_id.seq -= 1
 				ne = sim.ents_add(&client.ents, &synced.net_id)
 				if ne == sim.NIL_ENT do continue
@@ -131,6 +144,8 @@ client_handle_packet :: proc(
 			x.pos_smoothing = ne.synced.pos + x.pos_smoothing - synced.pos
 			ne.synced = synced
 		}
+
+		assert(len(d.remining) == 0)
 
 		for &e in sim.ents_iter(&client.ents) {
 			if !bit_arr.contains(present, int(e.id.index)) &&
@@ -289,7 +304,6 @@ client_handle_packet :: proc(
 }
 
 client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
-	has_missing := false
 	for &s in set {
 		if s == 0 do continue
 
@@ -297,13 +311,10 @@ client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 
 		if _, err := os.stat(name, context.temp_allocator); err != nil {
 			append(&client.assets_to_fetch, s)
-			has_missing = true
 		}
 	}
 
-	if has_missing {
-		fetch_assets(client)
-	}
+	fetch_assets(client)
 }
 
 Req :: struct {
@@ -473,6 +484,9 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 
 	client.hctx.get_pk = get_pk
 	client.hctx.on_boot = on_boot
+	client.hctx.cleanup = client_on_tcp_kill
+	client.hctx.error = ""
+	client.hctx.last_error = ""
 
 	{
 		udp_sock, create_err := nbio.create_udp_socket(.IP4)
@@ -514,11 +528,8 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 			sim.SERVER_RECV_BUF_SIZE,
 			l = client.l,
 		)
-		client.tcp.host = {
-			asoc_data = client,
-			on_packet = client_on_tcp_packet,
-		}
-		client.cleanup = client_on_tcp_kill
+		client.host.asoc_data = client
+		client.host.on_packet = client_on_tcp_packet
 
 		sim.udp_connection_boot(&client.udp, l = client.l)
 		client.udp.host = {
