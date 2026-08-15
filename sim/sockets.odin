@@ -98,7 +98,7 @@ send_asset :: proc(conn: ^Handshake) -> bool {
 			return
 		}
 
-		tcp_connection_kill(conn, conn.l, natural = true)
+		tcp_connection_kill(conn, conn.l)
 	}
 
 	first_on_sent :: proc(op: ^nbio.Operation, conn: ^Handshake) {
@@ -314,7 +314,7 @@ hctx_fail :: proc(
 	return false
 }
 
-hctx_on_kill :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop, natural: bool) {
+hctx_on_kill :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 	hctx_drop_ref(hctx)
 }
 
@@ -604,14 +604,10 @@ udp_connection_boot :: proc(
 	}
 }
 
-udp_connection_kill :: proc(
-	conn: ^UDP_Connection,
-	l: ^nbio.Event_Loop = nil,
-	natural := false,
-) {
+udp_connection_kill :: proc(conn: ^UDP_Connection, l: ^nbio.Event_Loop = nil) {
 	hot.sip.io_remove(conn.receiver)
 	if conn.sock != 0 do nbio.close(conn.sock, l = l)
-	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, natural)
+	if conn.host.on_kill != nil do conn.host.on_kill(conn, l)
 	conn.sock = 0
 	conn.receiver = nil
 }
@@ -764,7 +760,7 @@ buffer_chunk_drop :: proc(buf: ^Buffer_Chunk) {
 Host :: struct($T: typeid) {
 	asoc_data:       rawptr,
 	on_packet:       proc(_: ^T, _: ^nbio.Event_Loop, _: []u8) -> bool,
-	on_kill:         proc(_: ^T, _: ^nbio.Event_Loop, natural: bool),
+	on_kill:         proc(_: ^T, _: ^nbio.Event_Loop),
 	decrypt:         proc(
 		_: ^T,
 		_: nbio.Endpoint,
@@ -799,8 +795,7 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	assert(conn.sock != 0)
 
 	kill := true
-	natural := false
-	defer if kill do tcp_connection_kill(conn, op.l, natural)
+	defer if kill do tcp_connection_kill(conn, op.l)
 
 	if op.recv.err != nil {
 		log.error("encoungered connection error:", op.recv.err)
@@ -808,7 +803,6 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	}
 
 	if op.recv.received == 0 {
-		natural = true
 		return
 	}
 
@@ -978,11 +972,7 @@ tcp_connection_boot_recv :: proc(
 	)
 }
 
-tcp_connection_kill :: proc(
-	conn: ^TCP_Connection,
-	l: ^nbio.Event_Loop = nil,
-	natural := false,
-) {
+tcp_connection_kill :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop = nil) {
 	assert(!conn.handling_packet)
 	hot.sip.io_remove(conn.reader)
 	hot.sip.io_remove(conn.sender)
@@ -992,7 +982,7 @@ tcp_connection_kill :: proc(
 	conn^ = {
 		host = conn.host,
 	}
-	if conn.host.on_kill != nil do conn.host.on_kill(conn, l, natural)
+	if conn.host.on_kill != nil do conn.host.on_kill(conn, l)
 }
 
 tcp_connection_ensure_sending :: proc(

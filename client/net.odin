@@ -536,11 +536,7 @@ client_on_tcp_kill :: proc(client: ^Client) {
 	client_clear_state(client, "tcp connection terminated", .Tcp)
 }
 
-client_on_udp_kill :: proc(
-	conn: ^sim.UDP_Connection,
-	l: ^nbio.Event_Loop,
-	natural: bool,
-) {
+client_on_udp_kill :: proc(conn: ^sim.UDP_Connection, l: ^nbio.Event_Loop) {
 	client := (^Client)(conn.host.asoc_data)
 	client_clear_state(client, "udp connection terminated", .Udp)
 }
