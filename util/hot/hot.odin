@@ -1,11 +1,11 @@
 package hot_reload
 
+import nbio "../../simt/nbio"
 import "base:runtime"
 import "core:debug/trace"
 import "core:dynlib"
 import "core:fmt"
 import "core:log"
-import "core:nbio"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -255,7 +255,9 @@ dump_trace :: proc() {
 
 @(require_results)
 init_trace :: proc(
-) -> proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
+) -> (
+	proc(prefix, message: string, loc: runtime.Source_Code_Location) -> !,
+) {
 	when !ODIN_DEBUG do return context.assertion_failure_proc
 	sync.once_do(&once, proc() {
 		trace.init(&global_trace_ctx)

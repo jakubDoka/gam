@@ -1,6 +1,7 @@
 package client
 
 import "../sim"
+import nbio "../simt/nbio"
 import "../util/arna"
 import "../util/hot"
 import "../util/packer"
@@ -14,7 +15,6 @@ import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:mem/tlsf"
-import "core:nbio"
 import "core:os"
 import "core:reflect"
 import "core:slice"

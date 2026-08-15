@@ -1,6 +1,7 @@
 package server
 
 import "../sim"
+import nbio "../simt/nbio"
 import "../util/arna"
 import "../util/hot"
 import "../util/nm"
@@ -13,7 +14,6 @@ import "core:io"
 import "core:log"
 import "core:mem"
 import "core:mem/tlsf"
-import "core:nbio"
 import "core:os"
 import "core:reflect"
 import "core:sort"
@@ -1399,7 +1399,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	}
 
 	init_net: {
-		udp_sock, create_err := nbio.create_udp_socket(.IP4)
+		udp_sock, create_err := nbio.create_udp_socket(.IP4, server.hr.l)
 		log.assertf(
 			create_err == nil,
 			"failed to create udp socket: %v",

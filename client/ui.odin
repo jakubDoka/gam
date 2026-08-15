@@ -1,6 +1,7 @@
 package client
 
 import "../sim"
+import nbio "../simt/nbio"
 import "../util/arna"
 import "../util/b58"
 import "../util/bit_arr"
@@ -16,7 +17,6 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
-import "core:nbio"
 import "core:reflect"
 import "core:strings"
 import "core:time"

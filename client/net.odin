@@ -1,6 +1,7 @@
 package client
 
 import "../sim"
+import nbio "../simt/nbio"
 import "../util/b58"
 import "../util/bit_arr"
 import "../util/nm"
@@ -10,7 +11,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:mem"
-import "core:nbio"
 import "core:net"
 import "core:os"
 import "core:reflect"
@@ -489,7 +489,7 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 	client.hctx.last_error = ""
 
 	{
-		udp_sock, create_err := nbio.create_udp_socket(.IP4)
+		udp_sock, create_err := nbio.create_udp_socket(.IP4, client.l)
 		sim.hctx_fail_guard(&client.hctx, "can't open udp socket", create_err)
 		if create_err != nil do return
 

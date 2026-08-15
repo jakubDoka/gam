@@ -1,11 +1,11 @@
 package sim
 
+import nbio "../simt/nbio"
 import "../util/hot"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:mem"
-import "core:nbio"
 import "core:slice"
 import "core:time"
 
