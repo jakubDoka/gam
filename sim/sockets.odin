@@ -98,6 +98,13 @@ send_asset :: proc(conn: ^Handshake) -> bool {
 			return
 		}
 
+		fmt.assertf(
+			state.red == state.file_size,
+			"%v == %v",
+			state.red,
+			state.file_size,
+		)
+
 		tcp_connection_kill(conn, conn.l)
 	}
 
@@ -130,7 +137,7 @@ send_asset :: proc(conn: ^Handshake) -> bool {
 		hctx_fail_guard(conn, "failed to read chunk", op.send.err)
 		if op.send.err != nil do return
 
-		conn.send.red += op.send.sent
+		conn.send.red += op.send.sent - size_of(Crypt_Header)
 
 		do_progress(conn)
 		conn.error = ""
@@ -539,7 +546,7 @@ UDP_Connection :: struct {
 udp_connection_boot :: proc(
 	conn: ^UDP_Connection,
 	is_server := false,
-	l: ^nbio.Event_Loop = nil,
+	l: ^nbio.Event_Loop,
 ) {
 	conn.receiver = nbio.recv_poly2(
 		conn.sock,
@@ -604,7 +611,7 @@ udp_connection_boot :: proc(
 	}
 }
 
-udp_connection_kill :: proc(conn: ^UDP_Connection, l: ^nbio.Event_Loop = nil) {
+udp_connection_kill :: proc(conn: ^UDP_Connection, l: ^nbio.Event_Loop) {
 	hot.sip.io_remove(conn.receiver)
 	if conn.sock != 0 do nbio.close(conn.sock, l = l)
 	if conn.host.on_kill != nil do conn.host.on_kill(conn, l)
@@ -617,7 +624,7 @@ udp_connection_send :: proc(
 	to: nbio.Endpoint,
 	secret: ^Secret_Key,
 	packet: any,
-	l: ^nbio.Event_Loop = nil,
+	l: ^nbio.Event_Loop,
 ) -> bool {
 	bytes, rc := packet_buffer_alloc(&conn.send_buf, secret, packet) or_return
 
@@ -758,19 +765,11 @@ buffer_chunk_drop :: proc(buf: ^Buffer_Chunk) {
 }
 
 Host :: struct($T: typeid) {
-	asoc_data:       rawptr,
-	on_packet:       proc(_: ^T, _: ^nbio.Event_Loop, _: []u8) -> bool,
-	on_kill:         proc(_: ^T, _: ^nbio.Event_Loop),
-	decrypt:         proc(
-		_: ^T,
-		_: nbio.Endpoint,
-		_: []u8,
-	) -> (
-		[]u8,
-		Decrypt_Error,
-	),
-	on_ping:         proc(_: ^T, id: Ping) -> (Ping_Tag, bool),
-	on_buffer_flush: proc(_: ^T, _: ^nbio.Event_Loop, free_size: int),
+	asoc_data: rawptr,
+	on_packet: proc(_: ^T, _: ^nbio.Event_Loop, _: []u8) -> bool,
+	on_kill:   proc(_: ^T, _: ^nbio.Event_Loop),
+	decrypt:   proc(_: ^T, _: nbio.Endpoint, _: []u8) -> ([]u8, Decrypt_Error),
+	on_ping:   proc(_: ^T, id: Ping) -> (Ping_Tag, bool),
 }
 
 TCP_Connection :: struct {
@@ -909,7 +908,7 @@ tcp_connection_send_filled :: proc(
 	conn: ^TCP_Connection,
 	size: int,
 	on_sent: proc(op: ^nbio.Operation, sock: ^TCP_Connection),
-	l: ^nbio.Event_Loop = nil,
+	l: ^nbio.Event_Loop,
 ) {
 	len := size + size_of(Crypt_Header)
 
@@ -948,7 +947,7 @@ tcp_connection_boot :: proc(
 	conn: ^TCP_Connection,
 	recv_buf_size: int,
 	send_buf_size: int,
-	l: ^nbio.Event_Loop = nil,
+	l: ^nbio.Event_Loop,
 	loc := #caller_location,
 ) {
 	recv_buf_size := max(recv_buf_size, 1) // empty buffer would immediatelly panic
@@ -957,10 +956,7 @@ tcp_connection_boot :: proc(
 	tcp_connection_boot_recv(conn, l)
 }
 
-tcp_connection_boot_recv :: proc(
-	conn: ^TCP_Connection,
-	l: ^nbio.Event_Loop = nil,
-) {
+tcp_connection_boot_recv :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop) {
 	fmt.assertf(len(conn.recv_buf) != conn.red, "%v", conn)
 	conn.reader = nbio.recv_poly(
 		conn.sock,
@@ -972,7 +968,7 @@ tcp_connection_boot_recv :: proc(
 	)
 }
 
-tcp_connection_kill :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop = nil) {
+tcp_connection_kill :: proc(conn: ^TCP_Connection, l: ^nbio.Event_Loop) {
 	assert(!conn.handling_packet)
 	hot.sip.io_remove(conn.reader)
 	hot.sip.io_remove(conn.sender)
@@ -1018,14 +1014,6 @@ tcp_connection_on_send :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	copy(conn.send_buf, conn.send_buf[op.send.sent:conn.buffered])
 	conn.buffered -= op.send.sent
 
-	if conn.host.on_buffer_flush != nil {
-		conn.host.on_buffer_flush(
-			conn,
-			op.l,
-			len(conn.send_buf) - conn.buffered,
-		)
-	}
-
 	tcp_connection_ensure_sending(conn, op.l)
 }
 
@@ -1038,7 +1026,7 @@ interval_poly :: proc(
 	v: $T,
 	cb: proc(_: T),
 	op_slot: ^^nbio.Operation = nil,
-	l: ^nbio.Event_Loop = nil,
+	l: ^nbio.Event_Loop,
 ) {
 	op := nbio.timeout_poly3(period, v, cb, op_slot, on_tick, l = l)
 	if op_slot != nil do op_slot^ = op

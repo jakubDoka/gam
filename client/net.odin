@@ -347,6 +347,7 @@ upload_assets :: proc(client: ^Client) {
 		req.send.asset = next.base
 		req.on_boot = on_boot
 		req.asset_path = asset_path
+		req.cleanup = on_kill
 		req.path = next.path
 		req.idx = ctx.upload_cursor - 1
 
@@ -412,6 +413,8 @@ fetch_assets :: proc(client: ^Client) {
 	on_kill :: proc(req: ^Req) {
 		client := (^Client)(req.host.asoc_data)
 		client.inflight_assets -= 1
+
+		assert(req.fetch.asset_meta.size == req.fetch.written, "TODO")
 
 		if req.last_error == "" {
 			_, res := sqlite.exec(

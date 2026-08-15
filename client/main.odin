@@ -793,7 +793,7 @@ refresh_sheet :: proc(client: ^Client) {
 			sqlite.assert_ok(client.delete_asset, res)
 			has_missing = true
 
-			log.warn("encountered missin image, inconsistent cache")
+			log.warn("encountered missin image, inconsistent cache", name)
 		}
 	}
 
@@ -806,7 +806,7 @@ refresh_sheet :: proc(client: ^Client) {
 		res, stmt := sqlite.query(client.get_asset, asset, sprite)
 		if res == .DONE {
 			has_missing = true
-			log.warn("sprite is in the cache but not in db", sprite, asset)
+			log.warn("sprite is in the cache but not in db", sprite)
 			continue
 		}
 		sqlite.assert_ok(stmt, res)
