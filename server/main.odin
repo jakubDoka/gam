@@ -7,7 +7,7 @@ import "../util/hot"
 import "../util/nm"
 import "../util/rtt"
 import "../util/sqlite"
-import rt "base:runtime"
+import "base:runtime"
 import "core:container/lru"
 import "core:crypto"
 import "core:io"
@@ -23,12 +23,10 @@ import "core:sys/posix"
 import "core:time"
 import "core:unicode/utf8"
 
-FUZZING :: #config(FUZZING, false)
-
 BUNDLE_PATH :: "bundle.bin"
 CONFIG_PATH :: "config/stats.yaml"
 CONFIG_PATH_EDITED :: "config/stats.edited.yaml"
-SERVER_DB_PATH: cstring : ":memory:" when FUZZING else "config/db.db"
+SERVER_DB_PATH: cstring : "config/db.db"
 SERVER_KEY_PATH :: "config/key.bin"
 CONNECTION_TIMEOUT :: 3 * time.Second
 HANDSHAKE_STAGE_TIMEOUT :: 500 * time.Millisecond
@@ -637,7 +635,7 @@ server_handle_packet :: proc(
 
 		me: sim.Encoder
 
-		okm := sim.map_store(p.mapa, &me)
+		okm := sim.marshall(p.mapa, &me)
 		assert(okm)
 		if sim.encoded_len(&me) > len(packet_bytes) {
 			log.warn(
@@ -651,7 +649,7 @@ server_handle_packet :: proc(
 
 		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
 		me = {buf}
-		ok := sim.map_store(p.mapa, &me)
+		ok := sim.marshall(p.mapa, &me)
 		assert(ok)
 
 		err := os.write_entire_file(map_path, buf)
@@ -687,7 +685,10 @@ server_get_asset :: proc(
 }
 
 game_ent_by_net_id :: proc(game: ^Game, id: sim.Ent_Net_ID) -> ^sim.Ent {
-	// TODO: build a net id index instead, this is a strain on the server
+	// TODO(low): build a net id index instead, this is a strain on the server
+	// low: because a single game has very little entities, it might actually
+	// be contraproductive
+	// maybe better use of time is u8 hash as a parallel array
 	iter := sim.ents_iter(&game.ents)
 	for e in sim.ents_iter_next(&iter) {
 		if e.net_id == id {
@@ -697,7 +698,7 @@ game_ent_by_net_id :: proc(game: ^Game, id: sim.Ent_Net_ID) -> ^sim.Ent {
 	return sim.NIL_ENT
 }
 
-pick_map :: proc(index: int, temp_allocator: rt.Allocator) -> string {
+pick_map :: proc(index: int, temp_allocator: runtime.Allocator) -> string {
 	map_entries, map_entries_err := os.read_directory_by_path(
 		sim.MAP_DIR,
 		0,
@@ -717,7 +718,7 @@ pick_map :: proc(index: int, temp_allocator: rt.Allocator) -> string {
 
 	choosen := map_entries[index % len(map_entries)]
 
-	full_path, fperr := os.join_path(
+	full_path, fperr := nbio.join_path(
 		{sim.MAP_DIR, choosen.name},
 		temp_allocator,
 	)
@@ -1060,7 +1061,7 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 	ext := sim.EXT_BY_TYPE[asset.type]
 
 	name := strings.join({name_str, ext}, "", context.temp_allocator)
-	path, _ := os.join_path({dir, name}, context.allocator)
+	path, _ := nbio.join_path({dir, name}, context.allocator)
 	return path
 }
 
@@ -1220,7 +1221,8 @@ server_bundle_refresh :: proc(server: ^Server) {
 	}
 
 	{
-		// TODO: this should be extracted out
+		// TODO(low): this should be extracted out
+		// low: idk
 		game := &server.lobby
 
 		delete(game.ents.stats)
@@ -1238,7 +1240,7 @@ visit_files :: proc(
 ) {
 	context.allocator = context.temp_allocator
 
-	dir, dir_err := os.join_path({cwd, dir}, context.allocator)
+	dir, dir_err := nbio.join_path({cwd, dir}, context.allocator)
 	log.assertf(dir_err == nil, "failed to join path: %v", dir_err)
 
 	walker := os.walker_create(dir)
@@ -1292,6 +1294,7 @@ init_db :: proc(stmst: ^Server_Statements) {
 
 server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	context.allocator = hr.init_allocator
+	append(&hr.rewire_table, ..REWIRE_TABLE[:])
 
 	server = new(Server)
 	server.hr = hr
@@ -1307,9 +1310,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		node_allocator = hr.init_allocator,
 	)
 
-	if !FUZZING {
-		init_db(&server.statements)
-	}
+	init_db(&server.statements)
 
 	init_resources: {
 		sim.packet_buffer_reserve(&server.udp.send_buf, 8)
@@ -1322,8 +1323,6 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	}
 
 	init_config: {
-		if FUZZING do break init_config
-
 		defer free_all(context.temp_allocator)
 
 		{
@@ -1368,13 +1367,13 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 				sim.map_text_to_bin(m.spec, &e, "", "")
 				final := buf[:len(buf) - len(e.remining)]
 
-				full_path, fperr := os.join_path(
+				full_path, fperr := nbio.join_path(
 					{sim.MAP_DIR, m.name},
 					context.temp_allocator,
 				)
 				log.assertf(fperr == nil, "failed to join path: %v", fperr)
 
-				full_path_with_ext, fpwerr := os.join_filename(
+				full_path_with_ext, fpwerr := nbio.join_filename(
 					full_path,
 					"gmap",
 					context.temp_allocator,
@@ -1450,14 +1449,12 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		)
 	}
 
-	if !FUZZING {
-		server.tick_interval = nbio.timeout_poly(
-			0,
-			server,
-			server_on_tick,
-			server.hr.l,
-		)
-	}
+	server.tick_interval = nbio.timeout_poly(
+		0,
+		server,
+		server_on_tick,
+		server.hr.l,
+	)
 
 	return
 }
@@ -1494,11 +1491,7 @@ server_init :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		game := &server.lobby
 		game.server = server
 		sim.ents_reserve(&game.ents, 128)
-		if FUZZING {
-			game.map_index = 1
-		} else {
-			game_load_next_map(game)
-		}
+		game_load_next_map(game)
 	}
 
 	return
@@ -1654,22 +1647,35 @@ server_on_ping :: proc(server: ^Server) {
 	server.last_ping = time.now()
 }
 
+REWIRE_TABLE := [?]rawptr {
+	rawptr(server_on_accept),
+	rawptr(server_on_ping),
+	rawptr(server_on_udp_packet),
+	rawptr(server_on_udp_ping),
+	rawptr(server_decrypt_packet),
+	rawptr(server_on_tcp_packet),
+	rawptr(server_on_tcp_kill),
+}
+
 @(export)
 server_rewire :: proc(server: ^Server) {
-	// TODO: we are not rewiring stuff here, like at all
+	rw: hot.Rewireing
+	rw.hr = server.hr
+	append(&rw.table, ..REWIRE_TABLE[:])
+	defer hot.rewire_apply(rw)
 
-	sim.rewire_op(server.acceptor, server_on_accept)
-	sim.rewire_interval(server.ping_interval, server_on_ping)
+	hot.rewire(&rw, sim.op_rewire_slot(server.acceptor))
+	hot.rewire(&rw, sim.interval_rewire_slot(server.ping_interval))
 	server_schedule_tick(server)
 
 	for _, c in server.connections {
-		c.hctx.host.on_packet = server_on_tcp_packet
-		c.hctx.cleanup = server_on_tcp_kill
+		hot.rewire(&rw, c.hctx.host.on_packet)
+		hot.rewire(&rw, c.hctx.cleanup)
 	}
 
-	server.udp.host.on_packet = server_on_udp_packet
-	server.udp.host.on_ping = server_on_udp_ping
-	server.udp.host.decrypt = server_decrypt_packet
+	hot.rewire(&rw, server.udp.host.on_packet)
+	hot.rewire(&rw, server.udp.host.on_ping)
+	hot.rewire(&rw, server.udp.host.decrypt)
 }
 
 server_shutdown :: proc(server: ^Server) {
@@ -1790,6 +1796,7 @@ main_proc :: proc() {
 
 	err := nbio.acquire_thread_event_loop()
 	log.assertf(err == nil, "failed to acquire the event loop: %v", err)
+
 	hr.l = nbio.current_thread_event_loop()
 
 	for !sync.atomic_load(hot.sip.interrupted) {

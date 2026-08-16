@@ -1017,10 +1017,6 @@ tcp_connection_on_send :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	tcp_connection_ensure_sending(conn, op.l)
 }
 
-rewire_interval :: proc(op: ^nbio.Operation, cb: $T) {
-	op.user_data[2] = rawptr(cb)
-}
-
 interval_poly :: proc(
 	period: time.Duration,
 	v: $T,
@@ -1053,6 +1049,10 @@ interval_poly :: proc(
 index: int
 index2: int
 
-rewire_op :: proc(op: ^nbio.Operation, cb: $T) {
-	op.user_data[0] = rawptr(cb)
+interval_rewire_slot :: proc(op: ^nbio.Operation) -> any {
+	return {&op.user_data[2], typeid_of(proc())}
+}
+
+op_rewire_slot :: proc(op: ^nbio.Operation) -> any {
+	return {&op.user_data[0], typeid_of(proc())}
 }

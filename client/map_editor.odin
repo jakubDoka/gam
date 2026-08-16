@@ -6,7 +6,6 @@ import orui "../vendored/orui/src"
 import "core:fmt"
 import la "core:math/linalg"
 import "core:math/rand"
-import "core:mem"
 import "core:reflect"
 import "core:slice"
 import "core:sort"
@@ -75,14 +74,7 @@ ui_map_has_changes :: proc(client: ^Client) -> bool {
 
 	mapa := ui_map_export(client)
 
-	e: sim.Encoder
-	sim.map_store(mapa, &e)
-
-	buf, err := mem.alloc_bytes(sim.encoded_len(&e), 8)
-	assert(err == nil)
-	e = {buf}
-
-	sim.map_store(mapa, &e)
+	buf := sim.serialize_to_bytes(mapa)
 
 	hash: sim.Hash
 	sim.hash(buf, &hash)

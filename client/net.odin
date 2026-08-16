@@ -1,7 +1,7 @@
 package client
 
 import "../sim"
-import nbio "../simt/nbio"
+import "../simt/nbio"
 import "../util/b58"
 import "../util/bit_arr"
 import "../util/nm"
@@ -12,7 +12,6 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
-import "core:os"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
@@ -33,7 +32,7 @@ parse_conn_string :: proc(
 
 	iter := conn_string
 	endp := strings.split_iterator(&iter, SEP) or_return
-	endpoint = nbio.parse_endpoint(string(endp)) or_return
+	endpoint = net.parse_endpoint(string(endp)) or_return
 	identity_prefix = iter
 	ok = true
 
@@ -304,13 +303,35 @@ client_handle_packet :: proc(
 }
 
 client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
-	for &s in set {
+	Ctx :: struct {
+		using client: ^Client,
+		to_stat:      int,
+	}
+
+	ctx := new_clone(Ctx{client = client})
+
+	for s in set {
 		if s == 0 do continue
+		ctx.to_stat += 1
 
 		name := asset_path(client, s)
 
-		if _, err := os.stat(name, context.temp_allocator); err != nil {
-			append(&client.assets_to_fetch, s)
+		// TODO(low): this does not matter that much but we could use arena
+		nbio.open_poly2(strings.clone(name), ctx, s, on_open, l = client.l)
+
+		on_open :: proc(op: ^nbio.Operation, ctx: ^Ctx, asset: sim.Asset_ID) {
+			delete(op.open.path)
+			if op.open.err != nil {
+				append(&ctx.client.assets_to_fetch, asset)
+			} else {
+				nbio.close(op.open.handle, l = ctx.client.l)
+			}
+
+			ctx.to_stat -= 1
+			if ctx.to_stat == 0 {
+				fetch_assets(ctx.client)
+				free(ctx)
+			}
 		}
 	}
 
@@ -452,7 +473,6 @@ fetch_assets :: proc(client: ^Client) {
 }
 
 client_ent_by_net_id :: proc(client: ^Client, id: sim.Ent_Net_ID) -> ^sim.Ent {
-	// TODO: build a net id index instead, this is a strain on the server
 	iter := sim.ents_iter(&client.ents)
 	for e in sim.ents_iter_next(&iter) {
 		if e.net_id == id {
@@ -465,11 +485,11 @@ client_ent_by_net_id :: proc(client: ^Client, id: sim.Ent_Net_ID) -> ^sim.Ent {
 asset_path :: proc(client: ^Client, id: sim.Asset_ID) -> string {
 	id := id
 	name := b58.encode(mem.ptr_to_bytes(&id))
-	asset_path_no_ext, _ := os.join_path(
+	asset_path_no_ext, _ := nbio.join_path(
 		{client.data_dir, ASSET_CACHE, name},
 		context.temp_allocator,
 	)
-	asset_path, _ := os.join_filename(
+	asset_path, _ := nbio.join_filename(
 		asset_path_no_ext,
 		sim.EXT_BY_TYPE[.Sprite][1:],
 		context.temp_allocator,

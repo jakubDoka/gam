@@ -46,3 +46,7 @@ alias sandbox-dev 'odin build sandbox $SANDBOX_DEV_FLAGS &&
 	gdb sandbox.bin $GDB_FLAGS'
 
 alias measure 'rg --files --glob "*.odin" --glob "!vendored" | xargs cloc'
+
+alias check-sim 'odin check client -define:SIMULATE=true &&\
+	odin check server -define:SIMULATE=true &&\
+	odin check client && odin check server'

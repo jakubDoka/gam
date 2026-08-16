@@ -1,7 +1,7 @@
 package wuffs
 
 import "core:mem"
-import "core:os"
+import "core:os" // test
 import "core:testing"
 
 io_buffer_from_slice :: proc(data: []u8, closed := true) -> Io_Buffer {

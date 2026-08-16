@@ -7,6 +7,8 @@ import "core:dynlib"
 import "core:fmt"
 import "core:log"
 import "core:os"
+import "core:reflect"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -57,6 +59,8 @@ Define :: struct {
 	value: any,
 }
 
+Rewire_Table :: [dynamic; 32]rawptr
+
 Reloader :: struct {
 	watch_dirs:        []string,
 	extra_args:        []string,
@@ -64,6 +68,7 @@ Reloader :: struct {
 	state:             rawptr,
 	init_allocator:    runtime.Allocator,
 	using lib:         Api,
+	rewire_table:      Rewire_Table,
 	retired_libraries: [dynamic; 512]dynlib.Library,
 	max_mtime:         time.Time,
 	version:           int,
@@ -85,6 +90,37 @@ Status :: enum {
 	Ok,
 	Refresh,
 	Full_Reboot,
+}
+
+// NOTE: this might be a overengeneered crap, but I feel like once we get into
+// more complicated long running tasks it will be usefull
+Rewireing :: struct {
+	hr:    ^Reloader,
+	table: Rewire_Table,
+}
+
+load_fn :: proc(fn: any) -> rawptr {
+	assert(reflect.is_procedure(type_info_of(fn.id)))
+	return (^rawptr)(fn.data)^
+}
+
+store_fn :: proc(slot: any, vl: rawptr) {
+	assert(reflect.is_procedure(type_info_of(slot.id)))
+	(^rawptr)(slot.data)^ = vl
+}
+
+rewire_apply :: proc(r: Rewireing) {
+	r.hr.rewire_table = r.table
+}
+
+rewire :: proc(r: ^Rewireing, vl: any) {
+	current := load_fn(vl)
+	if current == nil do return
+	idx, ok := slice.linear_search(r.hr.rewire_table[:], current)
+	if !ok {
+		fmt.panicf("%v %v %v", vl, r.hr.rewire_table, r.table)
+	}
+	store_fn(vl, r.table[idx])
 }
 
 deinit :: proc(hr: ^Reloader) {
@@ -224,6 +260,7 @@ reload :: proc(
 	hr.lib = new_lib
 
 	if is_full_reload {
+		clear(&hr.rewire_table)
 		hr.state = hr.init(hr)
 	} else {
 		if hr.rewire != nil do hr.rewire(hr.state)
@@ -255,9 +292,7 @@ dump_trace :: proc() {
 
 @(require_results)
 init_trace :: proc(
-) -> (
-	proc(prefix, message: string, loc: runtime.Source_Code_Location) -> !,
-) {
+) -> proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
 	when !ODIN_DEBUG do return context.assertion_failure_proc
 	sync.once_do(&once, proc() {
 		trace.init(&global_trace_ctx)

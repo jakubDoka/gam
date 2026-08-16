@@ -17,6 +17,7 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:net"
 import "core:reflect"
 import "core:strings"
 import "core:time"
@@ -144,7 +145,7 @@ UI_Reactor :: struct {
 	content_editor:          UI_Content_Editor,
 	map_editing:             UI_Map_Editor,
 	chat:                    UI_Chat,
-	db:                      sqlite.Connection,
+	using config:            Client_Config,
 	using ui_statements:     UI_Statements,
 	selected_team:           sim.Ent_Team_ID,
 	selected_units:          [dynamic]sim.Ent_ID,
@@ -386,6 +387,8 @@ UI_Content_Editor :: struct {
 	create_stat_name: strings.Builder,
 	upload_error:     string,
 	upload_arena:     arna.Allocator,
+	upload_arena_rc:  int,
+	upload_gen:       int,
 	dropped_assets:   #soa[dynamic]Dropped_Asset,
 	upload_inflight:  int,
 	upload_cursor:    int,
@@ -653,7 +656,7 @@ ui_connection_menu :: proc(client: ^Client) {
 		   ) ||
 		   confirmed {
 
-			endp, ok := nbio.parse_endpoint(string(ip))
+			endp, ok := net.parse_endpoint(string(ip))
 			if !ok {
 				client.ip_error = "expected ip adress:port"
 			} else {

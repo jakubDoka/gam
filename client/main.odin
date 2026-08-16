@@ -1,7 +1,7 @@
 package client
 
 import "../sim"
-import nbio "../simt/nbio"
+import "../simt/nbio"
 import "../util/arna"
 import "../util/hot"
 import "../util/packer"
@@ -15,7 +15,7 @@ import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:mem/tlsf"
-import "core:os"
+import "core:os" // marked
 import "core:reflect"
 import "core:slice"
 import "core:strings"
@@ -29,7 +29,7 @@ MAX_PARTICLES :: 512
 MAX_LASERS :: 512
 HANDSHAKE_STAGE_TIMEOUT :: 500 * time.Millisecond
 CONNECTION_TIMEOUT :: 3 * time.Second
-// TODO: compress this
+// TODO(low): compress this
 FONT_DATA :: #load("../assets/font.ttf")
 FONT_MEDIUM_SIZE :: 16
 APP_NAME :: "gam"
@@ -137,10 +137,14 @@ Laser :: struct {
 
 Lasers :: Retained_Array(Laser)
 
+Client_Config :: struct {
+	db:       sqlite.Connection,
+	data_dir: string,
+}
+
 Client :: struct {
 	using hctx:            sim.Handshake,
 	last_inpulse:          time.Time,
-	data_dir:              string,
 	udp:                   sim.UDP_Connection,
 	connection_stage:      Connection_State,
 	last_server_packet:    time.Time,
@@ -176,6 +180,7 @@ Client :: struct {
 	assets_to_fetch:       [dynamic]sim.Asset_ID,
 	inflight_assets:       int,
 	inflight_asset_cursor: int,
+	hr:                    ^hot.Reloader,
 }
 
 @(rodata)
@@ -292,23 +297,7 @@ client_limit_place_position :: proc(
 	return
 }
 
-client_init_db :: proc(client: ^Client) {
-	db_path, db_path_err := os.join_path(
-		{client.data_dir, "db.db"},
-		context.temp_allocator,
-	)
-	assert(db_path_err == nil)
-
-	sconn, sconn_open_err := sqlite.open(db_path)
-	sqlite.assert_ok(sconn, sconn_open_err)
-
-	client.db = sconn
-
-	sqlite.exec(sconn, #load("schema.sql", cstring))
-	sqlite.prepare(sconn, client.ui.ui_statements)
-}
-
-client_init_data_dir :: proc(client: ^Client) {
+client_config_default :: proc() -> (cc: Client_Config) {
 	data_dir, data_dir_err := os.user_data_dir(context.temp_allocator)
 	if data_dir_err != nil {
 		log.error("failed to resolve the data dir:", data_dir_err)
@@ -341,8 +330,21 @@ client_init_data_dir :: proc(client: ^Client) {
 		)
 	}
 
-	client.data_dir = our_section
-	log.debug("selected data dir:", client.data_dir)
+	cc.data_dir = our_section
+	log.debug("selected data dir:", cc.data_dir)
+
+	db_path, db_path_err := os.join_path(
+		{cc.data_dir, "db.db"},
+		context.temp_allocator,
+	)
+	assert(db_path_err == nil)
+
+	sconn, sconn_open_err := sqlite.open(db_path)
+	sqlite.assert_ok(sconn, sconn_open_err)
+
+	cc.db = sconn
+
+	return
 }
 
 client_draw_input :: proc(client: ^Client) {
@@ -640,12 +642,25 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 }
 
 @(export)
-client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
+client_init :: proc(hr: ^hot.Reloader) -> ^Client {
 	context.allocator = hr.init_allocator
+	return client_init_with_config(hr, client_config_default())
+}
+
+client_init_with_config :: proc(
+	hr: ^hot.Reloader,
+	config: Client_Config,
+) -> (
+	client: ^Client,
+) {
+	context.allocator = hr.init_allocator
+	append(&hr.rewire_table, ..REWIRE_TABLE[:])
 
 	client = new(Client)
+	client.config = config
 
 	client.l = hr.l
+	client.hr = hr
 
 	client.player_idx = -1
 	client.camera.zoom = 1
@@ -667,8 +682,8 @@ client_init :: proc(hr: ^hot.Reloader) -> (client: ^Client) {
 		client.free_deffered_inputs = &ci
 	}
 
-	client_init_data_dir(client)
-	client_init_db(client)
+	sqlite.exec(client.db, #load("schema.sql", cstring))
+	sqlite.prepare(client.db, client.ui.ui_statements)
 
 	for &hsv, vl in client.ui.colors.picker_hsvs {
 		if vl not_in EDITABLE_COLORS do continue
@@ -1309,16 +1324,31 @@ client_update :: proc(client: ^Client) {
 	rl.EndDrawing()
 }
 
+REWIRE_TABLE := [?]rawptr {
+	rawptr(client_on_tcp_kill),
+	rawptr(client_on_tcp_packet),
+	rawptr(client_on_udp_kill),
+	rawptr(client_on_udp_packet),
+	rawptr(client_decrypt_packet),
+	rawptr(client_on_tick),
+	rawptr(client_on_ping),
+}
+
 @(export)
 client_rewire :: proc(client: ^Client) {
-	client.cleanup = client_on_tcp_kill
-	client.host.on_packet = client_on_tcp_packet
-	client.udp.host.on_kill = client_on_udp_kill
-	client.udp.host.on_packet = client_on_udp_packet
-	client.udp.host.decrypt = client_decrypt_packet
+	rw: hot.Rewireing
+	rw.hr = client.hr
+	append(&rw.table, ..REWIRE_TABLE[:])
+	defer hot.rewire_apply(rw)
 
-	sim.rewire_interval(client.tick_interval, client_on_tick)
-	sim.rewire_interval(client.ping_interval, client_on_ping)
+	hot.rewire(&rw, client.cleanup)
+	hot.rewire(&rw, client.host.on_packet)
+	hot.rewire(&rw, client.udp.host.on_kill)
+	hot.rewire(&rw, client.udp.host.on_packet)
+	hot.rewire(&rw, client.udp.host.decrypt)
+
+	hot.rewire(&rw, sim.interval_rewire_slot(client.tick_interval))
+	hot.rewire(&rw, sim.interval_rewire_slot(client.ping_interval))
 }
 
 client_shutdown :: proc(client: ^Client) {

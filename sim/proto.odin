@@ -205,7 +205,6 @@ Server_Map :: struct {
 	bytes: []u8,
 }
 
-// TODO: maybe make this a 0 padded array
 Player_Name :: nm.Name
 
 Player_Permission :: enum int {
@@ -227,7 +226,6 @@ Server_Cold_State :: struct {
 	players:     []Player,
 }
 
-// TODO: the naming is lacking
 Server_Cmd_Type :: enum int {
 	Laser,
 }

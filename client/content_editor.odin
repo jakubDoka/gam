@@ -1,17 +1,18 @@
 package client
 
 import "../sim"
+import "../simt/nbio"
 import "../util/arna"
 import "../util/b58"
 import "../util/nm"
 import "../util/packer"
 import orui "../vendored/orui/src"
-import rt "base:runtime"
+import "base:runtime"
 import "core:fmt"
 import "core:hash"
 import "core:log"
 import "core:math"
-import "core:os"
+import "core:os" // marked
 import "core:reflect"
 import "core:sort"
 import "core:strconv"
@@ -388,16 +389,22 @@ ui_file_upload :: proc(client: ^Client) {
 		defer rl.UnloadDroppedFiles(raw_files)
 		files := raw_files.paths[:raw_files.count]
 
+		gpa := context.allocator
 		context.allocator = arna.allocator(&ctx.upload_arena)
-		free_all(context.allocator)
+		ctx.upload_arena_rc -= 1
+		if ctx.upload_arena_rc < 0 {
+			free_all(context.allocator)
+		}
+		ctx.upload_arena_rc += 1
 		ctx.dropped_assets = {}
 
 		resize(&ctx.dropped_assets, len(files))
 
 		for file, i in files {
+			file := strings.clone(string(file))
 			entry := &ctx.dropped_assets[i]
 
-			filename := os.base(string(file))
+			filename := nbio.base(file)
 
 			mtype: Maybe(sim.Asset_Type)
 			for ext, i in sim.EXT_BY_TYPE {
@@ -411,25 +418,61 @@ ui_file_upload :: proc(client: ^Client) {
 
 			filename = filename[:len(filename) - len(sim.EXT_BY_TYPE[type])]
 
-			entry.issue = "Name is too long."
 			entry.base.type = type
+			entry.issue = "Name is too long."
 			entry.base.name = nm.from_str(filename) or_continue
 
-			entry.issue = "Cant load the file for some reason!"
-			bytes, err := os.read_entire_file(
-				string(file),
-				context.temp_allocator,
-			)
-			if err != nil {
-				log.info("Failed to open a file at", file, ":", err)
-				continue
+			entry.path = file
+			entry.issue = ""
+
+			Ctx :: struct {
+				using client: ^Client,
+				file_idx:     int,
+				gen:          int,
 			}
 
-			sim.hash(bytes, &entry.base.hash)
-			entry.base.size = len(bytes)
+			ctx.upload_arena_rc += 1
+			ctx := new_clone(Ctx{client, i, ctx.upload_gen})
 
-			entry.path = strings.clone_from_cstring(file)
-			entry.issue = ""
+			// TODO(low): the file can be big and that can mess up the
+			// allocator, we should do a streamed hashing
+			nbio.read_entire_file(
+				entry.path,
+				ctx,
+				on_read,
+				l = client.l,
+				allocator = gpa,
+			)
+
+			on_read :: proc(
+				user_data: rawptr,
+				data: []byte,
+				err: nbio.Read_Entire_File_Error,
+			) {
+				defer delete(data)
+
+				ctx := (^Ctx)(user_data)
+				ed_ctx: ^UI_Content_Editor = &ctx.client.content_editor
+				ed_ctx.upload_arena_rc -= 1
+				// NOTE: the arena is always held once this exists but the
+				// only place that can drop it is when the files get
+				// reuploaded
+
+				if ctx.gen != ed_ctx.upload_gen {
+					return
+				}
+
+				entry := &ed_ctx.dropped_assets[ctx.file_idx]
+
+				if err.operation != .None {
+					entry.issue = "Can't load the file for some reason."
+					log.error("Failed to fully load the upload file", err)
+					return
+				}
+
+				sim.hash(data, &entry.base.hash)
+				entry.base.size = len(data)
+			}
 		}
 	}
 
@@ -484,6 +527,22 @@ ui_file_upload :: proc(client: ^Client) {
 			)
 
 			for &asset, i in ctx.dropped_assets {
+				if asset.base.hash == {} {
+					box(
+						id("asset-uploaded-row"),
+						{col_span = 4, width = orui.grow()},
+					)
+					ui_label(
+						id("asset-loading", i),
+						{
+							label = "loading...",
+							height = orui.fixed(ROW_HEIGHT),
+							width = orui.grow(),
+						},
+					)
+					continue
+				}
+
 				if asset.uploaded {
 					box(
 						id("asset-uploaded-row"),
@@ -666,7 +725,7 @@ ui_stat_editor :: proc(
 ) {
 	assert(edited.id == original.id)
 
-	info := type_info_of(reflect.typeid_base(edited.id)).variant.(rt.Type_Info_Struct)
+	info := type_info_of(reflect.typeid_base(edited.id)).variant.(runtime.Type_Info_Struct)
 
 	expanded_count: i32 = 0
 	for i in 0 ..< info.field_count {
@@ -701,7 +760,7 @@ ui_stat_editor :: proc(
 
 		sub_root := orui.to_id(seb.root, i)
 		sub_root_edit := orui.to_id(seb.eidt_root, i)
-		_, is_struct := reflect.type_info_base(type).variant.(rt.Type_Info_Struct)
+		_, is_struct := reflect.type_info_base(type).variant.(runtime.Type_Info_Struct)
 		is_struct &= type.id != sim.Ent_Stats_ID
 		is_struct &= type.id != sim.Asset_ID
 

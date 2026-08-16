@@ -264,7 +264,8 @@ map_text_to_bin :: proc(
 		y += 1
 	}
 
-	map_store(mapa, e)
+	ok := marshall(mapa, e)
+	assert(ok)
 }
 
 map_tile_storage_size :: proc(width: int, height: int) -> int {
@@ -311,11 +312,6 @@ map_load :: proc(
 
 	ok = true
 	return
-}
-
-map_store :: proc(mapa: Map, e: ^Encoder) -> (ok: bool) {
-	marshall(mapa, e) or_return
-	return true
 }
 
 map_vec_to_pos :: proc(v: Vec) -> Map_Pos {
