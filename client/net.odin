@@ -515,7 +515,7 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 
 		client.udp.sock = udp_sock
 
-		bind_err := nbio.bind(udp_sock, {nbio.IP4_Any, 0})
+		bind_err := nbio.bind(client.l, udp_sock, {nbio.IP4_Any, 0})
 		sim.hctx_fail_ctx(&client.hctx, "can't bind udp socket", bind_err)
 		if bind_err != nil do return
 

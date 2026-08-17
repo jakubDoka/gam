@@ -1,8 +1,8 @@
 package client
 
 import "../sim"
-import "../util/nm"
 import "../util/bit_arr"
+import "../util/nm"
 import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
@@ -336,7 +336,7 @@ ui_button :: proc(uid: orui.Id, config: Button_Config) -> bool {
 
 	ui_tooltip_end(uid, config.tooltip)
 
-	if pressed do append(&r.captured_key_binds, Mb.LEFT)
+	if pressed do append(&r.captured_key_binds, MousetButton.LEFT)
 
 	return pressed
 }

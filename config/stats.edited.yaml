@@ -23,6 +23,8 @@ snipa:
     sprite: blah
   attack:
     bullet: beam
+  dash:
+    cooldonw: 1
   parry:
     invincibility: 0.3
     duration: 1

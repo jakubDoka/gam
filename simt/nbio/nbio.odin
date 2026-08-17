@@ -9,16 +9,14 @@ import "core:io"
 import "core:math/rand"
 import "core:nbio"
 import "core:net"
-import "core:os" // marked
+import "core:os"
+import "core:slice" // marked
 import "core:strings"
 import "core:time"
 
 SIMULATE :: simt.SIMULATE
 
 when SIMULATE {
-	@(thread_local)
-	_thread_event_loop: Event_Loop
-
 	Event_Loop :: struct {
 		free_ops:       ^Operation,
 		free_listeners: ^Listener,
@@ -155,26 +153,43 @@ NO_TIMEOUT :: nbio.NO_TIMEOUT
 join_path :: os.join_path
 join_filename :: os.join_filename
 base :: os.base
+dir :: os.dir
 
 Error :: os.Error
-File_Info :: os.File_Info
+when SIMULATE {
+	File_Info :: struct {
+		name:     string,
+		fullpath: string,
+		type:     File_Type,
+	}
+} else {
+	File_Info :: os.File_Info
+}
 when !SIMULATE {
 	File :: os.File
 }
 Walker :: os.Walker
 
 open :: proc(
+	l: ^Event_Loop,
 	name: string,
-	flags := os.File_Flags{.Read},
+	mode := os.File_Flags{.Read},
 	perm := os.Permissions_Default,
 ) -> (
 	^File,
 	Error,
 ) {
 	when !SIMULATE {
-		return os.open(name, flags, perm)
+		return os.open(name, mode, perm)
 	} else {
-		panic("TODO")
+		file := _open_file(
+			l,
+			name,
+			transmute(nbio.File_Flags)mode,
+			transmute(nbio.Permissions)perm,
+		)
+		if file == nil do return nil, .Not_Exist
+		return file, nil
 	}
 }
 
@@ -182,11 +197,12 @@ to_stream :: proc(f: ^File) -> io.Stream {
 	when !SIMULATE {
 		return os.to_stream(f)
 	} else {
-		panic("TODO")
+		return strings.to_stream((^strings.Builder)(&f.content))
 	}
 }
 
 write_entire_file :: proc(
+	l: ^Event_Loop,
 	name: string,
 	data: []byte,
 	perm := os.Permissions_Read_All + {.Write_User},
@@ -195,11 +211,20 @@ write_entire_file :: proc(
 	when !SIMULATE {
 		return os.write_entire_file(name, data, perm, truncate)
 	} else {
-		panic("TODO")
+		assert(truncate)
+		file := _open_file(
+			l,
+			name,
+			{.Create, .Trunc},
+			transmute(nbio.Permissions)perm,
+		)
+		append(&file.content, ..data)
+		return nil
 	}
 }
 
 read_entire_file_sync :: proc(
+	l: ^Event_Loop,
 	name: string,
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -210,39 +235,47 @@ read_entire_file_sync :: proc(
 	when !SIMULATE {
 		return os.read_entire_file(name, allocator, loc)
 	} else {
-		panic("TODO")
+		file := _open_file(l, name, {.Read}, {})
+		if file == nil do return {}, .Not_Exist
+		return slice.clone(file.content[:], allocator)
 	}
 }
 
-read_directory_by_path :: proc(
+read_all_directory_by_path :: proc(
+	l: ^Event_Loop,
 	path: string,
-	n: int,
 	allocator := context.allocator,
 ) -> (
 	[]File_Info,
 	Error,
 ) {
 	when !SIMULATE {
-		return os.read_directory_by_path(path, n, allocator)
+		return os.read_all_directory_by_path(path, allocator)
 	} else {
-		panic("TODO")
-	}
-}
+		count := 0
+		for fpath in l.files {
+			if dir(fpath) == path do count += 1
+		}
 
-get_working_directory :: proc(
-	allocator := context.allocator,
-) -> (
-	string,
-	Error,
-) {
-	when !SIMULATE {
-		return os.get_working_directory(allocator)
-	} else {
-		panic("TODO")
+		buf := make([]File_Info, count)
+		i := 0
+		for fpath in l.files {
+			if dir(fpath) == path {
+				buf[i] = {
+					fullpath = fpath,
+					name     = base(fpath),
+					type     = .Regular,
+				}
+				i += 1
+			}
+		}
+
+		return buf, nil
 	}
 }
 
 stat :: proc(
+	l: ^Event_Loop,
 	path: string,
 	allocator := context.allocator,
 ) -> (
@@ -252,7 +285,10 @@ stat :: proc(
 	when !SIMULATE {
 		return os.stat(path, allocator)
 	} else {
-		panic("TODO")
+		if path in l.files {
+			return {fullpath = path, name = base(path), type = .Regular}, nil
+		}
+		return {}, .Not_Exist
 	}
 }
 
@@ -260,31 +296,8 @@ make_directory_all :: proc(path: string) -> Error {
 	when !SIMULATE {
 		return os.make_directory_all(path)
 	} else {
-		panic("TODO")
-	}
-}
-
-walker_create :: proc(path: string) -> Walker {
-	when !SIMULATE {
-		return os.walker_create(path)
-	} else {
-		panic("TODO")
-	}
-}
-
-walker_destroy :: proc(w: ^Walker) {
-	when !SIMULATE {
-		os.walker_destroy(w)
-	} else {
-		panic("TODO")
-	}
-}
-
-walker_walk :: proc(w: ^Walker) -> (fi: File_Info, ok: bool) {
-	when !SIMULATE {
-		return os.walker_walk(w)
-	} else {
-		panic("TODO")
+		// NOTE: we dont have a concept of directories
+		return nil
 	}
 }
 
@@ -380,13 +393,17 @@ when SIMULATE {
 	Operation :: nbio.Operation
 }
 
-acquire_thread_event_loop :: proc() -> General_Error {
+create_event_loop :: proc() -> (^Event_Loop, General_Error) {
 	when !SIMULATE {
-		return nbio.acquire_thread_event_loop()
+		err := nbio.acquire_thread_event_loop()
+		return nbio.current_thread_event_loop(), err
 	} else {
-		l := &_thread_event_loop
+		arena: arna.Allocator
+		err := arna.init(&arena, 1024 * 1024 * 16)
+		assert(err == nil)
 
-		arna.init(&l.allocator_arna, 1024 * 1024 * 16)
+		l := new(Event_Loop, arna.allocator(&arena))
+		l.allocator_arna = arena
 		l.allocator = arna.allocator(&l.allocator_arna)
 
 		priority_queue.init(
@@ -408,41 +425,32 @@ acquire_thread_event_loop :: proc() -> General_Error {
 		// NOTE: leak the 0 fd since we check for 0 in our code
 		resize(&l.fds, 1)
 
-		return nil
+		return l, nil
 	}
 }
 
-set_loop_rng :: proc(rng: runtime.Random_Generator) {
+destroy_event_loop :: proc(l: ^Event_Loop) {
+	when !SIMULATE {
+		nbio.release_thread_event_loop()
+	} else {
+		arna.destroy(&l.allocator_arna)
+	}
+}
+
+set_loop_rng :: proc(l: ^Event_Loop, rng: runtime.Random_Generator) {
 	when SIMULATE {
-		l := &_thread_event_loop
 		l.rng = rng
 	}
 }
 
-release_thread_event_loop :: proc() {
+tick :: proc(
+	l: ^Event_Loop,
+	timeout: time.Duration = NO_TIMEOUT,
+) -> General_Error {
 	when !SIMULATE {
-		nbio.release_thread_event_loop()
-	} else {
-		l := &_thread_event_loop
-		arna.destroy(&l.allocator_arna)
-		l^ = {}
-	}
-}
-
-current_thread_event_loop :: proc(loc := #caller_location) -> ^Event_Loop {
-	when !SIMULATE {
-		return nbio.current_thread_event_loop(loc)
-	} else {
-		return &_thread_event_loop
-	}
-}
-
-tick :: proc(timeout: time.Duration = NO_TIMEOUT) -> General_Error {
-	when !SIMULATE {
+		assert(l == nbio.current_thread_event_loop())
 		return nbio.tick(timeout)
 	} else {
-		l := &_thread_event_loop
-
 		// NOTE: we always eat at most 1 event, this makes sense because we
 		// skip trough time so at any point we never have more events to do
 		// of course timeout of 0 will mostly be a noop
@@ -477,14 +485,13 @@ tick :: proc(timeout: time.Duration = NO_TIMEOUT) -> General_Error {
 	}
 }
 
-run :: proc() -> General_Error {
+run :: proc(l: ^Event_Loop) -> General_Error {
 	when !SIMULATE {
+		assert(l == nbio.current_thread_event_loop())
 		return nbio.run()
 	} else {
-		l := &_thread_event_loop
-
 		for priority_queue.len(l.tasks) > 0 {
-			if res := tick(); res != nil {
+			if res := tick(l); res != nil {
 				return res
 			}
 		}
@@ -550,12 +557,10 @@ listen_tcp :: proc(
 	}
 }
 
-bind :: proc(socket: Any_Socket, ep: Endpoint) -> Bind_Error {
+bind :: proc(l: ^Event_Loop, socket: Any_Socket, ep: Endpoint) -> Bind_Error {
 	when !SIMULATE {
 		return nbio.bind(socket, ep)
 	} else {
-		l := &_thread_event_loop
-
 		socket := socket.(UDP_Socket)
 
 		fd, ok := _access_fd(l, i64(socket), .UDP_Socket)
@@ -907,12 +912,10 @@ when SIMULATE {
 
 			return
 		case .open:
-			file := l.files[op.open.path]
-
-			if .Create in op.open.mode && file == nil {
-				file = new(File)
-				file.perm = op.open.perm
-				l.files[strings.clone(op.open.path)] = file
+			file := _open_file(l, op.open.path, op.open.mode, op.open.perm)
+			if file == nil {
+				op.open.err = .Not_Found
+				break
 			}
 
 			fd, id := _new_fd(l, .File)
@@ -1031,6 +1034,29 @@ when SIMULATE {
 		}
 
 		_exec_cb(op)
+	}
+
+	_open_file :: proc(
+		l: ^Event_Loop,
+		name: string,
+		mode: File_Flags,
+		perm: nbio.Permissions,
+	) -> ^File {
+		context.allocator = l.allocator
+
+		file := l.files[name]
+
+		if .Create in mode && file == nil {
+			file = new(File)
+			file.perm = perm
+			l.files[strings.clone(name)] = file
+		}
+
+		if .Trunc in mode && file != nil {
+			clear(&file.content)
+		}
+
+		return file
 	}
 
 	_new_fd :: proc(

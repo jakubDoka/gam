@@ -1,6 +1,6 @@
 package hot_reload
 
-import nbio "../../simt/nbio"
+import "../../simt/nbio"
 import "base:runtime"
 import "core:debug/trace"
 import "core:dynlib"
@@ -11,6 +11,7 @@ import "core:reflect"
 import "core:slice"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:time"
 
 HOT_RELOAD :: #config(HOT_RELOAD, false)
@@ -23,17 +24,17 @@ when ODIN_OS == .Windows {
 	DYN_EXT :: ".so"
 }
 
-interrupted: bool
+_interrupted: bool
 sip: Static_Init_Params = {
 	nbio.remove,
 	nbio.run,
-	&interrupted,
+	&_interrupted,
 	&global_trace_ctx,
 }
 
 Static_Init_Params :: struct {
-	io_remove:   proc(op: ^nbio.Operation),
-	io_run:      proc() -> nbio.General_Error,
+	io_remove:   proc(_: ^nbio.Operation),
+	io_run:      proc(_: ^nbio.Event_Loop) -> nbio.General_Error,
 	interrupted: ^bool,
 	trace:       ^trace.Context,
 }
@@ -43,14 +44,13 @@ Api :: struct {
 	memory_size:   proc() -> int,
 	static_init:   proc(_: Static_Init_Params),
 	static_deinit: proc(),
-	init:          proc(_: ^Reloader) -> rawptr,
-	update:        proc(_: rawptr),
-	rewire:        proc(_: rawptr),
-	deinit:        proc(_: rawptr),
+	init:          proc(_: ^Reloader, config: rawptr) -> rawptr,
+	update:        proc(_: ^Reloader, state: rawptr),
+	rewire:        proc(_: ^Reloader, state: rawptr),
+	deinit:        proc(_: ^Reloader, state: rawptr),
 }
 
 Options :: struct {
-	module_name:      string,
 	skip_full_reload: bool,
 }
 
@@ -62,6 +62,8 @@ Define :: struct {
 Rewire_Table :: [dynamic; 32]rawptr
 
 Reloader :: struct {
+	inited:            bool,
+	module_name:       string,
 	watch_dirs:        []string,
 	extra_args:        []string,
 	dyn_defs:          []Define,
@@ -74,6 +76,7 @@ Reloader :: struct {
 	version:           int,
 	force_reload:      bool,
 	l:                 ^nbio.Event_Loop,
+	config:            rawptr,
 	reload:            proc(
 		_: ^Reloader,
 		_: Options,
@@ -124,7 +127,7 @@ rewire :: proc(r: ^Rewireing, vl: any) {
 }
 
 deinit :: proc(hr: ^Reloader) {
-	if hr.state != nil do hr.deinit(hr.state)
+	if hr.state != nil do hr->deinit(hr.state)
 	free_all(hr.init_allocator)
 	hr.static_deinit()
 }
@@ -136,7 +139,7 @@ unload_libraries :: proc(hr: ^Reloader) {
 }
 
 update :: proc(hr: ^Reloader) {
-	hr.update(hr.state)
+	hr->update(hr.state)
 }
 
 should_reload :: proc(hr: ^Reloader) -> (should_reload: bool) {
@@ -161,6 +164,10 @@ should_reload :: proc(hr: ^Reloader) -> (should_reload: bool) {
 	return
 }
 
+interrupted :: proc() -> bool {
+	return sync.atomic_load(&_interrupted)
+}
+
 @(require_results)
 reload :: proc(
 	hr: ^Reloader,
@@ -169,6 +176,19 @@ reload :: proc(
 ) -> (
 	res: Status = .Ok,
 ) {
+	if !hr.inited {
+		hr.inited = true
+
+		posix.signal(.SIGINT, on_sigint)
+		on_sigint :: proc "c" (sig: posix.Signal) {
+			if sync.atomic_load(sip.interrupted) {
+				posix.exit(1)
+			}
+
+			sync.atomic_store(sip.interrupted, true)
+		}
+	}
+
 	if hr.reload != nil {
 		prev := hr.reload
 		defer hr.reload = prev
@@ -178,9 +198,8 @@ reload :: proc(
 
 	if !HOT_RELOAD {
 		if hr.state == nil {
-			hr.state = hr.init(hr)
+			hr.state = hr->init(hr.config)
 		}
-
 		return
 	}
 
@@ -195,7 +214,7 @@ reload :: proc(
 	{context.allocator = context.temp_allocator
 		log.debug("hot reloading")
 
-		module_name := options.module_name
+		module_name := hr.module_name
 
 		name := fmt.tprintf("tmp/%v%v" + DYN_EXT, module_name, hr.version)
 		hr.version += 1
@@ -252,7 +271,7 @@ reload :: proc(
 	}
 
 	if is_full_reload {
-		if hr.state != nil do hr.deinit(hr.state)
+		if hr.state != nil do hr->deinit(hr.state)
 		free_all(hr.init_allocator)
 		unload_libraries(hr)
 	}
@@ -261,9 +280,9 @@ reload :: proc(
 
 	if is_full_reload {
 		clear(&hr.rewire_table)
-		hr.state = hr.init(hr)
+		hr.state = hr->init(hr.config)
 	} else {
-		if hr.rewire != nil do hr.rewire(hr.state)
+		if hr.rewire != nil do hr->rewire(hr.state)
 	}
 
 	return

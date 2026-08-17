@@ -1,7 +1,7 @@
 package client
 
 import "../sim"
-import nbio "../simt/nbio"
+import "../simt/nbio"
 import "../util/arna"
 import "../util/b58"
 import "../util/bit_arr"
@@ -145,7 +145,7 @@ UI_Reactor :: struct {
 	content_editor:          UI_Content_Editor,
 	map_editing:             UI_Map_Editor,
 	chat:                    UI_Chat,
-	using config:            Client_Config,
+	using config:            ^Client_Config,
 	using ui_statements:     UI_Statements,
 	selected_team:           sim.Ent_Team_ID,
 	selected_units:          [dynamic]sim.Ent_ID,
@@ -161,8 +161,8 @@ UI_Reactor :: struct {
 }
 
 Key_Or_Mouse :: union {
-	Kk,
-	Mb,
+	KeyboardKey,
+	MousetButton,
 }
 
 key_or_mouse_from_key :: proc(key: Key) -> Key_Or_Mouse {
@@ -217,16 +217,16 @@ Key_Bind :: enum {
 	Select_Finder,
 }
 
-Kk :: rl.KeyboardKey
-Mb :: rl.MouseButton
+KeyboardKey :: rl.KeyboardKey
+MousetButton :: rl.MouseButton
 Mod_And_Key :: struct {
 	mod: rl.KeyboardKey,
 	key: rl.KeyboardKey,
 }
 
 Key :: union #no_nil {
-	Kk,
-	Mb,
+	KeyboardKey,
+	MousetButton,
 	Mod_And_Key,
 }
 
@@ -239,14 +239,14 @@ BIND_TO_KEY := [Key_Bind]Key {
 	.Down                = .S,
 	.Left                = .A,
 	.Right               = .D,
-	.Shoot               = Mb.LEFT,
-	.Parry               = Mb.RIGHT,
+	.Shoot               = MousetButton.LEFT,
+	.Parry               = MousetButton.RIGHT,
 	.Dash                = .LEFT_SHIFT,
-	.Map_Place           = Mb.LEFT,
-	.Map_Erase           = Mb.RIGHT,
-	.Build_Select_Start  = Mb.LEFT,
-	.Build_Select_End    = Mb.LEFT,
-	.Build_Select_Clear  = Mb.RIGHT,
+	.Map_Place           = MousetButton.LEFT,
+	.Map_Erase           = MousetButton.RIGHT,
+	.Build_Select_Start  = MousetButton.LEFT,
+	.Build_Select_End    = MousetButton.LEFT,
+	.Build_Select_Clear  = MousetButton.RIGHT,
 	.Open_Content_Editor = .C,
 	.Open_Map_Editor     = .B,
 	.Save                = Mod_And_Key{.LEFT_CONTROL, .S},

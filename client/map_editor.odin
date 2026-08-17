@@ -497,7 +497,7 @@ ui_map_editor_update :: proc(client: ^Client) {
 		case .Building:
 			if server_current ~ client_current do break
 			if client.bs == {} {
-				append(&client.captured_key_binds, Mb.LEFT)
+				append(&client.captured_key_binds, MousetButton.LEFT)
 				client.bs.place_pos = pos
 			}
 		case .Wall, .Floor:

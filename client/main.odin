@@ -13,8 +13,6 @@ import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
-import "core:mem"
-import "core:mem/tlsf"
 import "core:os" // marked
 import "core:reflect"
 import "core:slice"
@@ -180,7 +178,6 @@ Client :: struct {
 	assets_to_fetch:       [dynamic]sim.Asset_ID,
 	inflight_assets:       int,
 	inflight_asset_cursor: int,
-	hr:                    ^hot.Reloader,
 }
 
 @(rodata)
@@ -293,56 +290,6 @@ client_limit_place_position :: proc(
 	)
 	target_pos = source + (target_pos - source) * coll_coff
 	target_pos = sim.map_clamp_to_tile(target_pos, tile)
-
-	return
-}
-
-client_config_default :: proc() -> (cc: Client_Config) {
-	data_dir, data_dir_err := os.user_data_dir(context.temp_allocator)
-	if data_dir_err != nil {
-		log.error("failed to resolve the data dir:", data_dir_err)
-	}
-
-	our_section, _ := os.join_path({data_dir, APP_NAME}, context.allocator)
-
-	mkerr := os.mkdir_all(our_section)
-	if mkerr != nil && mkerr != .Exist {
-		log.errorf(
-			"failed to create all directories (%s): %v",
-			our_section,
-			mkerr,
-		)
-		delete(our_section)
-		our_section = ""
-	}
-
-	cache_dir, _ := os.join_path(
-		{our_section, ASSET_CACHE},
-		context.temp_allocator,
-	)
-
-	mkerr = os.mkdir_all(cache_dir)
-	if mkerr != nil && mkerr != .Exist {
-		log.errorf(
-			"failed to create all directories (%s): %v",
-			cache_dir,
-			mkerr,
-		)
-	}
-
-	cc.data_dir = our_section
-	log.debug("selected data dir:", cc.data_dir)
-
-	db_path, db_path_err := os.join_path(
-		{cc.data_dir, "db.db"},
-		context.temp_allocator,
-	)
-	assert(db_path_err == nil)
-
-	sconn, sconn_open_err := sqlite.open(db_path)
-	sqlite.assert_ok(sconn, sconn_open_err)
-
-	cc.db = sconn
 
 	return
 }
@@ -482,7 +429,7 @@ ui_build_selection_update :: proc(client: ^Client) {
 		if he != se &&
 		   (he_is_friendly || he == sim.NIL_ENT) &&
 		   client.bs.place_pos == nil {
-			append(&client.captured_key_binds, Mb.LEFT)
+			append(&client.captured_key_binds, MousetButton.LEFT)
 			client.bs.src_building = he.id
 		}
 	}
@@ -514,7 +461,7 @@ ui_build_selection_update :: proc(client: ^Client) {
 
 	if is_key_pressed(ui, .Build_Select_Clear) {
 		if se != sim.NIL_ENT {
-			append(&client.captured_key_binds, Mb.RIGHT)
+			append(&client.captured_key_binds, MousetButton.RIGHT)
 			client.bs = {}
 		}
 	}
@@ -642,14 +589,9 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 }
 
 @(export)
-client_init :: proc(hr: ^hot.Reloader) -> ^Client {
-	context.allocator = hr.init_allocator
-	return client_init_with_config(hr, client_config_default())
-}
-
-client_init_with_config :: proc(
+client_init :: proc(
 	hr: ^hot.Reloader,
-	config: Client_Config,
+	config: ^Client_Config,
 ) -> (
 	client: ^Client,
 ) {
@@ -658,10 +600,7 @@ client_init_with_config :: proc(
 
 	client = new(Client)
 	client.config = config
-
 	client.l = hr.l
-	client.hr = hr
-
 	client.player_idx = -1
 	client.camera.zoom = 1
 	client.udp.recv_buf = make([]u8, 1 << 16)
@@ -841,7 +780,7 @@ refresh_sheet :: proc(client: ^Client) {
 }
 
 @(export)
-client_update :: proc(client: ^Client) {
+client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	client.ents.delta = 1.0 / 60
 	client.ents.on_remove = client_on_remove
 	client.rtt = sync.atomic_load(&client.shared_rtt)
@@ -1335,9 +1274,9 @@ REWIRE_TABLE := [?]rawptr {
 }
 
 @(export)
-client_rewire :: proc(client: ^Client) {
+client_rewire :: proc(hr: ^hot.Reloader, client: ^Client) {
 	rw: hot.Rewireing
-	rw.hr = client.hr
+	rw.hr = hr
 	append(&rw.table, ..REWIRE_TABLE[:])
 	defer hot.rewire_apply(rw)
 
@@ -1361,7 +1300,7 @@ client_shutdown :: proc(client: ^Client) {
 	for e in client.servers.server_info_cache do server_info_close(e)
 	server_info_close(&client.servers.create_fetcher)
 
-	io_res := hot.sip.io_run()
+	io_res := hot.sip.io_run(client.l)
 	assert(io_res == nil)
 
 	chan.close(client.rtt_worker_reqs)
@@ -1369,7 +1308,7 @@ client_shutdown :: proc(client: ^Client) {
 }
 
 @(export)
-client_deinit :: proc(client: ^Client) {
+client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	client_shutdown(client)
 
 	delete(client.map_buf)
@@ -1419,6 +1358,56 @@ client_static_deinit :: proc() {
 	sim.unregister_user_formatters()
 }
 
+client_config_default :: proc() -> (cc: Client_Config) {
+	data_dir, data_dir_err := os.user_data_dir(context.temp_allocator)
+	if data_dir_err != nil {
+		log.error("failed to resolve the data dir:", data_dir_err)
+	}
+
+	our_section, _ := os.join_path({data_dir, APP_NAME}, context.allocator)
+
+	mkerr := os.mkdir_all(our_section)
+	if mkerr != nil && mkerr != .Exist {
+		log.errorf(
+			"failed to create all directories (%s): %v",
+			our_section,
+			mkerr,
+		)
+		delete(our_section)
+		our_section = ""
+	}
+
+	cache_dir, _ := os.join_path(
+		{our_section, ASSET_CACHE},
+		context.temp_allocator,
+	)
+
+	mkerr = os.mkdir_all(cache_dir)
+	if mkerr != nil && mkerr != .Exist {
+		log.errorf(
+			"failed to create all directories (%s): %v",
+			cache_dir,
+			mkerr,
+		)
+	}
+
+	cc.data_dir = our_section
+	log.debug("selected data dir:", cc.data_dir)
+
+	db_path, db_path_err := os.join_path(
+		{cc.data_dir, "db.db"},
+		context.temp_allocator,
+	)
+	assert(db_path_err == nil)
+
+	sconn, sconn_open_err := sqlite.open(db_path)
+	sqlite.assert_ok(sconn, sconn_open_err)
+
+	cc.db = sconn
+
+	return
+}
+
 when ODIN_BUILD_MODE == .Executable || ODIN_BUILD_MODE == .Object {
 	main :: proc() {
 		main_proc()
@@ -1426,8 +1415,6 @@ when ODIN_BUILD_MODE == .Executable || ODIN_BUILD_MODE == .Object {
 }
 
 main_proc :: proc() {
-	context.assertion_failure_proc = hot.init_trace()
-
 	CHUNK_SIZE :: 1024 * 1024 * 16
 	TEMP_SIZE :: 1024 * 1024 * 64
 	INIT_SIZE :: 1024 * 1024 * 16
@@ -1442,30 +1429,18 @@ main_proc :: proc() {
 	arna_err := arna.bulk_init(&temp_arna, &global_arna, &init_arna)
 	log.assertf(arna_err == nil, "failed to initialize arenas: %v", arna_err)
 
+	context.assertion_failure_proc = hot.init_trace()
 	context.temp_allocator = arna.allocator(&temp_arna)
-
-	allc: tlsf.Allocator
-	allc_err := tlsf.init_from_allocator(
-		&allc,
+	context.allocator = sim.global_allocator_create(
 		arna.allocator(&global_arna),
 		CHUNK_SIZE,
-		CHUNK_SIZE,
 	)
-	log.assertf(
-		allc_err == nil,
-		"could not get the initial allc page: %v",
-		allc_err,
+	context.logger = log.create_console_logger(
+		allocator = arna.allocator(&global_arna),
 	)
-	context.allocator = tlsf.allocator(&allc)
-
-	// NOTE: this can not be if since we set the context
-	when sim.TRACK_ALLOCATIONS {
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		context.allocator = mem.tracking_allocator(&track)
-	}
 
 	hr: hot.Reloader
+	hr.module_name = "client"
 	hr.watch_dirs = {"client", "sim"}
 	hr.extra_args = {
 		"-define:TRACK_ALLOCATIONS=true",
@@ -1482,11 +1457,14 @@ main_proc :: proc() {
 	}
 	hr.init_allocator = arna.allocator(&init_arna)
 
-	err := nbio.acquire_thread_event_loop()
-	fmt.assertf(err == nil, "failed to acquire thread event loop:", err)
-	hr.l = nbio.current_thread_event_loop()
+	config: Client_Config
+	{context.allocator = arna.allocator(&global_arna)
+		config = client_config_default()}
+	hr.config = &config
 
-	context.logger = log.create_console_logger()
+	l, err := nbio.create_event_loop()
+	fmt.assertf(err == nil, "failed to acquire thread event loop:", err)
+	hr.l = l
 
 	client_static_init(hot.sip)
 
@@ -1494,55 +1472,53 @@ main_proc :: proc() {
 	rl.InitWindow(800, 600, "gam")
 	rl.SetTargetFPS(0)
 
-	core_time: Core_Time
+	core_time: Frame_Timer
 	core_time.target = 1.0 / 60
+	core_time.get_time = auto_cast rl.GetTime
 
 	for !rl.WindowShouldClose() {
-		_ = hot.reload(&hr, {module_name = "client"})
+		_ = hot.reload(&hr, {})
 
 		hot.update(&hr)
 
-		frame_end(&core_time)
+		frame_end(&core_time, hr.l)
 
 		free_all(context.temp_allocator)
 	}
 
 	if sim.TRACK_ALLOCATIONS {
 		hot.deinit(&hr)
-		nbio.release_thread_event_loop()
-		log.destroy_console_logger(context.logger)
+		nbio.destroy_event_loop(l)
 		context.logger = {}
 		client_static_deinit()
-		when sim.TRACK_ALLOCATIONS do sim.tracking_allocator_destroy(&track)
+		sim.global_allocator_destroy(context.allocator)
 		hot.unload_libraries(&hr)
 		arna.bulk_destroy(&temp_arna, &global_arna, &init_arna)
 	}
 }
 
-// Mirrors raylib's internal CORE.Time. All values are in seconds.
-Core_Time :: struct {
-	current:  f64, // current time measure
-	previous: f64, // previous time measure
-	frame:    f64, // total frame time (update + draw + wait)
-	target:   f64, // desired frame time; 0 means uncapped
+Frame_Timer :: struct {
+	get_time: proc() -> f64,
+	target:   f64,
+	previous: f64,
 }
 
-// Frame time control system
-frame_end :: proc(t: ^Core_Time) {
-	t.current = rl.GetTime()
-	wait_time := t.current - t.previous
-	t.previous = t.current
-	t.frame = wait_time
+frame_end :: proc(t: ^Frame_Timer, l: ^nbio.Event_Loop) {
+	current := t.get_time()
+	wait_time := current - t.previous
+	t.previous = current
+	frame := wait_time
 
-	for t.frame < t.target {
+	for frame < t.target {
 		runerr := nbio.tick(
-			time.Duration((t.target - t.frame) * f64(time.Second)),
+			l,
+			time.Duration((t.target - frame) * f64(time.Second)),
 		)
 		assert(runerr == nil)
 
-		t.current = rl.GetTime()
-		wait_time := t.current - t.previous
-		t.previous = t.current
-		t.frame += wait_time
+		current = t.get_time()
+		wait_time := current - t.previous
+		t.previous = current
+		frame += wait_time
 	}
 }

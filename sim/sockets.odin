@@ -1,6 +1,6 @@
 package sim
 
-import nbio "../simt/nbio"
+import "../simt/nbio"
 import "../util/hot"
 import "base:runtime"
 import "core:fmt"

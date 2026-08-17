@@ -4,7 +4,7 @@ import "../util/arna"
 import "../util/b58"
 import "../util/bit_arr"
 import "../util/nm"
-import rt "base:runtime"
+import "base:runtime"
 import "core:container/queue"
 import "core:fmt"
 import "core:io"
@@ -13,6 +13,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
+import "core:mem/tlsf"
 import "core:reflect"
 import "core:sort"
 import "core:testing"
@@ -235,7 +236,7 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 	}
 
 	#partial switch info in type_info_of(reflect.typeid_base(val.id)).variant {
-	case rt.Type_Info_Struct:
+	case runtime.Type_Info_Struct:
 		for field in reflect.struct_fields_zipped(val.id) {
 			value := reflect.struct_field_value(val, field)
 			if !validate(value, ctx) {
@@ -244,7 +245,7 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 			}
 		}
 		return true
-	case rt.Type_Info_Fixed_Capacity_Dynamic_Array:
+	case runtime.Type_Info_Fixed_Capacity_Dynamic_Array:
 		len := (^int)(uintptr(val.data) + info.len_offset)^
 		if len > info.capacity {
 			log.error("bogus capacity")
@@ -257,7 +258,7 @@ validate :: proc(val: any, ctx: Validation_Context) -> bool {
 		}
 
 		return true
-	case rt.Type_Info_Enum:
+	case runtime.Type_Info_Enum:
 		if info.base.id != u8 {
 			log.error("expected enum to be based on u8")
 			return false
@@ -534,7 +535,7 @@ ents_attack_low :: proc(
 
 	state: rand.PCG_Random_State
 	context.random_generator = rand.pcg_random_generator(&state)
-	rt.random_generator_reset_u64(
+	runtime.random_generator_reset_u64(
 		context.random_generator,
 		transmute(u64)(next_net_id^),
 	)
@@ -1180,7 +1181,7 @@ ents_update :: proc(ents: ^Ents) {
 					e.objective = {}
 				}
 			case .Attack:
-				panic("TODO")
+				panic("TODO(low)")
 			}
 		}
 
@@ -1566,7 +1567,7 @@ ents_iter_next :: proc(iter: ^[]Ent) -> (^Ent, bool) {
 dummy_teams := [2]Ent_Team{{color = 0xFF0000FF}, {color = 0x00FF00FF}}
 
 ents_reserve :: proc(ents: ^Ents, capacity: int) {
-	err: rt.Allocator_Error
+	err: runtime.Allocator_Error
 	ents.slots, err = make([]Ent, capacity)
 	log.assertf(err == nil, "failed to allocate ents slots: %v", err)
 	ents.len += 1
@@ -1797,23 +1798,57 @@ circle_line_intersection :: proc(
 
 TRACK_ALLOCATIONS :: #config(TRACK_ALLOCATIONS, false)
 
-tracking_allocator_destroy :: proc(track: ^mem.Tracking_Allocator) {
-	if len(track.allocation_map) > 0 {
-		fmt.eprintf(
-			"=== %v allocations not freed: ===\n",
-			len(track.allocation_map),
-		)
-		for _, entry in track.allocation_map {
-			fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
-		}
+global_allocator_create :: proc(
+	backing: runtime.Allocator,
+	chunk_size: int,
+) -> (
+	res: runtime.Allocator,
+) {
+	allc := new(tlsf.Allocator, backing)
+
+	allc_err := tlsf.init_from_allocator(allc, backing, chunk_size, chunk_size)
+	log.assertf(
+		allc_err == nil,
+		"could not get the initial allc page: %v",
+		allc_err,
+	)
+
+	res = tlsf.allocator(allc)
+
+	when TRACK_ALLOCATIONS {
+		track := new(mem.Tracking_Allocator, backing)
+		mem.tracking_allocator_init(track, res, res)
+		res = mem.tracking_allocator(track)
 	}
-	if len(track.bad_free_array) > 0 {
-		fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array))
-		for entry in track.bad_free_array {
-			fmt.eprintf("- %p @ %v\n", entry.memory, entry.location)
+
+	return
+}
+
+global_allocator_destroy :: proc(track: runtime.Allocator) {
+	when TRACK_ALLOCATIONS {
+		if track.procedure != mem.tracking_allocator_proc do return
+		track := (^mem.Tracking_Allocator)(track.data)
+
+		if len(track.allocation_map) > 0 {
+			fmt.eprintf(
+				"=== %v allocations not freed: ===\n",
+				len(track.allocation_map),
+			)
+			for _, entry in track.allocation_map {
+				fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+			}
 		}
+		if len(track.bad_free_array) > 0 {
+			fmt.eprintf(
+				"=== %v incorrect frees: ===\n",
+				len(track.bad_free_array),
+			)
+			for entry in track.bad_free_array {
+				fmt.eprintf("- %p @ %v\n", entry.memory, entry.location)
+			}
+		}
+		mem.tracking_allocator_destroy(track)
 	}
-	mem.tracking_allocator_destroy(track)
 }
 
 user_fmt_handlers: map[typeid]fmt.User_Formatter

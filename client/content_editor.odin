@@ -37,7 +37,7 @@ ui_content_editor :: proc(client: ^Client) {
 	)
 
 	if orui.hovered() && rl.IsMouseButtonPressed(.LEFT) {
-		append(&client.captured_key_binds, Mb.LEFT)
+		append(&client.captured_key_binds, MousetButton.LEFT)
 		if !ctx.expanded do ctx.selected = 0
 		ctx.expanded = false
 		return

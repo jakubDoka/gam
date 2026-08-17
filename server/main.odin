@@ -1,7 +1,7 @@
 package server
 
 import "../sim"
-import nbio "../simt/nbio"
+import "../simt/nbio"
 import "../util/arna"
 import "../util/hot"
 import "../util/nm"
@@ -13,12 +13,10 @@ import "core:crypto"
 import "core:io"
 import "core:log"
 import "core:mem"
-import "core:mem/tlsf"
+import "core:os"
 import "core:reflect"
 import "core:sort"
 import "core:strings"
-import "core:sync"
-import "core:sys/posix"
 import "core:time"
 import "core:unicode/utf8"
 
@@ -215,7 +213,7 @@ game_tick :: proc(game: ^Game) {
 			hash^ = new_hash
 			cursor := game.players.first
 			for c in player_next(&cursor) {
-				sim.tcp_connection_send(&c.hctx, buf, game.hr.l)
+				sim.tcp_connection_send(&c.hctx, buf, game.l)
 			}
 		}
 	}
@@ -321,7 +319,12 @@ Ping_Entry :: struct {
 	conn:    ^Connection,
 }
 
-Server :: struct #align (8) {
+Server_Config :: struct {
+	cwd: string,
+	db:  sqlite.Connection,
+}
+
+Server :: struct {
 	active_pings:            lru.Cache(sim.Ping_ID, Ping_Entry),
 	banned_ips:              lru.Cache(Saved_IP, Banned_Ip_Entry),
 	free_conns:              ^Connection,
@@ -330,7 +333,6 @@ Server :: struct #align (8) {
 	ping_seq:                int,
 	udp:                     sim.UDP_Connection,
 	tcp:                     nbio.TCP_Socket,
-	file_tcp:                nbio.TCP_Socket,
 	acceptor:                ^nbio.Operation,
 	ping_interval:           ^nbio.Operation,
 	tick_interval:           ^nbio.Operation,
@@ -347,9 +349,11 @@ Server :: struct #align (8) {
 	using statements:        Server_Statements,
 	conn_buf:                []Connection,
 	lru_pool:                arna.Allocator,
+	l:                       ^nbio.Event_Loop,
 	hr:                      ^hot.Reloader,
 	did_shutdown:            bool,
 	last_ping:               time.Time,
+	using config:            ^Server_Config,
 }
 
 server_add_violation :: proc(server: ^Server, ip: Saved_IP) {
@@ -594,6 +598,7 @@ server_handle_packet :: proc(
 			reason = ""
 		case .Save:
 			edited_file, edited_file_err := nbio.open(
+				server.l,
 				CONFIG_PATH_EDITED,
 				{.Create, .Trunc, .Write},
 			)
@@ -630,7 +635,11 @@ server_handle_packet :: proc(
 			game.clean_stats_hash = game.last_stats_hash
 		}
 	case sim.Client_Map_Edit:
-		map_path := pick_map(game.map_index - 1, context.temp_allocator)
+		map_path := pick_map(
+			server.l,
+			game.map_index - 1,
+			context.temp_allocator,
+		)
 
 		me: sim.Encoder
 
@@ -651,7 +660,7 @@ server_handle_packet :: proc(
 		ok := sim.marshall(p.mapa, &me)
 		assert(ok)
 
-		err := nbio.write_entire_file(map_path, buf)
+		err := nbio.write_entire_file(server.l, map_path, buf)
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
 		game_set_map(game, buf)
@@ -697,10 +706,14 @@ game_ent_by_net_id :: proc(game: ^Game, id: sim.Ent_Net_ID) -> ^sim.Ent {
 	return sim.NIL_ENT
 }
 
-pick_map :: proc(index: int, temp_allocator: runtime.Allocator) -> string {
-	map_entries, map_entries_err := nbio.read_directory_by_path(
+pick_map :: proc(
+	l: ^nbio.Event_Loop,
+	index: int,
+	temp_allocator: runtime.Allocator,
+) -> string {
+	map_entries, map_entries_err := nbio.read_all_directory_by_path(
+		l,
 		sim.MAP_DIR,
-		0,
 		temp_allocator,
 	)
 	log.assertf(
@@ -729,10 +742,11 @@ pick_map :: proc(index: int, temp_allocator: runtime.Allocator) -> string {
 game_load_next_map :: proc(game: ^Game) {
 	temp_allocator := context.temp_allocator
 
-	map_path := pick_map(game.map_index, temp_allocator)
+	map_path := pick_map(game.l, game.map_index, temp_allocator)
 	game.map_index += 1
 
 	map_bytes, map_bytes_err := nbio.read_entire_file(
+		game.l,
 		map_path,
 		context.allocator,
 	)
@@ -786,7 +800,7 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	log.debug("got connection:", op.accept)
 
 	kill := true
-	defer if kill do nbio.close(op.accept.client, l = server.hr.l)
+	defer if kill do nbio.close(op.accept.client, l = server.l)
 
 	server.acceptor = nbio.accept_poly(
 		op.accept.socket,
@@ -829,7 +843,7 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 		conn_id = conn_id,
 	}
 
-	sim.hctx_connect_server(&conn.hctx, server.hr.l)
+	sim.hctx_connect_server(&conn.hctx, server.l)
 
 	kill = false
 
@@ -906,7 +920,7 @@ stream_server_info :: proc(
 ) -> bool {
 	log.debug("registering info listener")
 
-	sim.tcp_connection_boot(&conn.hctx, 0, 512, l = server.hr.l)
+	sim.tcp_connection_boot(&conn.hctx, 0, 512, l = server.l)
 	sim.dl_push(&server.listeners, &conn.listener)
 
 	return true
@@ -922,7 +936,7 @@ boot_player :: proc(
 		&conn.hctx,
 		sim.SERVER_RECV_BUF_SIZE,
 		sim.CLIENT_RECV_BUF_SIZE,
-		l = server.hr.l,
+		l = server.l,
 	)
 
 	conn.hctx.tcp.host.on_packet = server_on_tcp_packet
@@ -1104,7 +1118,7 @@ server_schedule_tick :: proc(server: ^Server) {
 		max(diff, 1),
 		server,
 		server_on_tick,
-		l = server.hr.l,
+		l = server.l,
 	)
 
 	server.frames_since_tps_sample += 1
@@ -1118,12 +1132,9 @@ server_schedule_tick :: proc(server: ^Server) {
 server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 	server.tick_interval = nil
 
-	interrupted := sync.atomic_load(hot.sip.interrupted)
+	interrupted := hot.interrupted()
 
-	res := hot.reload(
-		server.hr,
-		{module_name = "server", skip_full_reload = true},
-	)
+	res := hot.reload(server.hr, {skip_full_reload = true})
 
 	if interrupted || res == .Full_Reboot {
 		server_shutdown(server)
@@ -1141,9 +1152,6 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 }
 
 server_bundle_refresh :: proc(server: ^Server) {
-	cwd, cwd_err := nbio.get_working_directory(context.temp_allocator)
-	log.assertf(cwd_err == nil, "failed to get working directory: %v", cwd_err)
-
 	Ctx :: struct {
 		server: ^Server,
 		type:   sim.Asset_Type,
@@ -1153,9 +1161,15 @@ server_bundle_refresh :: proc(server: ^Server) {
 	context.user_ptr = &ctx
 
 	ctx.type = .Map
-	visit_files(cwd, sim.MAP_DIR, sim.MAP_EXT, visit_file)
+	visit_files(server.l, server.cwd, sim.MAP_DIR, sim.MAP_EXT, visit_file)
 	ctx.type = .Sprite
-	visit_files(cwd, sim.SPRITE_DIR, sim.SPRITE_EXT, visit_file)
+	visit_files(
+		server.l,
+		server.cwd,
+		sim.SPRITE_DIR,
+		sim.SPRITE_EXT,
+		visit_file,
+	)
 
 	visit_file :: proc(name: string, content: []u8) {
 		ctx := (^Ctx)(context.user_ptr)
@@ -1186,6 +1200,7 @@ server_bundle_refresh :: proc(server: ^Server) {
 
 	for path in ([]string{CONFIG_PATH_EDITED, CONFIG_PATH}) {
 		config, config_err = nbio.read_entire_file(
+			server.l,
 			path,
 			context.temp_allocator,
 		)
@@ -1233,6 +1248,7 @@ server_bundle_refresh :: proc(server: ^Server) {
 }
 
 visit_files :: proc(
+	l: ^nbio.Event_Loop,
 	cwd: string,
 	dir: string,
 	ext: string,
@@ -1245,16 +1261,22 @@ visit_files :: proc(
 	dir, dir_err := nbio.join_path({cwd, dir}, context.allocator)
 	log.assertf(dir_err == nil, "failed to join path: %v", dir_err)
 
-	walker := nbio.walker_create(dir)
-	defer nbio.walker_destroy(&walker)
-	for entry in nbio.walker_walk(&walker) {
+	// TODO(low): make this recursive
+	fifo, fifo_err := nbio.read_all_directory_by_path(l, dir)
+	log.assertf(fifo_err == nil, "failed to read fir entries: %v", fifo_err)
+
+	for entry in fifo {
 		if entry.type != .Regular do continue
 		if !strings.has_suffix(entry.fullpath, ext) do continue
 
 		rel_path := entry.fullpath[len(dir) + 1:]
 		rel_path = rel_path[:len(rel_path) - len(ext)]
 
-		data, err := nbio.read_entire_file(entry.fullpath, context.allocator)
+		data, err := nbio.read_entire_file(
+			l,
+			entry.fullpath,
+			context.allocator,
+		)
 		log.assertf(err == nil, "failed to read sprite file: %v", err)
 
 		visit(rel_path, data)
@@ -1285,20 +1307,37 @@ server_static_deinit :: proc() {
 	sim.unregister_user_formatters()
 }
 
-init_db :: proc(stmst: ^Server_Statements) {
-	db, err := sqlite.open(SERVER_DB_PATH)
-	log.assertf(err == nil, "failed to open the db: %v", err)
-	sqlite.exec(db, #load("schema.sql", cstring))
-	sqlite.assert_ok(db, err)
+@(export)
+server_init :: proc(
+	hr: ^hot.Reloader,
+	config: ^Server_Config,
+) -> (
+	server: ^Server,
+) {
+	server = server_init_without_game(hr, config)
 
-	sqlite.prepare(db, stmst^)
+	init_world: {
+		game := &server.lobby
+		game.server = server
+		sim.ents_reserve(&game.ents, 128)
+		game_load_next_map(game)
+	}
+
+	return
 }
 
-server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
+server_init_without_game :: proc(
+	hr: ^hot.Reloader,
+	config: ^Server_Config,
+) -> (
+	server: ^Server,
+) {
 	context.allocator = hr.init_allocator
 	append(&hr.rewire_table, ..REWIRE_TABLE[:])
 
 	server = new(Server)
+	server.config = config
+	server.l = hr.l
 	server.hr = hr
 
 	lru.init(
@@ -1312,7 +1351,8 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		node_allocator = hr.init_allocator,
 	)
 
-	init_db(&server.statements)
+	sqlite.exec(server.db, #load("schema.sql", cstring))
+	sqlite.prepare(server.db, server.statements)
 
 	init_resources: {
 		sim.packet_buffer_reserve(&server.udp.send_buf, 8)
@@ -1328,10 +1368,17 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		defer free_all(context.temp_allocator)
 
 		{
-			if _, err := nbio.stat(SERVER_KEY_PATH, context.temp_allocator);
-			   err != nil {
+			if _, err := nbio.stat(
+				server.l,
+				SERVER_KEY_PATH,
+				context.temp_allocator,
+			); err != nil {
 				sim.private_key_generate(&server.pk)
-				err := nbio.write_entire_file(SERVER_KEY_PATH, server.pk[:])
+				err := nbio.write_entire_file(
+					server.l,
+					SERVER_KEY_PATH,
+					server.pk[:],
+				)
 				log.assertf(
 					err == nil,
 					"failed to create %v: %v",
@@ -1341,6 +1388,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			}
 
 			bytes, err := nbio.read_entire_file(
+				server.l,
 				SERVER_KEY_PATH,
 				context.temp_allocator,
 			)
@@ -1355,7 +1403,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 
 		server_bundle_refresh(server)
 
-		if _, err := nbio.stat(sim.MAP_DIR, context.temp_allocator);
+		if _, err := nbio.stat(server.l, sim.MAP_DIR, context.temp_allocator);
 		   err != nil {
 			create_dir_err := nbio.make_directory_all(sim.MAP_DIR)
 			log.assertf(
@@ -1388,6 +1436,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 				)
 
 				write_map_err := nbio.write_entire_file(
+					server.l,
 					full_path_with_ext,
 					final,
 				)
@@ -1401,14 +1450,18 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 	}
 
 	init_net: {
-		udp_sock, create_err := nbio.create_udp_socket(.IP4, server.hr.l)
+		udp_sock, create_err := nbio.create_udp_socket(.IP4, server.l)
 		log.assertf(
 			create_err == nil,
 			"failed to create udp socket: %v",
 			create_err,
 		)
 
-		bind_err := nbio.bind(udp_sock, {nbio.IP4_Any, sim.GAME_PORT})
+		bind_err := nbio.bind(
+			server.l,
+			udp_sock,
+			{nbio.IP4_Any, sim.GAME_PORT},
+		)
 		log.assertf(bind_err == nil, "failed to bind udp socket: %v", bind_err)
 
 		server.udp.sock = udp_sock
@@ -1420,11 +1473,11 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			decrypt   = server_decrypt_packet,
 		}
 
-		sim.udp_connection_boot(&server.udp, true, server.hr.l)
+		sim.udp_connection_boot(&server.udp, true, server.l)
 
 		tcp_sock, listen_err := nbio.listen_tcp(
 			{nbio.IP4_Any, sim.GAME_PORT},
-			l = server.hr.l,
+			l = server.l,
 		)
 		log.assertf(
 			listen_err == nil,
@@ -1440,7 +1493,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			tcp_sock,
 			server,
 			server_on_accept,
-			l = server.hr.l,
+			l = server.l,
 		)
 
 		sim.interval_poly(
@@ -1448,7 +1501,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 			server,
 			server_on_ping,
 			&server.ping_interval,
-			l = server.hr.l,
+			l = server.l,
 		)
 	}
 
@@ -1456,7 +1509,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		0,
 		server,
 		server_on_tick,
-		server.hr.l,
+		server.l,
 	)
 
 	return
@@ -1467,7 +1520,7 @@ server_tcp_send :: proc(
 	conn: ^Connection,
 	packet: sim.Server_Packet,
 ) {
-	sim.tcp_connection_send(&conn.hctx, packet, server.hr.l)
+	sim.tcp_connection_send(&conn.hctx, packet, server.l)
 }
 
 server_udp_send :: proc(
@@ -1481,23 +1534,9 @@ server_udp_send :: proc(
 		conn.udp_endpoint,
 		&conn.hctx.secret,
 		packet,
-		server.hr.l,
+		server.l,
 	)
 	assert(ok)
-}
-
-@(export)
-server_init :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
-	server = server_init_without_game(hr)
-
-	init_world: {
-		game := &server.lobby
-		game.server = server
-		sim.ents_reserve(&game.ents, 128)
-		game_load_next_map(game)
-	}
-
-	return
 }
 
 server_on_udp_ping :: proc(
@@ -1627,7 +1666,7 @@ server_on_ping :: proc(server: ^Server) {
 		conn := killed_conns
 		assert(conn != killed_conns.next_free)
 		killed_conns = conn.next_free
-		sim.tcp_connection_kill(&conn.hctx, server.hr.l)
+		sim.tcp_connection_kill(&conn.hctx, server.l)
 	}
 
 	info := sim.Server_Info {
@@ -1642,7 +1681,7 @@ server_on_ping :: proc(server: ^Server) {
 	) {
 		if conn.last_info != info {
 			conn.last_info = info
-			sim.tcp_connection_send(&conn.hctx, info, server.hr.l)
+			sim.tcp_connection_send(&conn.hctx, info, server.l)
 		}
 	}
 
@@ -1661,9 +1700,9 @@ REWIRE_TABLE := [?]rawptr {
 }
 
 @(export)
-server_rewire :: proc(server: ^Server) {
+server_rewire :: proc(hr: ^hot.Reloader, server: ^Server) {
 	rw: hot.Rewireing
-	rw.hr = server.hr
+	rw.hr = hr
 	append(&rw.table, ..REWIRE_TABLE[:])
 	defer hot.rewire_apply(rw)
 
@@ -1689,7 +1728,7 @@ server_shutdown :: proc(server: ^Server) {
 	hot.sip.io_remove(server.ping_interval)
 
 	for _, c in server.connections {
-		sim.tcp_connection_kill(&c.hctx, server.hr.l)
+		sim.tcp_connection_kill(&c.hctx, server.l)
 	}
 
 	for c in sim.dl_iter_next(
@@ -1697,19 +1736,18 @@ server_shutdown :: proc(server: ^Server) {
 		Connection,
 		offset_of(Connection, resolving_udp),
 	) {
-		sim.tcp_connection_kill(&c.hctx, server.hr.l)
+		sim.tcp_connection_kill(&c.hctx, server.l)
 	}
 
-	sim.udp_connection_kill(&server.udp, server.hr.l)
-	nbio.close(server.tcp, l = server.hr.l)
-	nbio.close(server.file_tcp, l = server.hr.l)
+	sim.udp_connection_kill(&server.udp, server.l)
+	nbio.close(server.tcp, l = server.l)
 }
 
 @(export)
-server_deinit :: proc(server: ^Server) {
+server_deinit :: proc(hr: ^hot.Reloader, server: ^Server) {
 	server_shutdown(server)
 
-	res := hot.sip.io_run()
+	res := hot.sip.io_run(hr.l)
 	log.assertf(res == nil, "failed to run the io scheduler: %v", res)
 
 	delete(server.connections)
@@ -1722,15 +1760,26 @@ server_deinit :: proc(server: ^Server) {
 	sqlite.assert_ok(conn, rs)
 }
 
+server_config_default :: proc() -> (sc: Server_Config) {
+	db, err := sqlite.open(SERVER_DB_PATH)
+	log.assertf(err == nil, "failed to open the db: %v", err)
+	sc.db = db
+
+	cwd, cwd_err := os.get_working_directory(context.allocator)
+	log.assertf(cwd_err == nil, "failed to get working directory: %v", cwd_err)
+	sc.cwd = cwd
+
+	return
+}
+
 when ODIN_BUILD_MODE == .Executable {
+
 	main :: proc() {
 		main_proc()
 	}
 }
 
 main_proc :: proc() {
-	context.assertion_failure_proc = hot.init_trace()
-
 	CHUNK_SIZE :: 1024 * 1024 * 128
 	TEMP_SIZE :: 1024 * 1024 * 64
 	INIT_SIZE :: 1024 * 1024 * 8
@@ -1745,40 +1794,20 @@ main_proc :: proc() {
 	arna_err := arna.bulk_init(&temp_arna, &global_arna, &init_arna)
 	log.assertf(arna_err == nil, "failed to initialize arenas: %v", arna_err)
 
+	context.assertion_failure_proc = hot.init_trace()
 	context.temp_allocator = arna.allocator(&temp_arna)
-
-	allc: tlsf.Allocator
-	allc_err := tlsf.init_from_allocator(
-		&allc,
+	context.allocator = sim.global_allocator_create(
 		arna.allocator(&global_arna),
 		CHUNK_SIZE,
-		CHUNK_SIZE,
 	)
-	log.assertf(
-		allc_err == nil,
-		"could not get the initial allc page: %v",
-		allc_err,
+	context.logger = log.create_console_logger(
+		allocator = arna.allocator(&global_arna),
 	)
-	context.allocator = tlsf.allocator(&allc)
-
-	when sim.TRACK_ALLOCATIONS {
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		context.allocator = mem.tracking_allocator(&track)
-	}
 
 	server_static_init(hot.sip)
 
-	posix.signal(.SIGINT, on_sigint)
-	on_sigint :: proc "c" (sig: posix.Signal) {
-		if sync.atomic_load(hot.sip.interrupted) {
-			posix.exit(1)
-		}
-
-		sync.atomic_store(hot.sip.interrupted, true)
-	}
-
 	hr: hot.Reloader
+	hr.module_name = "server"
 	hr.watch_dirs = {"server", "sim"}
 	hr.extra_args = {
 		"-define:TRACK_ALLOCATIONS=true",
@@ -1792,31 +1821,30 @@ main_proc :: proc() {
 		deinit      = auto_cast server_deinit,
 	}
 	hr.reload = hot.reload
-
 	hr.init_allocator = arna.allocator(&init_arna)
 
-	context.logger = log.create_console_logger()
+	config: Server_Config
+	{context.allocator = arna.allocator(&global_arna)
+		config = server_config_default()}
+	hr.config = &config
 
-	err := nbio.acquire_thread_event_loop()
+	l, err := nbio.create_event_loop()
 	log.assertf(err == nil, "failed to acquire the event loop: %v", err)
+	hr.l = l
 
-	hr.l = nbio.current_thread_event_loop()
+	for !hot.interrupted() {
+		_ = hot.reload(&hr, {})
 
-	for !sync.atomic_load(hot.sip.interrupted) {
-		_ = hot.reload(&hr, {module_name = "server"})
-
-		runerr := nbio.run()
+		runerr := nbio.run(hr.l)
 		log.assertf(runerr == nil, "failed to run the event loop: %v", runerr)
 	}
 
 	if sim.TRACK_ALLOCATIONS {
 		hot.deinit(&hr)
-		arna.destroy(&init_arna)
-		nbio.release_thread_event_loop()
-		log.destroy_console_logger(context.logger)
+		nbio.destroy_event_loop(l)
 		context.logger = {}
 		server_static_deinit()
-		when sim.TRACK_ALLOCATIONS do sim.tracking_allocator_destroy(&track)
+		sim.global_allocator_destroy(context.allocator)
 		hot.unload_libraries(&hr)
 		arna.bulk_destroy(&temp_arna, &global_arna, &init_arna)
 	}
