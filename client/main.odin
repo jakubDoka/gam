@@ -409,6 +409,7 @@ client_init :: proc(
 ) {
 	context.allocator = hr.init_allocator
 
+	client = new(Client)
 	pure.client_init(client, hr, config)
 
 	client.camera.zoom = 1

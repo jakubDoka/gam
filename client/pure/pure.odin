@@ -229,7 +229,7 @@ Statements :: struct {
 Client :: struct {
 	using hctx:            sim.Handshake,
 	using config:          ^Client_Config,
-	using ui_statements:   Statements,
+	using statements:      Statements,
 	has_dirty_config:      bool,
 	upload:                Upload_State,
 	messages:              Chat_Ring,
@@ -307,6 +307,7 @@ client_rewire :: proc(hr: ^hot.Reloader, client: ^Client) {
 	hot.rewire(&rw, sim.interval_rewire_slot(client.ping_interval))
 }
 
+// NOTE: the actual client can be a superclass so no alocation here
 client_init :: proc(
 	client: ^Client,
 	hr: ^hot.Reloader,
@@ -334,7 +335,7 @@ client_init :: proc(
 	}
 
 	sqlite.exec(client.db, #load("../schema.sql", cstring))
-	sqlite.prepare(client.db, client.ui_statements)
+	sqlite.prepare(client.db, client.statements)
 
 	chat_ring_init(&client.messages, make([]u8, 1024 * 64))
 
