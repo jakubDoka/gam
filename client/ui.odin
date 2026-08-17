@@ -27,7 +27,6 @@ box :: orui.container
 
 ID_WIDTH :: 32
 PADDING :: 4
-SELECTED_PROFILE_CID :: 0
 ROW_HEIGHT :: 32
 HEIGHT :: ROW_HEIGHT * 0.66
 
@@ -292,7 +291,7 @@ UI_Server_Info_Listener :: struct {
 	using inner:       sim.Handshake,
 	gc:                bool,
 	present:           bool,
-	state:             Connection_State,
+	state:             pure.Connection_State,
 	expected_identity: sim.Identity,
 	pk:                sim.Private_Key,
 	server_info:       sim.Server_Info,
@@ -374,13 +373,6 @@ UI_Content_Editor :: struct {
 	edit_name:        strings.Builder,
 	create_stat:      bool,
 	create_stat_name: strings.Builder,
-}
-
-Dropped_Asset :: struct {
-	base:     sim.Asset,
-	path:     string,
-	issue:    string,
-	uploaded: bool,
 }
 
 Stat_Editor_State :: struct {
@@ -1982,7 +1974,7 @@ ui_build :: proc(client: ^Client) {
 		case .Select_Profile:
 			_, save_err := sqlite.exec(
 				client.save_input_content,
-				SELECTED_PROFILE_CID,
+				pure.SELECTED_PROFILE_CID,
 				nm.str(&ev.name),
 			)
 			sqlite.assert_ok(client.save_input_content, save_err)
@@ -1995,7 +1987,7 @@ ui_build :: proc(client: ^Client) {
 		if ev.priority == 0 do continue
 		#partial switch ev.kind {
 		case .Disconnect:
-			client_clear_state(client, "manual disconnect")
+			pure.client_clear_state(client, "manual disconnect")
 		case .Quit_Content_Editor:
 			client.ui.content_editor.expanded = false
 		case .Open_Content_Editor:

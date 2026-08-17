@@ -25,14 +25,11 @@ import "pure"
 import rl "vendor:raylib"
 
 MAX_PARTICLES :: 512
-MAX_LASERS :: 512
 HANDSHAKE_STAGE_TIMEOUT :: 500 * time.Millisecond
-CONNECTION_TIMEOUT :: 3 * time.Second
 // TODO(low): compress this
 FONT_DATA :: #load("../assets/font.ttf")
 FONT_MEDIUM_SIZE :: 16
 APP_NAME :: "gam"
-ASSET_CACHE :: "asset-cache"
 
 PLACEMENT_BUTTON_RADIUS :: 20
 
@@ -40,19 +37,6 @@ font_medium: rl.Font
 
 get_color :: #force_inline proc(color: sim.Color) -> rl.Color {
 	return rl.GetColor(auto_cast color)
-}
-
-Connection_State :: enum {
-	Disconnected,
-	Connecting,
-	Connected,
-	Disconnecting,
-}
-
-Player :: struct {
-	using inner: sim.Player,
-	ent:         sim.Ent_ID,
-	input:       sim.Client_Input_Keys,
 }
 
 Particle :: struct {
@@ -66,48 +50,12 @@ Particle :: struct {
 
 Particles :: pure.Retained_Array(Particle)
 
-Client_Build_State :: struct {
-	src_building: sim.Ent_ID,
-	dst_building: sim.Ent_ID,
-	place_pos:    Maybe(sim.Map_Pos),
-}
-
 Client :: struct {
 	using pure:            pure.Client,
 	camera:                rl.Camera2D,
 	using ui:              UI_Reactor,
 	particles:             Particles,
 	input_display_texture: rl.RenderTexture2D,
-}
-
-Deffered_Client_Input :: struct {
-	inner:     sim.Client_Input,
-	next_free: ^Deffered_Client_Input,
-}
-
-Clear_Source :: enum {
-	Manual,
-	Udp,
-	Tcp,
-}
-
-client_clear_state :: proc(
-	client: ^Client,
-	reason: string,
-	source: Clear_Source = .Manual,
-) {
-	if client == nil do return
-
-	if client.connection_stage == .Disconnected do return
-	client.connection_stage = .Disconnected
-	client.last_cold_state_hash = {}
-	sim.ents_clear(&client.ents)
-
-	if source != .Tcp do sim.tcp_connection_kill(&client.hctx.tcp, client.l)
-	if source != .Udp do sim.udp_connection_kill(&client.udp, client.l)
-
-	log.errorf("killing connection (%s): %v", reason, source)
-	client.ip_error = reason
 }
 
 client_mouse_pos :: proc(client: ^Client) -> sim.Vec {
@@ -1095,7 +1043,7 @@ client_ent_color :: proc(client: ^Client, eid: sim.Ent_ID) -> rl.Color {
 client_memory_size :: proc() -> (sum: int) {
 	for t in sim.HOT_TYPES do sum += size_of(t)
 	sum += size_of(Client)
-	sum += size_of(Player)
+	sum += size_of(pure.Player)
 	sum += size_of(Particle)
 	sum += size_of(pure.Laser)
 
@@ -1133,7 +1081,7 @@ client_config_default :: proc() -> (cc: pure.Client_Config) {
 	}
 
 	cache_dir, _ := os.join_path(
-		{our_section, ASSET_CACHE},
+		{our_section, pure.ASSET_CACHE},
 		context.temp_allocator,
 	)
 
