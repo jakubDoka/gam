@@ -12,6 +12,7 @@ import la "core:math/linalg"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
+import "pure"
 import rl "vendor:raylib"
 
 ui_color_from_hsv :: proc(hsv: rl.Vector4) -> (color: rl.Color) {
@@ -484,7 +485,7 @@ ui_text_input :: proc(
 	)
 
 	if !config.dont_save_state && !already_initialized && len(state.buf) == 0 {
-		sti: Saved_Text_Input
+		sti: pure.Saved_Text_Input
 		sti_res, s := sqlite.query_one(r.load_input_content, sti, int(id))
 		clear(&state.buf)
 		if sti_res == .OK {

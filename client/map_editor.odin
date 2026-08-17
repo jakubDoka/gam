@@ -696,12 +696,6 @@ map_draw :: proc(client: ^Client) {
 	}
 }
 
-snap_to_tile :: proc(pos: sim.Vec) -> sim.Vec {
-	return sim.map_pos_to_vec(sim.map_vec_to_pos(pos))
-}
-
-map_tile_center :: sim.map_pos_to_vec
-
 map_tile_rect :: proc(pos: sim.Map_Pos, size: int = 1) -> rl.Rectangle {
 	return {
 		f32(pos.x * sim.TILE_SIZE),

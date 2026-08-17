@@ -168,11 +168,11 @@ client_draw_input :: proc(client: ^Client) {
 				pos = sim.map_pos_to_vec(ps)
 				rl.DrawRectangleRec(map_tile_rect(ps), color)
 			} else {
-				pos = snap_to_tile(pos)
+				pos = pure.snap_to_tile(pos)
 				rl.DrawRectangleRec(square(pos, 32), color)
 			}
 
-			pos = snap_to_tile(pos)
+			pos = pure.snap_to_tile(pos)
 
 			rl.DrawLineEx(pos, se.pos, THICKNESS, color)
 		}
@@ -452,7 +452,7 @@ refresh_sheet :: proc(client: ^Client) {
 
 	query, stmt := sqlite.query(
 		client.get_server_assets,
-		Saved_Asset,
+		pure.Saved_Asset,
 		client.hctx.sh.id,
 	)
 	for asset in sqlite.query_next(&query) {
@@ -492,7 +492,7 @@ refresh_sheet :: proc(client: ^Client) {
 	for sprite, i in client.assets {
 		if i == 0 do continue
 
-		asset: Saved_Asset
+		asset: pure.Saved_Asset
 		res, stmt := sqlite.query(client.get_asset, asset, sprite)
 		if res == .DONE {
 			has_missing = true
@@ -737,7 +737,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		pos := e.pos + x.pos_smoothing
 		t := sim.ents_team_get(&client.ents, e.team)
 
-		is_hovered := e.pos == snap_to_tile(mouse_pos)
+		is_hovered := e.pos == pure.snap_to_tile(mouse_pos)
 
 		if e.id == client.bs.src_building || is_hovered {
 			rl.DrawCircleLinesV(

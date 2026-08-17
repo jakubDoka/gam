@@ -89,7 +89,7 @@ ui_content_editor :: proc(client: ^Client) {
 		order := make([]Slot, len(stat_slots), context.temp_allocator)
 		for &o, i in order {
 			o.ref = &stat_slots[i]
-			o.score = fuzzy_rank(nm.str(&o.name), query)
+			o.score = pure.fuzzy_rank(nm.str(&o.name), query)
 		}
 
 		if len(query) != 0 {
@@ -100,7 +100,7 @@ ui_content_editor :: proc(client: ^Client) {
 
 		for stats, i in order {
 			name := nm.str(&stats.name)
-			matched_chars := fuzzy_rank_new_bitset(name, query)
+			matched_chars := pure.fuzzy_rank_new_bitset(name, query)
 
 			if ui_button(
 				   id("stat-selector", i),
@@ -280,7 +280,7 @@ ui_content_editor :: proc(client: ^Client) {
 			collect_props(ctx.stat_edit_state, "", &name_stack, &props)
 
 			for &prop in props {
-				prop.score = fuzzy_rank(prop.name, query)
+				prop.score = pure.fuzzy_rank(prop.name, query)
 			}
 
 			sort.merge_sort_proc(
@@ -296,7 +296,7 @@ ui_content_editor :: proc(client: ^Client) {
 
 			for prop, i in props {
 				box(id("fuzzy-prop-row", i), {width = orui.grow()})
-				matched_chars := fuzzy_rank_new_bitset(prop.name, query)
+				matched_chars := pure.fuzzy_rank_new_bitset(prop.name, query)
 				name_pressed :=
 					ui_label(
 						id("fuzzy-prop-name", i),
