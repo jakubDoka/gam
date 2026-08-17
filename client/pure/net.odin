@@ -840,3 +840,68 @@ udp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
 	)
 	assert(ok)
 }
+
+UI_Server_Info_Listener :: struct {
+	using inner:       sim.Handshake,
+	gc:                bool,
+	present:           bool,
+	state:             Connection_State,
+	expected_identity: sim.Identity,
+	pk:                sim.Private_Key,
+	server_info:       sim.Server_Info,
+}
+
+server_info_close :: proc(ctx: ^UI_Server_Info_Listener, gc := false) {
+	if ctx.state == .Connected {
+		ctx.gc = gc
+		sim.tcp_connection_kill(&ctx.tcp, ctx.l)
+	} else if ctx.state == .Disconnected {
+		if gc do free(ctx)
+	}
+}
+
+fetch_server_info :: proc(
+	ctx: ^UI_Server_Info_Listener,
+	endp: nbio.Endpoint,
+	l: ^nbio.Event_Loop,
+) -> ^UI_Server_Info_Listener {
+	ctx^ = {}
+	sim.private_key_generate(&ctx.pk)
+	ctx.l = l
+	ctx.state = .Connecting
+	ctx.get_pk = get_pk
+	ctx.on_boot = on_boot
+	ctx.cleanup = on_kill
+	ctx.host.on_packet = on_packet
+
+	header := (^sim.Client_Request_Header)(&ctx.ch.payload)
+	header.kind = .Watch_Server_Info
+
+	sim.hctx_connect_client(ctx, endp, l)
+
+	return ctx
+
+	get_pk :: proc(ctx: ^UI_Server_Info_Listener) -> sim.Private_Key {
+		return ctx.pk
+	}
+
+	on_boot :: proc(ctx: ^UI_Server_Info_Listener) -> bool {
+		sim.tcp_connection_boot(&ctx.tcp, 512, 0, l = ctx.l)
+		ctx.state = .Connected
+		return true
+	}
+
+	on_packet :: proc(
+		ctx: ^UI_Server_Info_Listener,
+		l: ^nbio.Event_Loop,
+		bytes: []u8,
+	) -> bool {
+		copy(reflect.as_bytes(ctx.server_info), bytes)
+		return true
+	}
+
+	on_kill :: proc(ctx: ^UI_Server_Info_Listener) {
+		ctx.state = .Disconnected
+		if ctx.gc do free(ctx)
+	}
+}

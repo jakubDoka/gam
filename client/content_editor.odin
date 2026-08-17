@@ -19,6 +19,20 @@ import "core:strings"
 import "pure"
 import rl "vendor:raylib"
 
+emit_event :: proc(
+	r: ^Client,
+	kind: pure.UI_Event_Kind,
+	event: pure.UI_Event,
+) {
+	event := event
+	event.kind = kind
+	event.bind = r.last_key_bind
+	event.target = orui.current_context.current_id
+	r.last_key_bind = .Nil
+
+	append(&r.events, event)
+}
+
 ui_content_editor :: proc(client: ^Client) {
 	ctx := &client.ui.content_editor
 

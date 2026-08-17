@@ -15,6 +15,9 @@ import "core:strings"
 import "pure"
 import rl "vendor:raylib"
 
+UI_Color :: pure.UI_Color
+emit_event :: pure.emit_event
+
 ui_color_from_hsv :: proc(hsv: rl.Vector4) -> (color: rl.Color) {
 	color = rl.ColorFromHSV(hsv.x, hsv.y, hsv.z)
 	color.a = u8(hsv.w * 255)
@@ -26,15 +29,15 @@ ui_color_to_hsv :: proc(color: rl.Color) -> (hsv: rl.Vector4) {
 	return {def_hsv.x, def_hsv.y, def_hsv.z, f32(color.a) / 255}
 }
 
-is_key_down :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+is_key_down :: proc(r: ^UI_Reactor, key: pure.Key_Bind) -> bool {
 	return is_key(.Down, r, key)
 }
 
-is_key_pressed :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+is_key_pressed :: proc(r: ^UI_Reactor, key: pure.Key_Bind) -> bool {
 	return is_key(.Pressed, r, key)
 }
 
-is_key_released :: proc(r: ^UI_Reactor, key: Key_Bind) -> bool {
+is_key_released :: proc(r: ^UI_Reactor, key: pure.Key_Bind) -> bool {
 	return is_key(.Released, r, key)
 }
 
@@ -56,7 +59,7 @@ IS_MOUSE := [Press_Kind]proc "cdecl" (_: rl.MouseButton) -> bool {
 	.Released = rl.IsMouseButtonReleased,
 }
 
-is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: Key_Bind) -> bool {
+is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: pure.Key_Bind) -> bool {
 	key_mode := IS_KEY[kind]
 	mouse_mode := IS_MOUSE[kind]
 
@@ -125,23 +128,45 @@ Draw_Call_Kind :: enum uint {
 	Text_Highlight_Set,
 }
 
-UI_Color :: enum {
-	UNSET,
-	NONE,
-	PRIMARY,
-	PRIMARY_FAINT,
-	SECONDARY,
-	SECONDARY_FAINT,
-	SUCCESS,
-	FOREGROUND,
-	SLOT1,
-	SLOT2,
-	SLOT3,
+KeyboardKey :: rl.KeyboardKey
+MousetButton :: rl.MouseButton
+Mod_And_Key :: struct {
+	mod: rl.KeyboardKey,
+	key: rl.KeyboardKey,
 }
 
-UI_COLORS: ^[UI_Color]rl.Color
+Key :: union #no_nil {
+	KeyboardKey,
+	MousetButton,
+	Mod_And_Key,
+}
 
-EDITABLE_COLORS := bit_set[UI_Color] {
+BIND_TO_KEY := [pure.Key_Bind]Key {
+	.Nil                 = .KEY_NULL,
+	.Exit                = .ESCAPE,
+	.Toggle_Chat         = .ENTER,
+	.Abandon_Ship        = .V,
+	.Up                  = .W,
+	.Down                = .S,
+	.Left                = .A,
+	.Right               = .D,
+	.Shoot               = MousetButton.LEFT,
+	.Parry               = MousetButton.RIGHT,
+	.Dash                = .LEFT_SHIFT,
+	.Map_Place           = MousetButton.LEFT,
+	.Map_Erase           = MousetButton.RIGHT,
+	.Build_Select_Start  = MousetButton.LEFT,
+	.Build_Select_End    = MousetButton.LEFT,
+	.Build_Select_Clear  = MousetButton.RIGHT,
+	.Open_Content_Editor = .C,
+	.Open_Map_Editor     = .B,
+	.Save                = Mod_And_Key{.LEFT_CONTROL, .S},
+	.Select_Finder       = .F,
+}
+
+UI_COLORS: ^[pure.UI_Color]rl.Color
+
+EDITABLE_COLORS := bit_set[pure.UI_Color] {
 	.PRIMARY,
 	.PRIMARY_FAINT,
 	.SECONDARY,

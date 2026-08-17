@@ -9,6 +9,7 @@ import "../../util/nm"
 import "../../util/rtt"
 import "../../util/sqlite"
 import "base:runtime"
+import "core:net"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
@@ -226,10 +227,119 @@ Statements :: struct {
 	`,
 }
 
+UI_Color :: enum {
+	UNSET,
+	NONE,
+	PRIMARY,
+	PRIMARY_FAINT,
+	SECONDARY,
+	SECONDARY_FAINT,
+	SUCCESS,
+	FOREGROUND,
+	SLOT1,
+	SLOT2,
+	SLOT3,
+}
+
+UI_Event_Kind :: enum {
+	Select_Stat,
+	Select_Team,
+	Delete_Team,
+	Select_Profile,
+	Disconnect,
+	Quit_Content_Editor,
+	Open_Content_Editor,
+	Close_Stat_Editor,
+	Save_Content_Changes,
+	Open_Map_Editor,
+	Close_Map_Editor,
+	Focus,
+	Apply_Content_Changes,
+	Reset_Color,
+	Select_Color,
+	Connect,
+	Connect_To_Server,
+	Delete_Server,
+	Refresh_Server_Identity,
+	Fetch_Server_Info,
+	Save_Server_Id,
+	Delete_Profile,
+	Rename_Profile,
+	Create_Profile,
+	Download_All_Assets,
+	Save_Map,
+	Spawn_Ship,
+	Build,
+	Delete_Building,
+	Rewire,
+	Create_Stat,
+	Upload_Assets,
+	Clear_Assets,
+	Select_Brush,
+	Select_Map_Team,
+	Close_Team_Editor,
+	Add_Team,
+	Send_Chat,
+}
+
+Key_Bind :: enum {
+	Nil,
+	Exit,
+	Toggle_Chat,
+	Abandon_Ship,
+	Up,
+	Down,
+	Left,
+	Right,
+	Shoot,
+	Parry,
+	Dash,
+	Map_Place,
+	Map_Erase,
+	Build_Select_Start,
+	Build_Select_End,
+	Build_Select_Clear,
+	Open_Content_Editor,
+	Open_Map_Editor,
+	Save,
+	Select_Finder,
+}
+
+UI_Map_Editor_Brush :: enum int {
+	Wall,
+	Floor,
+	Charger,
+	Building,
+}
+
+UI_Event :: struct {
+	kind:                 UI_Event_Kind,
+	team:                 sim.Ent_Team_ID,
+	team_idx:             int,
+	name:                 nm.Name,
+	priority:             int,
+	bind:                 Key_Bind,
+	target:               orui.Id,
+	carret_index:         int,
+	stats:                sim.Ent_Stats_ID,
+	color:                UI_Color,
+	endpoint:             net.Endpoint,
+	ent:                  sim.Ent_Net_ID,
+	parent:               sim.Ent_Net_ID,
+	pos:                  sim.Vec,
+	text:                 string,
+	identity:             sim.Identity,
+	brush:                UI_Map_Editor_Brush,
+	saved_server:         Saved_Server,
+	server_info_listener: ^UI_Server_Info_Listener,
+}
+
 Client :: struct {
 	using hctx:            sim.Handshake,
 	using config:          ^Client_Config,
 	using ui_statements:   Statements,
+	captured_key_binds:    [dynamic; 16]Key_Or_Mouse,
+	events:                [dynamic]UI_Event,
 	has_dirty_config:      bool,
 	upload:                Upload_State,
 	messages:              Chat_Ring,
@@ -472,5 +582,234 @@ fuzzy_rank :: proc(
 			return true
 		}
 		return false
+	}
+}
+
+execute_ui_event :: proc(client: ^Client) {
+	winning_kb_events: [Key_Bind]UI_Event
+
+	for &ev in client.events {
+		if ev.bind != .Nil {
+			append(
+				&client.captured_key_binds,
+				key_or_mouse_from_key(BIND_TO_KEY[ev.bind]),
+			)
+		}
+
+		switch ev.kind {
+		case .Disconnect,
+		     .Quit_Content_Editor,
+		     .Open_Content_Editor,
+		     .Save_Content_Changes,
+		     .Close_Stat_Editor,
+		     .Close_Map_Editor,
+		     .Open_Map_Editor,
+		     .Apply_Content_Changes,
+		     .Focus:
+			assert(ev.bind != .Nil)
+			slot := &winning_kb_events[ev.bind]
+			if slot.priority < ev.priority {
+				slot^ = ev
+			}
+		case .Select_Stat:
+			ctx := &client.content_editor
+
+			stats := sim.ents_stats_get(&client.ents, ev.stats)
+
+			ctx.selected = ev.stats
+			clear(&ctx.edit_name.buf)
+			append(&ctx.edit_name.buf, nm.str(&stats.name))
+			ctx.stat_edit_state = stats^
+			client.bs = {}
+		case .Select_Team:
+			client.selected_team = ev.team
+		case .Delete_Team:
+			ordered_remove(&client.map_editing.teams, ev.team_idx)
+			client.map_editing.team = 0
+		case .Select_Profile:
+			_, save_err := sqlite.exec(
+				client.save_input_content,
+				pure.SELECTED_PROFILE_CID,
+				nm.str(&ev.name),
+			)
+			sqlite.assert_ok(client.save_input_content, save_err)
+			client.profiles.editing = false
+		case .Reset_Color:
+			hsv := &client.ui.colors.picker_hsvs[ev.color]
+			hsv.hsv = ui_color_to_hsv(UI_COLORS_DEFAULT[ev.color])
+			client.colors.selected = .NONE
+		case .Select_Color:
+			client.colors.selected = ev.color
+		case .Connect:
+			pure.client_connect(client, ev.endpoint)
+		case .Connect_To_Server:
+			pure.client_connect(client, ev.endpoint)
+		case .Delete_Server:
+			_, delete_err := sqlite.exec(client.delete_server, ev.text)
+			sqlite.assert_ok(client.delete_server, delete_err)
+		case .Refresh_Server_Identity:
+			entry := ev.server_info_listener
+			entry.expected_identity = {}
+		case .Fetch_Server_Info:
+			fetch_server_info(ev.server_info_listener, ev.endpoint, client.l)
+		case .Save_Server_Id:
+			new_server := ev.saved_server
+
+			_, res := sqlite.exec(
+				client.save_server,
+				new_server.nick_name,
+				new_server.conn_string,
+				new_server.pk,
+			)
+			sqlite.assert_ok(client.save_server, res)
+		case .Delete_Profile:
+			_, delete_err := sqlite.exec(
+				client.delete_profile,
+				nm.str(&ev.name),
+			)
+			sqlite.assert_ok(client.delete_profile, delete_err)
+		case .Rename_Profile:
+			cnt, save_err := sqlite.exec(
+				client.edit_profile,
+				ev.text,
+				nm.str(&ev.name),
+			)
+			client.profiles.editing_error = ""
+			if save_err == .CONSTRAINT {
+				client.profiles.editing_error = "name already taken"
+			} else {
+				sqlite.assert_ok(client.edit_profile, save_err)
+				assert(cnt == 1)
+			}
+		case .Create_Profile:
+			pk: sim.Private_Key
+			crypto.rand_bytes(pk[:])
+
+			client.profiles.creation_error = ""
+			if ev.text == "" {
+				client.profiles.creation_error = "name cannot be empty"
+			} else {
+				_, res := sqlite.exec(client.save_profile, ev.text, pk)
+				if res == .CONSTRAINT {
+					client.profiles.creation_error = "name already taken"
+				} else {
+					sqlite.assert_ok(client.save_profile, res)
+				}
+			}
+		case .Download_All_Assets:
+			pure.fetch_all_assets(client)
+		case .Save_Map:
+			mapa := ui_map_export(client)
+			pure.tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
+		case .Spawn_Ship:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Spawn,
+					parent = ev.parent,
+					id = ev.stats,
+				},
+			)
+		case .Build:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Build,
+					pos = ev.pos,
+					id = ev.stats,
+					parent = ev.parent,
+					team = ev.team,
+				},
+			)
+			client.bs = {}
+		case .Delete_Building:
+			pure.tcp_send(client, sim.Client_Cmd{type = .Delete, ent = ev.ent})
+			client.bs = {}
+		case .Rewire:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Rewire,
+					parent = ev.parent,
+					ent = ev.ent,
+				},
+			)
+			client.bs = {}
+		case .Create_Stat:
+			stats: sim.Ent_Stats
+			stats.name = nm.from_str(ev.text)
+			pure.tcp_send(
+				client,
+				sim.Client_Content_Action{type = .Create, stats = stats},
+			)
+		case .Upload_Assets:
+			client.upload.cursor = 0
+			pure.upload_assets(client)
+		case .Clear_Assets:
+			client.upload.assets = {}
+		case .Select_Brush:
+			ctx := &client.map_editing
+			ctx.editing_brush = ctx.brush == ev.brush
+			ctx.brush = ev.brush
+		case .Select_Map_Team:
+			ctx := &client.map_editing
+			ctx.editing_team = ctx.team == ev.team
+			ctx.team = ev.team
+			team := &ctx.teams[ev.team]
+			ctx.color_state.hsv = ui_color_to_hsv(get_color(team.color))
+		case .Close_Team_Editor:
+			client.map_editing.team = 0
+		case .Add_Team:
+			append(
+				&client.map_editing.teams,
+				sim.Ent_Team{color = sim.Color(rand.uint32() | 0x000000FF)},
+			)
+		case .Send_Chat:
+			selected_profile := pure.get_selected_user(client)
+			pure.tcp_send(
+				client,
+				sim.Broadcast_Packet(
+					sim.Chat_Msg {
+						name = selected_profile.name,
+						id = client.handshake.ch.id,
+						content = ev.text,
+					},
+				),
+			)
+		}
+	}
+	clear(&client.events)
+
+	for &ev in winning_kb_events {
+		if ev.priority == 0 do continue
+		#partial switch ev.kind {
+		case .Disconnect:
+			pure.client_clear_state(client, "manual disconnect")
+		case .Quit_Content_Editor:
+			client.ui.content_editor.expanded = false
+		case .Open_Content_Editor:
+			client.ui.content_editor.expanded = true
+		case .Save_Content_Changes:
+			pure.tcp_send(client, sim.Client_Content_Action{type = .Save})
+		case .Close_Stat_Editor:
+			client.content_editor.selected = 0
+		case .Open_Map_Editor:
+			client.ui.map_editing.expanded = true
+		case .Close_Map_Editor:
+			client.ui.map_editing.expanded = false
+		case .Focus:
+			orui.current_context.focus_id = ev.target
+			orui.current_context.caret_index = ev.carret_index
+		case .Apply_Content_Changes:
+			pure.tcp_send(
+				client,
+				sim.Client_Content_Action {
+					type = .Edit,
+					stats = client.content_editor.stat_edit_state,
+				},
+			)
+		case:
+			log.warn("unhandled keybing event:", ev)
+		}
 	}
 }
