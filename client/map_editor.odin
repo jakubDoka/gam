@@ -395,7 +395,7 @@ ui_map_editor :: proc(client: ^Client) {
 					icon = .ICON_CROSS_SMALL,
 					tooltip = "Close team editor",
 				) {
-					client.map_editing.team = 0
+					emit_event(client, .Close_Team_Editor, {})
 				}
 			}
 

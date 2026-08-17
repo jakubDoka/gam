@@ -161,8 +161,13 @@ UI_Event_Kind :: enum {
 	Close_Map_Editor,
 	Focus,
 	Apply_Content_Changes,
+	Reset_Color,
+	Select_Color,
+	Connect,
 	Connect_To_Server,
 	Delete_Server,
+	Refresh_Server_Identity,
+	Fetch_Server_Info,
 	Save_Server_Id,
 	Delete_Profile,
 	Rename_Profile,
@@ -243,24 +248,25 @@ BIND_TO_KEY := [Key_Bind]Key {
 }
 
 UI_Event :: struct {
-	kind:         UI_Event_Kind,
-	team:         sim.Ent_Team_ID,
-	team_idx:     int,
-	name:         nm.Name,
-	priority:     int,
-	bind:         Key_Bind,
-	target:       orui.Id,
-	carret_index: int,
-	stats:        sim.Ent_Stats_ID,
-	color:        UI_Color,
-	endpoint:     net.Endpoint,
-	ent:          sim.Ent_Net_ID,
-	parent:       sim.Ent_Net_ID,
-	pos:          sim.Vec,
-	text:         string,
-	identity:     sim.Identity,
-	brush:        UI_Map_Editor_Brush,
-	saved_server: pure.Saved_Server,
+	kind:                 UI_Event_Kind,
+	team:                 sim.Ent_Team_ID,
+	team_idx:             int,
+	name:                 nm.Name,
+	priority:             int,
+	bind:                 Key_Bind,
+	target:               orui.Id,
+	carret_index:         int,
+	stats:                sim.Ent_Stats_ID,
+	color:                UI_Color,
+	endpoint:             net.Endpoint,
+	ent:                  sim.Ent_Net_ID,
+	parent:               sim.Ent_Net_ID,
+	pos:                  sim.Vec,
+	text:                 string,
+	identity:             sim.Identity,
+	brush:                UI_Map_Editor_Brush,
+	saved_server:         pure.Saved_Server,
+	server_info_listener: ^UI_Server_Info_Listener,
 }
 
 emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
@@ -529,9 +535,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						.ICON_RESTART,
 						"Reset to default",
 					) {
-						hsv := &client.ui.colors.picker_hsvs[vl]
-						hsv.hsv = ui_color_to_hsv(UI_COLORS_DEFAULT[vl])
-						client.colors.selected = .NONE
+						emit_event(client, .Reset_Color, {color = vl})
 					}
 				}
 
@@ -562,7 +566,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						.ICON_PENCIL_BIG,
 						"Edit color",
 					) {
-						client.colors.selected = vl
+						emit_event(client, .Select_Color, {color = vl})
 					}
 					continue
 				}
@@ -586,8 +590,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				)
 
 				if ui_clicked_off() {
-
-					client.colors.selected = .NONE
+					emit_event(client, .Select_Color, {color = .NONE})
 				}
 
 				ui_color_picker(
@@ -647,7 +650,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				client.ip_error = "expected ip adress:port"
 			} else {
 				client.ip_error = ""
-				emit_event(client, .Connect_To_Server, {endpoint = endp})
+				emit_event(client, .Connect, {endpoint = endp})
 			}
 		}
 	}
@@ -771,7 +774,11 @@ ui_connection_menu :: proc(client: ^Client) {
 						entry.state != .Disconnected,
 					},
 				) {
-					entry.expected_identity = {}
+					emit_event(
+						client,
+						.Refresh_Server_Identity,
+						{server_info_listener = entry},
+					)
 				}
 			}
 
@@ -892,7 +899,14 @@ ui_connection_menu :: proc(client: ^Client) {
 						return
 					}
 
-					fetch_server_info(&ctx.create_fetcher, endp, client.l)
+					emit_event(
+						client,
+						.Fetch_Server_Info,
+						{
+							endpoint = endp,
+							server_info_listener = &ctx.create_fetcher,
+						},
+					)
 				}
 			}
 
@@ -1973,11 +1987,24 @@ ui_build :: proc(client: ^Client) {
 			)
 			sqlite.assert_ok(client.save_input_content, save_err)
 			client.profiles.editing = false
+		case .Reset_Color:
+			hsv := &client.ui.colors.picker_hsvs[ev.color]
+			hsv.hsv = ui_color_to_hsv(UI_COLORS_DEFAULT[ev.color])
+			client.colors.selected = .NONE
+		case .Select_Color:
+			client.colors.selected = ev.color
+		case .Connect:
+			pure.client_connect(client, ev.endpoint)
 		case .Connect_To_Server:
 			pure.client_connect(client, ev.endpoint)
 		case .Delete_Server:
 			_, delete_err := sqlite.exec(client.delete_server, ev.text)
 			sqlite.assert_ok(client.delete_server, delete_err)
+		case .Refresh_Server_Identity:
+			entry := ev.server_info_listener
+			entry.expected_identity = {}
+		case .Fetch_Server_Info:
+			fetch_server_info(ev.server_info_listener, ev.endpoint, client.l)
 		case .Save_Server_Id:
 			new_server := ev.saved_server
 

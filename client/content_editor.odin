@@ -662,7 +662,7 @@ ui_file_upload :: proc(client: ^Client) {
 				focused_color = .PRIMARY,
 			},
 		) {
-			client.upload.assets = {}
+			emit_event(client, .Clear_Assets, {})
 		}
 	}
 }
