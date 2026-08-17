@@ -2,7 +2,6 @@ package client
 
 import "../sim"
 import "../util/bit_arr"
-import "../util/nm"
 import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
@@ -234,27 +233,6 @@ ui_get_sprite :: proc(
 	return
 }
 
-ui_get_selected_user :: proc(r: ^UI_Reactor) -> (profile: Profile) {
-	selected_profile: sim.Player_Name
-	serr, s := sqlite.query(
-		r.load_input_content,
-		selected_profile,
-		SELECTED_PROFILE_CID,
-	)
-	if serr != .DONE do sqlite.assert_ok(r.load_input_content, serr)
-	sqlite.reset(s)
-
-	serr, s = sqlite.query(
-		r.select_profile_by_name,
-		profile,
-		nm.str(&selected_profile),
-	)
-	if serr != .DONE do sqlite.assert_ok(r.select_profile_by_name, serr)
-	sqlite.reset(s)
-
-	return
-}
-
 Button_Config :: struct {
 	label:         string,
 	tooltip:       string,
@@ -464,27 +442,6 @@ ui_error_label :: proc(
 	}
 }
 
-get_selected_user :: proc(r: ^UI_Reactor) -> (profile: Profile) {
-	selected_profile: sim.Player_Name
-	serr, s := sqlite.query(
-		r.load_input_content,
-		selected_profile,
-		SELECTED_PROFILE_CID,
-	)
-	if serr != .DONE do sqlite.assert_ok(r.load_input_content, serr)
-	sqlite.reset(s)
-
-	serr, s = sqlite.query(
-		r.select_profile_by_name,
-		profile,
-		nm.str(&selected_profile),
-	)
-	if serr != .DONE do sqlite.assert_ok(r.select_profile_by_name, serr)
-	sqlite.reset(s)
-
-	return
-}
-
 Text_Input_Config :: struct {
 	width:           orui.Size,
 	height:          orui.Size,
@@ -514,9 +471,10 @@ ui_text_input :: proc(
 	border_color := ui_color(config.border_color, .PRIMARY)
 	align := config.align.? or_else .Start
 
-	r := (^UI_Reactor)(
+	r := (^Client)(
 		transmute(uintptr)orui.current_context -
-		offset_of(UI_Reactor, orui_ctx),
+		offset_of(UI_Reactor, orui_ctx) -
+		offset_of(Client, ui),
 	)
 
 	_, already_initialized := orui.element_index_by_id(

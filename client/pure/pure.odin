@@ -3,24 +3,16 @@ package pure_client
 import "../../sim"
 import "../../simt/nbio"
 import "../../util/arna"
-import "../../util/b58"
-import "../../util/bit_arr"
+import "../../util/hot"
 import "../../util/nm"
 import "../../util/rtt"
 import "../../util/sqlite"
 import "base:runtime"
-import "core:fmt"
-import "core:log"
-import "core:mem"
-import "core:net"
-import "core:reflect"
-import "core:slice"
-import "core:strings"
-import "core:sync"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
 
+MAX_LASERS :: 512
 ASSET_CACHE :: "asset-cache"
 SELECTED_PROFILE_CID :: 0
 
@@ -285,4 +277,91 @@ client_ent_extra_get :: proc(client: ^Client, id: sim.Ent_ID) -> ^Ent_Extra {
 		gen = id.gen,
 	}
 	return extra
+}
+
+REWIRE_TABLE := [?]rawptr {
+	rawptr(client_on_tcp_kill),
+	rawptr(client_on_tcp_packet),
+	rawptr(client_on_udp_kill),
+	rawptr(client_on_udp_packet),
+	rawptr(client_decrypt_packet),
+	rawptr(client_on_tick),
+	rawptr(client_on_ping),
+}
+
+@(export)
+client_rewire :: proc(hr: ^hot.Reloader, client: ^Client) {
+	rw: hot.Rewireing
+	rw.hr = hr
+	append(&rw.table, ..REWIRE_TABLE[:])
+	defer hot.rewire_apply(rw)
+
+	hot.rewire(&rw, client.cleanup)
+	hot.rewire(&rw, client.host.on_packet)
+	hot.rewire(&rw, client.udp.host.on_kill)
+	hot.rewire(&rw, client.udp.host.on_packet)
+	hot.rewire(&rw, client.udp.host.decrypt)
+
+	hot.rewire(&rw, sim.interval_rewire_slot(client.tick_interval))
+	hot.rewire(&rw, sim.interval_rewire_slot(client.ping_interval))
+}
+
+client_init :: proc(
+	client: ^Client,
+	hr: ^hot.Reloader,
+	config: ^Client_Config,
+) {
+	context.allocator = hr.init_allocator
+	append(&hr.rewire_table, ..REWIRE_TABLE[:])
+
+	client.config = config
+	client.l = hr.l
+	client.player_idx = -1
+	client.udp.recv_buf = make([]u8, 1 << 16)
+	sim.packet_buffer_reserve(&client.udp.send_buf, 16)
+	sim.ents_reserve(&client.ents, sim.MAX_ENTS_PER_GAME)
+	client.lasers.slots = make([]Laser, MAX_LASERS)
+	client.ent_extra = make([]Ent_Extra, sim.MAX_ENTS_PER_GAME)
+	client.config_allocator = arna.init_from_buffer(make([]u8, 1 << 16))
+	client.upload.arena = arna.init_from_buffer(make([]u8, 1 << 14))
+	client.assets_to_fetch.allocator = hr.init_allocator
+
+	client.input_pool = make([]Deffered_Client_Input, 64)
+	for &ci in client.input_pool {
+		ci.next_free = client.free_deffered_inputs
+		client.free_deffered_inputs = &ci
+	}
+
+	sqlite.exec(client.db, #load("../schema.sql", cstring))
+	sqlite.prepare(client.db, client.ui_statements)
+
+	chat_ring_init(&client.messages, make([]u8, 1024 * 64))
+
+	sim.interval_poly(
+		sim.PING_INTERVAL,
+		client,
+		client_on_ping,
+		&client.ping_interval,
+		client.l,
+	)
+
+	sim.interval_poly(
+		sim.TICK_INTERVAL,
+		client,
+		client_on_tick,
+		&client.tick_interval,
+		client.l,
+	)
+
+	reqs, _ := chan.create_buffered(
+		chan.Chan(Rtt_Worker_Request, .Both),
+		16,
+		context.allocator,
+	)
+	client.rtt_worker = rtt_worker_run(
+		{rt = &client.shared_rtt, reqs = chan.as_recv(reqs)},
+	)
+	client.rtt_worker_reqs = chan.as_send(reqs)
+
+	return
 }

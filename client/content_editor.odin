@@ -16,6 +16,7 @@ import "core:reflect"
 import "core:sort"
 import "core:strconv"
 import "core:strings"
+import "pure"
 import rl "vendor:raylib"
 
 ui_content_editor :: proc(client: ^Client) {
@@ -159,7 +160,7 @@ ui_content_editor :: proc(client: ^Client) {
 			   confirmed {
 				stats: sim.Ent_Stats
 				stats.name = nm.from_str(text)
-				tcp_send(
+				pure.tcp_send(
 					client,
 					sim.Client_Content_Action{type = .Create, stats = stats},
 				)
@@ -374,7 +375,7 @@ ui_content_editor :: proc(client: ^Client) {
 }
 
 ui_file_upload :: proc(client: ^Client) {
-	ctx := &client.content_editor
+	ctx := &client.upload
 
 	area_id := id("drop-sprite-area")
 
@@ -382,26 +383,26 @@ ui_file_upload :: proc(client: ^Client) {
 	hovered := rl.CheckCollisionPointRec(rl.GetMousePosition(), rect)
 
 	load: if hovered && rl.IsFileDropped() {
-		ctx.upload_error = ""
+		ctx.error = ""
 
 		raw_files := rl.LoadDroppedFiles()
 		defer rl.UnloadDroppedFiles(raw_files)
 		files := raw_files.paths[:raw_files.count]
 
 		gpa := context.allocator
-		context.allocator = arna.allocator(&ctx.upload_arena)
-		ctx.upload_arena_rc -= 1
-		if ctx.upload_arena_rc < 0 {
+		context.allocator = arna.allocator(&ctx.arena)
+		ctx.arena_rc -= 1
+		if ctx.arena_rc < 0 {
 			free_all(context.allocator)
 		}
-		ctx.upload_arena_rc += 1
-		ctx.dropped_assets = {}
+		ctx.arena_rc += 1
+		ctx.assets = {}
 
-		resize(&ctx.dropped_assets, len(files))
+		resize(&ctx.assets, len(files))
 
 		for file, i in files {
 			file := strings.clone(string(file))
-			entry := &ctx.dropped_assets[i]
+			entry := &ctx.assets[i]
 
 			filename := nbio.base(file)
 
@@ -430,8 +431,8 @@ ui_file_upload :: proc(client: ^Client) {
 				gen:          int,
 			}
 
-			ctx.upload_arena_rc += 1
-			ctx := new_clone(Ctx{client, i, ctx.upload_gen})
+			ctx.arena_rc += 1
+			ctx := new_clone(Ctx{client, i, ctx.gen})
 
 			// TODO(low): the file can be big and that can mess up the
 			// allocator, we should do a streamed hashing
@@ -451,17 +452,17 @@ ui_file_upload :: proc(client: ^Client) {
 				defer delete(data)
 
 				ctx := (^Ctx)(user_data)
-				ed_ctx: ^UI_Content_Editor = &ctx.client.content_editor
-				ed_ctx.upload_arena_rc -= 1
+				ed_ctx: ^pure.Upload_State = &ctx.client.upload
+				ed_ctx.arena_rc -= 1
 				// NOTE: the arena is always held once this exists but the
 				// only place that can drop it is when the files get
 				// reuploaded
 
-				if ctx.gen != ed_ctx.upload_gen {
+				if ctx.gen != ed_ctx.gen {
 					return
 				}
 
-				entry := &ed_ctx.dropped_assets[ctx.file_idx]
+				entry := &ed_ctx.assets[ctx.file_idx]
 
 				if err.operation != .None {
 					entry.issue = "Can't load the file for some reason."
@@ -481,7 +482,7 @@ ui_file_upload :: proc(client: ^Client) {
 			border = orui.border(1),
 			border_color = ui_color(.PRIMARY),
 			background_color = ui_color(
-				hovered && len(ctx.dropped_assets) == 0 ? .SECONDARY : .PRIMARY_FAINT,
+				hovered && len(ctx.assets) == 0 ? .SECONDARY : .PRIMARY_FAINT,
 			),
 			width = orui.grow(),
 			height = {.Fit, 0, 200, 0},
@@ -493,7 +494,7 @@ ui_file_upload :: proc(client: ^Client) {
 
 	all_uploaded := true
 
-	if len(ctx.dropped_assets) == 0 {
+	if len(ctx.assets) == 0 {
 		msg := "Drag and drop file here to upload to\n the server (*.png)"
 
 		ui_label(
@@ -521,11 +522,11 @@ ui_file_upload :: proc(client: ^Client) {
 					},
 					gap = PADDING,
 					cols = 4,
-					rows = i32(len(ctx.dropped_assets)),
+					rows = i32(len(ctx.assets)),
 				},
 			)
 
-			for &asset, i in ctx.dropped_assets {
+			for &asset, i in ctx.assets {
 				if asset.base.hash == {} {
 					box(
 						id("asset-uploaded-row"),
@@ -650,8 +651,8 @@ ui_file_upload :: proc(client: ^Client) {
 				disabled = all_uploaded,
 			},
 		) {
-			ctx.upload_cursor = 0
-			upload_assets(client)
+			ctx.cursor = 0
+			pure.upload_assets(client)
 		}
 
 		if ui_button(
@@ -663,7 +664,7 @@ ui_file_upload :: proc(client: ^Client) {
 				focused_color = .PRIMARY,
 			},
 		) {
-			ctx.dropped_assets = {}
+			ctx.assets = {}
 		}
 	}
 }

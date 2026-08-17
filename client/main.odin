@@ -13,14 +13,15 @@ import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
-import "core:os" // marked
-import "core:reflect"
+import "core:os"
+import "core:reflect" // marked
 import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
+import "pure"
 import rl "vendor:raylib"
 
 MAX_PARTICLES :: 512
@@ -36,11 +37,6 @@ ASSET_CACHE :: "asset-cache"
 PLACEMENT_BUTTON_RADIUS :: 20
 
 font_medium: rl.Font
-
-tcp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
-	ok := sim.tcp_connection_send(&client.hctx.tcp, packet, client.l)
-	assert(ok)
-}
 
 get_color :: #force_inline proc(color: sim.Color) -> rl.Color {
 	return rl.GetColor(auto_cast color)
@@ -68,55 +64,7 @@ Particle :: struct {
 	using stats: sim.Particle_Stats,
 }
 
-Retained_Array :: struct($E: typeid) {
-	slots:  []E,
-	active: int,
-}
-
-retained_add :: proc(arr: ^Retained_Array($E)) -> (res: ^E) {
-	if arr.active == len(arr.slots) do return
-
-	res = &arr.slots[arr.active]
-	arr.active += 1
-	res^ = {}
-
-	return
-}
-
-Retained_Iter_State :: struct {
-	i:    int,
-	keep: int,
-}
-
-retained_iter :: proc(
-	retained: ^Retained_Array($E),
-	state: ^Retained_Iter_State,
-) -> (
-	^E,
-	bool,
-) {
-	if state.i >= retained.active {
-		retained.active = state.keep
-		return nil, false
-	}
-
-	p := &retained.slots[state.i]
-
-	if p.age < p.lifetime {
-		retained.slots[state.keep] = p^
-		state.keep += 1
-	}
-
-	state.i += 1
-
-	return p, true
-}
-
-retained_active :: proc(retained: ^Retained_Array($E)) -> []E {
-	return retained.slots[:retained.active]
-}
-
-Particles :: Retained_Array(Particle)
+Particles :: pure.Retained_Array(Particle)
 
 Client_Build_State :: struct {
 	src_building: sim.Ent_ID,
@@ -124,95 +72,12 @@ Client_Build_State :: struct {
 	place_pos:    Maybe(sim.Map_Pos),
 }
 
-Laser :: struct {
-	age:      f32,
-	lifetime: f32,
-	pos:      sim.Vec,
-	dir:      f32,
-	team:     sim.Ent_Team_ID,
-	stats:    sim.Ent_Stats_ID,
-}
-
-Lasers :: Retained_Array(Laser)
-
-Client_Config :: struct {
-	db:       sqlite.Connection,
-	data_dir: string,
-}
-
 Client :: struct {
-	using hctx:            sim.Handshake,
-	last_inpulse:          time.Time,
-	udp:                   sim.UDP_Connection,
-	connection_stage:      Connection_State,
-	last_server_packet:    time.Time,
-	shared_rtt:            f32,
-	rtt:                   f32,
-	rtt_worker:            ^thread.Thread,
-	rtt_worker_reqs:       chan.Chan(Rtt_Worker_Request, .Send),
-	tps:                   int,
-	ents:                  sim.Ents,
-	ent_extra:             []Ent_Extra,
-	ent:                   sim.Ent_ID,
-	current_input:         sim.Input_State,
-	applied_input:         sim.Input_State,
+	using pure:            pure.Client,
 	camera:                rl.Camera2D,
-	map_buf:               []u8,
-	players:               [dynamic]Player,
-	free_deffered_inputs:  ^Deffered_Client_Input,
-	last_cold_state_hash:  sim.Hash,
-	debug_on:              bool,
 	using ui:              UI_Reactor,
-	config_allocator:      arna.Allocator,
-	input_pool:            []Deffered_Client_Input,
-	tick_interval:         ^nbio.Operation,
-	ping_interval:         ^nbio.Operation,
 	particles:             Particles,
-	lasers:                Lasers,
-	bs:                    Client_Build_State,
 	input_display_texture: rl.RenderTexture2D,
-	asset_loader:          ^Req,
-	asset_uploader:        ^Req,
-	player_idx:            int,
-	last_app:              time.Time,
-	assets_to_fetch:       [dynamic]sim.Asset_ID,
-	inflight_assets:       int,
-	inflight_asset_cursor: int,
-}
-
-@(rodata)
-NIL_ENT_EXTRA_MEM := Ent_Extra{}
-NIL_ENT_EXTRA := &NIL_ENT_EXTRA_MEM
-
-Ent_Extra :: struct {
-	pos_smoothing:    sim.Vec,
-	rot_smoothing:    f32,
-	energy_smoothing: f32,
-	gen:              u32,
-	trail_cooldown:   f32,
-}
-
-client_udp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
-	assert(client.hctx.server_endpoint != {})
-
-	ok := sim.udp_connection_send(
-		&client.udp,
-		client.hctx.server_endpoint,
-		&client.hctx.tcp.secret,
-		packet,
-		client.l,
-	)
-	assert(ok)
-}
-
-client_ent_extra_get :: proc(client: ^Client, id: sim.Ent_ID) -> ^Ent_Extra {
-	if sim.ents_get(&client.ents, id) == sim.NIL_ENT do return NIL_ENT_EXTRA
-
-	extra := &client.ent_extra[id.index]
-	if extra.gen != id.gen do extra^ = {
-		gen = id.gen,
-	}
-	return extra
 }
 
 Deffered_Client_Input :: struct {
@@ -280,7 +145,6 @@ client_limit_place_position :: proc(
 ) -> (
 	target_pos: sim.Vec,
 ) {
-
 	rel_pos := dest - source
 	target_pos = source + sim.clamp_vec_to_radius(rel_pos, radius - 1)
 	coll_coff, _, tile := sim.map_wall_collision(
@@ -406,7 +270,7 @@ client_compute_input :: proc(client: ^Client) {
 		mouse_pos - sim.ents_get(&client.ents, client.ent).pos
 
 	if prev_input.inner.state != client.current_input.inner.state {
-		client_udp_send(client, client.current_input.inner)
+		pure.udp_send(client, client.current_input.inner)
 		client.current_input.inner.seq += 1
 	}
 }
@@ -494,7 +358,7 @@ client_handle_playable_ent :: proc(client: ^Client, e: ^sim.Ent) {
 	s := sim.ents_stats_get(&client.ents, e.stats)
 	sradius := sim.ents_radius(&client.ents, e.id)
 
-	x := client_ent_extra_get(client, e.id)
+	x := pure.client_ent_extra_get(client, e.id)
 	pos := e.pos + x.pos_smoothing
 
 	rl.DrawCircleLinesV(pos, sradius + 5, rl.RED)
@@ -509,7 +373,7 @@ client_handle_playable_ent :: proc(client: ^Client, e: ^sim.Ent) {
 	he := client_find_hovered_ent(client, mouse_pos)
 	hs := sim.ents_stats_get(&client.ents, he.stats)
 	hsradius := sim.ents_radius(&client.ents, he.id)
-	hx := client_ent_extra_get(client, he.id)
+	hx := pure.client_ent_extra_get(client, he.id)
 	hpos := he.pos + hx.pos_smoothing
 
 	if linalg.distance(hpos, mouse_pos) < hsradius &&
@@ -545,7 +409,7 @@ client_find_hovered_ent :: proc(client: ^Client, pos: sim.Vec) -> ^sim.Ent {
 	for e in sim.ents_query_next(&hover_iter) {
 		s := sim.ents_stats_get(&client.ents, e.stats)
 		sradius := sim.ents_radius(&client.ents, e.id)
-		x := client_ent_extra_get(client, e.id)
+		x := pure.client_ent_extra_get(client, e.id)
 		if linalg.distance(e.pos + x.pos_smoothing, pos) <= sradius {
 			return e
 		}
@@ -559,7 +423,7 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 	s := sim.ents_stats_get(ents, e.stats)
 
 	if s.explosion.radius > 0 {
-		p := retained_add(&client.particles)
+		p := pure.retained_add(&client.particles)
 		if p != nil {
 			p.pos = e.pos
 			p.radius = s.explosion.radius
@@ -568,7 +432,7 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 		}
 
 		for _ in 0 ..< s.explosion.particle_quantity {
-			p := retained_add(&client.particles)
+			p := pure.retained_add(&client.particles)
 			if p == nil do break
 
 			p.pos =
@@ -591,38 +455,16 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 @(export)
 client_init :: proc(
 	hr: ^hot.Reloader,
-	config: ^Client_Config,
+	config: ^pure.Client_Config,
 ) -> (
 	client: ^Client,
 ) {
 	context.allocator = hr.init_allocator
-	append(&hr.rewire_table, ..REWIRE_TABLE[:])
 
-	client = new(Client)
-	client.config = config
-	client.l = hr.l
-	client.player_idx = -1
+	pure.client_init(client, hr, config)
+
 	client.camera.zoom = 1
-	client.udp.recv_buf = make([]u8, 1 << 16)
-	sim.packet_buffer_reserve(&client.udp.send_buf, 16)
-	sim.ents_reserve(&client.ents, sim.MAX_ENTS_PER_GAME)
 	client.particles.slots = make([]Particle, MAX_PARTICLES)
-	client.lasers.slots = make([]Laser, MAX_LASERS)
-	client.ent_extra = make([]Ent_Extra, sim.MAX_ENTS_PER_GAME)
-	client.config_allocator = arna.init_from_buffer(make([]u8, 1 << 16))
-	client.content_editor.upload_arena = arna.init_from_buffer(
-		make([]u8, 1 << 14),
-	)
-	client.assets_to_fetch.allocator = hr.init_allocator
-
-	client.input_pool = make([]Deffered_Client_Input, 64)
-	for &ci in client.input_pool {
-		ci.next_free = client.free_deffered_inputs
-		client.free_deffered_inputs = &ci
-	}
-
-	sqlite.exec(client.db, #load("schema.sql", cstring))
-	sqlite.prepare(client.db, client.ui.ui_statements)
 
 	for &hsv, vl in client.ui.colors.picker_hsvs {
 		if vl not_in EDITABLE_COLORS do continue
@@ -642,7 +484,6 @@ client_init :: proc(
 	}
 
 	orui.init(&client.orui_ctx)
-	chat_ring_init(&client.chat.messages, make([]u8, 1024 * 64))
 
 	client.orui_ctx.default_font = rl.LoadFontFromMemory(
 		".ttf",
@@ -653,68 +494,7 @@ client_init :: proc(
 		0,
 	)
 
-	sim.interval_poly(
-		sim.PING_INTERVAL,
-		client,
-		client_on_ping,
-		&client.ping_interval,
-		client.l,
-	)
-
-	sim.interval_poly(
-		sim.TICK_INTERVAL,
-		client,
-		client_on_tick,
-		&client.tick_interval,
-		client.l,
-	)
-
-	reqs, _ := chan.create_buffered(
-		chan.Chan(Rtt_Worker_Request, .Both),
-		16,
-		context.allocator,
-	)
-	client.rtt_worker = rtt_worker_run(
-		{rt = &client.shared_rtt, reqs = chan.as_recv(reqs)},
-	)
-	client.rtt_worker_reqs = chan.as_send(reqs)
-
 	return
-}
-
-client_on_ping :: proc(client: ^Client) {
-	if client.connection_stage != .Connected do return
-
-	if time.since(client.last_server_packet) > CONNECTION_TIMEOUT {
-		client_clear_state(client, "connection timed out")
-		return
-	}
-
-	assert(client.udp.sock != 0)
-	assert(client.hctx.tcp.sock != 0)
-
-	{
-		selected_user := ui_get_selected_user(client)
-
-		packet := sim.Client_Cold_State {
-			username = selected_user.name,
-		}
-
-		buf := sim.serialize_to_bytes(packet, context.temp_allocator)
-
-		new_hash: sim.Hash
-		sim.hash(buf, &new_hash)
-
-		if new_hash != client.last_cold_state_hash {
-			client.last_cold_state_hash = new_hash
-			tcp_send(client, packet)
-		}
-	}
-}
-
-client_on_tick :: proc(client: ^Client) {
-	if client.connection_stage != .Connected do return
-	client_udp_send(client, client.current_input.inner)
 }
 
 refresh_sheet :: proc(client: ^Client) {
@@ -746,7 +526,7 @@ refresh_sheet :: proc(client: ^Client) {
 	for s, i in client.assets {
 		if s == 0 do continue
 
-		name := asset_path(client, s)
+		name := pure.asset_path(client, s)
 		images[i] = rl.LoadImage(
 			strings.clone_to_cstring(name, context.temp_allocator),
 		)
@@ -776,7 +556,7 @@ refresh_sheet :: proc(client: ^Client) {
 		client.sheet.frames[i].name = asset.name
 	}
 
-	if has_missing do fetch_all_assets(client)
+	if has_missing do pure.fetch_all_assets(client)
 }
 
 @(export)
@@ -784,6 +564,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	client.ents.delta = 1.0 / 60
 	client.ents.on_remove = client_on_remove
 	client.rtt = sync.atomic_load(&client.shared_rtt)
+	client.on_sheet_refresh = refresh_sheet
 
 	mouse_pos := client_mouse_pos(client)
 
@@ -791,15 +572,15 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 
 	ui_map_editor_sync(client)
 
-	iter: Retained_Iter_State
-	for p in retained_iter(&client.particles, &iter) {
+	iter: pure.Retained_Iter_State
+	for p in pure.retained_iter(&client.particles, &iter) {
 		ps := p.stats
 		p.pos += p.vel * client.ents.delta
 		p.age += client.ents.delta
 	}
 
 	iter = {}
-	for l in retained_iter(&client.lasers, &iter) {
+	for l in pure.retained_iter(&client.lasers, &iter) {
 		l.age += client.ents.delta
 	}
 
@@ -810,7 +591,8 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	pe := sim.ents_get(&client.ents, client.ent)
 	if pe != sim.NIL_ENT {
 		client.camera.target =
-			pe.pos + client_ent_extra_get(client, client.ent).pos_smoothing
+			pe.pos +
+			pure.client_ent_extra_get(client, client.ent).pos_smoothing
 	}
 
 	rl.BeginDrawing()
@@ -844,7 +626,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		on_input_apply :: proc(
 			op: ^nbio.Operation,
 			client: ^Client,
-			input: ^Deffered_Client_Input,
+			input: ^pure.Deffered_Client_Input,
 		) {
 			client.applied_input.inner = input.inner
 			input.next_free = client.free_deffered_inputs
@@ -854,11 +636,11 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 
 	input_integration: {
 		look_dir := sim.angle_of(client.applied_input.relative_mouse_pos)
-		x := client_ent_extra_get(client, client.ent)
-		if x == NIL_ENT_EXTRA do break input_integration
+		x := pure.client_ent_extra_get(client, client.ent)
+		if x == pure.NIL_ENT_EXTRA do break input_integration
 
 		if is_key_pressed(client, .Abandon_Ship) {
-			tcp_send(client, sim.Client_Cmd{type = .Abandon})
+			pure.tcp_send(client, sim.Client_Cmd{type = .Abandon})
 		}
 
 		prev_vel := sim.ents_get(&client.ents, client.ent).vel
@@ -892,7 +674,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		sradius := sim.ents_radius(&client.ents, e.id)
 
 		if s.kind == .Beam {
-			px := client_ent_extra_get(client, e.parent)
+			px := pure.client_ent_extra_get(client, e.parent)
 			it := sim.beam_walk_init(&client.ents, e.id, px.rot_smoothing)
 			for pp in sim.beam_walk_next(&client.ents, &it) {}
 			t = sim.ents_team_get(&client.ents, e.team)
@@ -906,7 +688,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 			spec := &s.trail.particle
 
 			for _ in 0 ..< s.trail.quantity_per_tick {
-				p := retained_add(&client.particles)
+				p := pure.retained_add(&client.particles)
 				if p == nil do break
 
 				p.pos =
@@ -926,7 +708,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		s := sim.ents_stats_get(&client.ents, e.stats)
 		t := sim.ents_team_get(&client.ents, e.team)
 		sradius := sim.ents_radius(&client.ents, e.id)
-		x := client_ent_extra_get(client, p.ent)
+		x := pure.client_ent_extra_get(client, p.ent)
 		if e == sim.NIL_ENT do continue
 
 		pos := e.pos + x.pos_smoothing
@@ -953,7 +735,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 				intensity := 15.0 * (1.0 - off * off)
 
 				for _ in 0 ..< 3 {
-					p := retained_add(&client.particles)
+					p := pure.retained_add(&client.particles)
 					if p == nil do break
 
 					p.pos = emit_pos + e.vel * client.ents.delta
@@ -970,7 +752,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 
 	map_draw(client)
 
-	for p in retained_active(&client.particles) {
+	for p in pure.retained_active(&client.particles) {
 		s := p.stats
 		if p.age > s.lifetime do continue
 		lifetime_coff := p.age / p.stats.lifetime
@@ -985,7 +767,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		//rl.DrawRectangleRec({p.pos.x - radius, p.pos.y - radius, radius * 2, radius * 2}, color)
 	}
 
-	for l in retained_active(&client.lasers) {
+	for l in pure.retained_active(&client.lasers) {
 		ls := sim.ents_stats_get(&client.ents, l.stats)
 		lt := sim.ents_team_get(&client.ents, l.team)
 		color := get_color(lt.color)
@@ -1003,7 +785,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	draw_link_iter := sim.ents_iter(&client.ents)
 	for e in sim.ents_iter_next(&draw_link_iter) {
 		s := sim.ents_stats_get(&client.ents, e.stats)
-		x := client_ent_extra_get(client, e.id)
+		x := pure.client_ent_extra_get(client, e.id)
 		pos := e.pos + x.pos_smoothing
 		t := sim.ents_team_get(&client.ents, e.team)
 
@@ -1022,7 +804,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 			if s.kind in sim.DRAWS_ENERGY {
 				parent_pos :=
 					parent.pos +
-					client_ent_extra_get(client, e.parent).pos_smoothing
+					pure.client_ent_extra_get(client, e.parent).pos_smoothing
 				rl.DrawLineEx(parent_pos, pos, 5, get_color(t.color))
 
 				if s.guards {
@@ -1047,7 +829,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 			beam: if s.kind == .Beam {
 				pe := sim.ents_get(&client.ents, e.parent)
 				ps := sim.ents_stats_get(&client.ents, pe.stats)
-				px := client_ent_extra_get(client, e.parent)
+				px := pure.client_ent_extra_get(client, e.parent)
 				if pe == sim.NIL_ENT do break beam
 
 				rad := s.radius * f32((math.sin(rl.GetTime() * 50) + 5) / 6)
@@ -1065,7 +847,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		}
 
 		if sim.ents_is_unwinding(&client.ents, e.id) {
-			p := retained_add(&client.particles)
+			p := pure.retained_add(&client.particles)
 			p.radius = s.radius * (1 - (e.reload - s.reload) / s.unwind) * 0.8
 			p.pos = e.pos + sim.vec_of(e.rot) * (s.radius + p.radius * 0.3)
 			p.lifetime = 0.1
@@ -1083,7 +865,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		s := sim.ents_stats_get(&client.ents, e.stats)
 		sradius := sim.ents_radius(&client.ents, e.id)
 		t := sim.ents_team_get(&client.ents, e.team)
-		x := client_ent_extra_get(client, e.id)
+		x := pure.client_ent_extra_get(client, e.id)
 		tcolor := client_ent_color(client, e.id)
 
 		pos := e.pos + x.pos_smoothing
@@ -1204,7 +986,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		for qe in sim.ents_query_next(&highlight_iter) {
 			qs := sim.ents_stats_get(&client.ents, qe.stats)
 			qsradius := sim.ents_radius(&client.ents, qe.id)
-			qx := client_ent_extra_get(client, qe.id)
+			qx := pure.client_ent_extra_get(client, qe.id)
 			qpos := qe.pos + qx.pos_smoothing
 			if rl.CheckCollisionPointRec(qpos, rect) && qs.kind == .Unit {
 				rl.DrawCircleV(qpos, qsradius, highlight_color)
@@ -1216,7 +998,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		se := sim.ents_get(&client.ents, sid)
 		ss := sim.ents_stats_get(&client.ents, se.stats)
 		seradius := sim.ents_radius(&client.ents, sid)
-		sx := client_ent_extra_get(client, sid)
+		sx := pure.client_ent_extra_get(client, sid)
 		spos := se.pos + sx.pos_smoothing
 		rl.DrawCircleV(spos, seradius, highlight_color)
 	}
@@ -1263,33 +1045,6 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	rl.EndDrawing()
 }
 
-REWIRE_TABLE := [?]rawptr {
-	rawptr(client_on_tcp_kill),
-	rawptr(client_on_tcp_packet),
-	rawptr(client_on_udp_kill),
-	rawptr(client_on_udp_packet),
-	rawptr(client_decrypt_packet),
-	rawptr(client_on_tick),
-	rawptr(client_on_ping),
-}
-
-@(export)
-client_rewire :: proc(hr: ^hot.Reloader, client: ^Client) {
-	rw: hot.Rewireing
-	rw.hr = hr
-	append(&rw.table, ..REWIRE_TABLE[:])
-	defer hot.rewire_apply(rw)
-
-	hot.rewire(&rw, client.cleanup)
-	hot.rewire(&rw, client.host.on_packet)
-	hot.rewire(&rw, client.udp.host.on_kill)
-	hot.rewire(&rw, client.udp.host.on_packet)
-	hot.rewire(&rw, client.udp.host.decrypt)
-
-	hot.rewire(&rw, sim.interval_rewire_slot(client.tick_interval))
-	hot.rewire(&rw, sim.interval_rewire_slot(client.ping_interval))
-}
-
 client_shutdown :: proc(client: ^Client) {
 	sim.tcp_connection_kill(&client.hctx.tcp, client.l)
 	sim.udp_connection_kill(&client.udp, client.l)
@@ -1319,7 +1074,7 @@ client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	packer.sheet_destroy(client.sheet)
 	ui_destroy(client)
 
-	sqlite.finalize(client.ui.ui_statements)
+	sqlite.finalize(client.ui_statements)
 	db_res := sqlite.close(client.db)
 	sqlite.assert_ok(client.db, db_res)
 }
@@ -1342,7 +1097,7 @@ client_memory_size :: proc() -> (sum: int) {
 	sum += size_of(Client)
 	sum += size_of(Player)
 	sum += size_of(Particle)
-	sum += size_of(Laser)
+	sum += size_of(pure.Laser)
 
 	return
 }
@@ -1358,7 +1113,7 @@ client_static_deinit :: proc() {
 	sim.unregister_user_formatters()
 }
 
-client_config_default :: proc() -> (cc: Client_Config) {
+client_config_default :: proc() -> (cc: pure.Client_Config) {
 	data_dir, data_dir_err := os.user_data_dir(context.temp_allocator)
 	if data_dir_err != nil {
 		log.error("failed to resolve the data dir:", data_dir_err)
@@ -1457,7 +1212,7 @@ main_proc :: proc() {
 	}
 	hr.init_allocator = arna.allocator(&init_arna)
 
-	config: Client_Config
+	config: pure.Client_Config
 	{context.allocator = arna.allocator(&global_arna)
 		config = client_config_default()}
 	hr.config = &config

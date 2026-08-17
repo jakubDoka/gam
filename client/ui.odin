@@ -2,7 +2,6 @@ package client
 
 import "../sim"
 import "../simt/nbio"
-import "../util/arna"
 import "../util/b58"
 import "../util/bit_arr"
 import "../util/nm"
@@ -16,11 +15,11 @@ import "core:log"
 import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
-import "core:mem"
 import "core:net"
 import "core:reflect"
 import "core:strings"
 import "core:time"
+import "pure"
 import rl "vendor:raylib"
 
 id :: orui.id
@@ -31,11 +30,6 @@ PADDING :: 4
 SELECTED_PROFILE_CID :: 0
 ROW_HEIGHT :: 32
 HEIGHT :: ROW_HEIGHT * 0.66
-
-Profile :: struct {
-	name: sim.Player_Name,
-	pk:   sim.Private_Key,
-}
 
 Saved_Text_Input :: struct {
 	id:      int,
@@ -136,7 +130,6 @@ Theme_Color :: struct #raw_union {
 UI_Reactor :: struct {
 	assets:                  [dynamic]sim.Asset_ID,
 	ip_buf:                  strings.Builder,
-	ip_error:                string,
 	colors:                  UI_Colors,
 	settings_expanded:       bool,
 	building:                bool,
@@ -145,15 +138,11 @@ UI_Reactor :: struct {
 	content_editor:          UI_Content_Editor,
 	map_editing:             UI_Map_Editor,
 	chat:                    UI_Chat,
-	using config:            ^Client_Config,
-	using ui_statements:     UI_Statements,
 	selected_team:           sim.Ent_Team_ID,
 	selected_units:          [dynamic]sim.Ent_ID,
 	sheet_sum:               sim.Asset_ID,
 	sheet:                   packer.Sheet,
 	orui_ctx:                orui.Context,
-	has_dirty_config:        bool,
-	conn_id:                 int,
 	control_selection_pivot: sim.Vec,
 	events:                  [dynamic]UI_Event,
 	last_key_bind:           Key_Bind,
@@ -278,7 +267,7 @@ emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
 UI_Chat :: struct {
 	open:     bool,
 	prompt:   strings.Builder,
-	messages: Chat_Ring,
+	messages: pure.Chat_Ring,
 	scroll:   int,
 }
 
@@ -385,13 +374,6 @@ UI_Content_Editor :: struct {
 	edit_name:        strings.Builder,
 	create_stat:      bool,
 	create_stat_name: strings.Builder,
-	upload_error:     string,
-	upload_arena:     arna.Allocator,
-	upload_arena_rc:  int,
-	upload_gen:       int,
-	dropped_assets:   #soa[dynamic]Dropped_Asset,
-	upload_inflight:  int,
-	upload_cursor:    int,
 }
 
 Dropped_Asset :: struct {
@@ -661,7 +643,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				client.ip_error = "expected ip adress:port"
 			} else {
 				client.ip_error = ""
-				client_connect(client, endp)
+				pure.client_connect(client, endp)
 			}
 		}
 	}
@@ -709,7 +691,7 @@ ui_connection_menu :: proc(client: ^Client) {
 			entry: ^UI_Server_Info_Listener
 			entry_idx: int
 
-			endp, identity, ok := parse_conn_string(row.conn_string)
+			endp, identity, ok := pure.parse_conn_string(row.conn_string)
 
 			for oentry, i in ctx.server_info_cache {
 				if oentry.expected_identity == row.pk {
@@ -751,7 +733,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						entry.state != .Connected,
 					},
 				) {
-					client_connect(client, endp)
+					pure.client_connect(client, endp)
 				}
 
 				if ui_icon_button(
@@ -877,7 +859,7 @@ ui_connection_menu :: proc(client: ^Client) {
 					},
 				)
 
-				endp, _, ok := parse_conn_string(text)
+				endp, _, ok := pure.parse_conn_string(text)
 
 				if endp != ctx.create_fetcher.server_endpoint {
 					server_info_close(&ctx.create_fetcher)
@@ -912,7 +894,7 @@ ui_connection_menu :: proc(client: ^Client) {
 			if ctx.create_fetcher.state == .Connected {
 				b58_id := b58.encode(ctx.create_fetcher.handshake.sh.id[:])
 
-				_, identity, ok := parse_conn_string(
+				_, identity, ok := pure.parse_conn_string(
 					string(ctx.create_conn_string.buf[:]),
 				)
 
@@ -1051,10 +1033,10 @@ ui_connection_menu :: proc(client: ^Client) {
 	) {
 		ctx := &client.profiles
 
-		selected_profile := ui_get_selected_user(client).name
+		selected_profile := pure.get_selected_user(client).name
 
 		i := 0
-		profile_query, pqs := sqlite.query(client.load_profiles, Profile)
+		profile_query, pqs := sqlite.query(client.load_profiles, pure.Profile)
 		for row in sqlite.query_next(&profile_query) {
 			row := row
 			selected := nm.str(&row.name) == nm.str(&selected_profile)
@@ -1295,7 +1277,6 @@ ui_game_hud :: proc(client: ^Client) {
 			launched: int,
 		}
 
-		ce_ctx := &client.content_editor
 		progresses := [?]Indicator {
 			{
 				"dwn",
@@ -1305,9 +1286,9 @@ ui_game_hud :: proc(client: ^Client) {
 			},
 			{
 				"upl",
-				len(ce_ctx.dropped_assets),
-				ce_ctx.upload_inflight,
-				ce_ctx.upload_cursor,
+				len(client.upload.assets),
+				client.upload.inflight,
+				client.upload.cursor,
 			},
 		}
 
@@ -1333,7 +1314,7 @@ ui_game_hud :: proc(client: ^Client) {
 			{width = orui.grow(), height = orui.fixed(ROW_HEIGHT)},
 		)}
 
-	selected_profile := ui_get_selected_user(client)
+	selected_profile := pure.get_selected_user(client)
 
 	if nm.ln(selected_profile.name) != 0 {
 		if client.player_idx == -1 {
@@ -1369,7 +1350,7 @@ ui_game_hud :: proc(client: ^Client) {
 					.ICON_FILE_SAVE,
 					"Download all assets",
 				) {
-					fetch_all_assets(client)
+					pure.fetch_all_assets(client)
 				}
 
 				ui_icon_dropdown(
@@ -1393,7 +1374,7 @@ ui_game_hud :: proc(client: ^Client) {
 					"Save map changes",
 				) {
 					mapa := ui_map_export(client)
-					tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
+					pure.tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
 				}
 			}
 
@@ -1423,7 +1404,7 @@ ui_game_hud :: proc(client: ^Client) {
 }
 
 ui_chat :: proc(client: ^Client) {
-	selected_profile := ui_get_selected_user(client)
+	selected_profile := pure.get_selected_user(client)
 
 	if selected_profile.name == {} do return
 
@@ -1462,13 +1443,13 @@ ui_chat :: proc(client: ^Client) {
 	fade_time :: time.Millisecond * 500
 
 	count := 0
-	msgs := chat_ring_iter(&ctx.messages)
-	for msg in chat_ring_iter_next(&msgs) do count += 1
+	msgs := pure.chat_ring_iter(&ctx.messages)
+	for msg in pure.chat_ring_iter_next(&msgs) do count += 1
 
 	prev_scroll := ctx.scroll
 	i := 0
-	msgs = chat_ring_iter(&ctx.messages)
-	for msg in chat_ring_iter_next(&msgs) {
+	msgs = pure.chat_ring_iter(&ctx.messages)
+	for msg in pure.chat_ring_iter_next(&msgs) {
 		msg := msg
 		i += 1
 		ri := count - i
@@ -1503,7 +1484,7 @@ ui_chat :: proc(client: ^Client) {
 				),
 				foreground = ui_color_slot(
 					.SLOT2,
-					rl.ColorAlpha(msg.color, opacity),
+					rl.ColorAlpha(ui_player_color(msg.seed[:]), opacity),
 				),
 				align = .Start,
 				padding = orui.Edges{PADDING, 0, PADDING, PADDING * 2},
@@ -1543,7 +1524,7 @@ ui_chat :: proc(client: ^Client) {
 		)
 
 		if confirm {
-			tcp_send(
+			pure.tcp_send(
 				client,
 				sim.Broadcast_Packet(
 					sim.Chat_Msg {
@@ -1567,31 +1548,6 @@ ui_player_color :: proc(seed: []u8) -> rl.Color {
 	context.random_generator = rand.default_random_generator(&gen)
 
 	return rl.ColorFromHSV(rand.float32() * 360, 0.6, 1)
-}
-
-fetch_all_assets :: proc(client: ^Client) {
-	req, req_slot := req_connect(client)
-	req_slot.kind = .List_Assets
-	req_slot.conn_id = client.conn_id
-	req.on_boot = on_boot
-	req.cleanup = on_kill
-	req.host.on_packet = on_packet
-
-	on_boot :: proc(req: ^Req) -> bool {
-		sim.tcp_connection_boot(req, sim.ASSET_BUF_SIZE, 0, req.l)
-		return true
-	}
-
-	on_packet :: proc(req: ^Req, l: ^nbio.Event_Loop, bytes: []u8) -> bool {
-		client := (^Client)(req.host.asoc_data)
-		assets := mem.slice_data_cast([]sim.Asset_ID, bytes)
-		client_fetch_missig_assets(client, assets)
-		return true
-	}
-
-	on_kill :: proc(req: ^Req) {
-		free(req)
-	}
 }
 
 ui_is_interacting :: proc(
@@ -1716,7 +1672,7 @@ ui_ship_selection :: proc(client: ^Client) {
 					padding = orui.padding(orui.hovered() ? 0 : PADDING),
 				},
 			) {
-				tcp_send(
+				pure.tcp_send(
 					client,
 					sim.Client_Cmd {
 						type = .Spawn,
@@ -1769,7 +1725,7 @@ ui_build_popup :: proc(client: ^Client, tile: sim.Map_Pos) {
 				sprite = stat.sprite,
 			},
 		) {
-			tcp_send(
+			pure.tcp_send(
 				client,
 				sim.Client_Cmd {
 					type = .Build,
@@ -1812,7 +1768,7 @@ ui_edit_popup :: proc(client: ^Client) {
 		.ICON_EXPLOSION,
 		"Delete building",
 	) {
-		tcp_send(client, sim.Client_Cmd{type = .Delete, ent = e.net_id})
+		pure.tcp_send(client, sim.Client_Cmd{type = .Delete, ent = e.net_id})
 		client.bs = {}
 	}
 
@@ -1861,7 +1817,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		   .ICON_FILTER_POINT,
 		   "Connect buildings",
 	   ) {
-		tcp_send(
+		pure.tcp_send(
 			client,
 			sim.Client_Cmd {
 				type = .Rewire,
@@ -1879,7 +1835,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		   .ICON_FILTER_BILINEAR,
 		   "Disconnect buildings",
 	   ) {
-		tcp_send(client, sim.Client_Cmd{type = .Rewire, ent = de.net_id})
+		pure.tcp_send(client, sim.Client_Cmd{type = .Rewire, ent = de.net_id})
 		client.bs = {}
 	}
 }
@@ -2045,7 +2001,7 @@ ui_build :: proc(client: ^Client) {
 		case .Open_Content_Editor:
 			client.ui.content_editor.expanded = true
 		case .Save_Content_Changes:
-			tcp_send(client, sim.Client_Content_Action{type = .Save})
+			pure.tcp_send(client, sim.Client_Content_Action{type = .Save})
 		case .Close_Stat_Editor:
 			client.content_editor.selected = 0
 		case .Open_Map_Editor:
@@ -2056,7 +2012,7 @@ ui_build :: proc(client: ^Client) {
 			orui.current_context.focus_id = ev.target
 			orui.current_context.caret_index = ev.carret_index
 		case .Apply_Content_Changes:
-			tcp_send(
+			pure.tcp_send(
 				client,
 				sim.Client_Content_Action {
 					type = .Edit,

@@ -20,6 +20,8 @@ import "core:sync/chan"
 import "core:thread"
 import "core:time"
 
+CONNECTION_TIMEOUT :: 3 * time.Second
+
 /// <ip>#<identity>
 parse_conn_string :: proc(
 	conn_string: string,
@@ -759,4 +761,82 @@ rtt_worker_run :: proc(ch: Rtt_Worker) -> ^thread.Thread {
 			ws->execute(&worker)
 		}
 	}
+}
+
+fetch_all_assets :: proc(client: ^Client) {
+	req, req_slot := req_connect(client)
+	req_slot.kind = .List_Assets
+	req_slot.conn_id = client.conn_id
+	req.on_boot = on_boot
+	req.cleanup = on_kill
+	req.host.on_packet = on_packet
+
+	on_boot :: proc(req: ^Req) -> bool {
+		sim.tcp_connection_boot(req, sim.ASSET_BUF_SIZE, 0, req.l)
+		return true
+	}
+
+	on_packet :: proc(req: ^Req, l: ^nbio.Event_Loop, bytes: []u8) -> bool {
+		client := (^Client)(req.host.asoc_data)
+		assets := mem.slice_data_cast([]sim.Asset_ID, bytes)
+		client_fetch_missig_assets(client, assets)
+		return true
+	}
+
+	on_kill :: proc(req: ^Req) {
+		free(req)
+	}
+}
+
+client_on_ping :: proc(client: ^Client) {
+	if client.connection_stage != .Connected do return
+
+	if time.since(client.last_server_packet) > CONNECTION_TIMEOUT {
+		client_clear_state(client, "connection timed out")
+		return
+	}
+
+	assert(client.udp.sock != 0)
+	assert(client.hctx.tcp.sock != 0)
+
+	{
+		selected_user := get_selected_user(client)
+
+		packet := sim.Client_Cold_State {
+			username = selected_user.name,
+		}
+
+		buf := sim.serialize_to_bytes(packet, context.temp_allocator)
+
+		new_hash: sim.Hash
+		sim.hash(buf, &new_hash)
+
+		if new_hash != client.last_cold_state_hash {
+			client.last_cold_state_hash = new_hash
+			tcp_send(client, packet)
+		}
+	}
+}
+
+client_on_tick :: proc(client: ^Client) {
+	if client.connection_stage != .Connected do return
+	udp_send(client, client.current_input.inner)
+}
+
+tcp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
+	ok := sim.tcp_connection_send(&client.hctx.tcp, packet, client.l)
+	assert(ok)
+}
+
+udp_send :: proc(client: ^Client, packet: sim.Client_Packet) {
+	assert(client.hctx.server_endpoint != {})
+
+	ok := sim.udp_connection_send(
+		&client.udp,
+		client.hctx.server_endpoint,
+		&client.hctx.tcp.secret,
+		packet,
+		client.l,
+	)
+	assert(ok)
 }
