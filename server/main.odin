@@ -14,7 +14,6 @@ import "core:io"
 import "core:log"
 import "core:mem"
 import "core:mem/tlsf"
-import "core:os"
 import "core:reflect"
 import "core:sort"
 import "core:strings"
@@ -594,7 +593,7 @@ server_handle_packet :: proc(
 
 			reason = ""
 		case .Save:
-			edited_file, edited_file_err := os.open(
+			edited_file, edited_file_err := nbio.open(
 				CONFIG_PATH_EDITED,
 				{.Create, .Trunc, .Write},
 			)
@@ -603,7 +602,7 @@ server_handle_packet :: proc(
 				"failed to open the edited config",
 			)
 
-			edited_stream := os.to_stream(edited_file)
+			edited_stream := nbio.to_stream(edited_file)
 
 			ctx: sim.Store_Ctx
 			ctx.asoc_data = server
@@ -652,7 +651,7 @@ server_handle_packet :: proc(
 		ok := sim.marshall(p.mapa, &me)
 		assert(ok)
 
-		err := os.write_entire_file(map_path, buf)
+		err := nbio.write_entire_file(map_path, buf)
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
 		game_set_map(game, buf)
@@ -699,7 +698,7 @@ game_ent_by_net_id :: proc(game: ^Game, id: sim.Ent_Net_ID) -> ^sim.Ent {
 }
 
 pick_map :: proc(index: int, temp_allocator: runtime.Allocator) -> string {
-	map_entries, map_entries_err := os.read_directory_by_path(
+	map_entries, map_entries_err := nbio.read_directory_by_path(
 		sim.MAP_DIR,
 		0,
 		temp_allocator,
@@ -712,7 +711,7 @@ pick_map :: proc(index: int, temp_allocator: runtime.Allocator) -> string {
 
 	sort.merge_sort_proc(map_entries, compare_file_entries)
 
-	compare_file_entries :: proc(a: os.File_Info, b: os.File_Info) -> int {
+	compare_file_entries :: proc(a: nbio.File_Info, b: nbio.File_Info) -> int {
 		return sort.compare_strings(a.name, b.name)
 	}
 
@@ -733,7 +732,7 @@ game_load_next_map :: proc(game: ^Game) {
 	map_path := pick_map(game.map_index, temp_allocator)
 	game.map_index += 1
 
-	map_bytes, map_bytes_err := os.read_entire_file(
+	map_bytes, map_bytes_err := nbio.read_entire_file(
 		map_path,
 		context.allocator,
 	)
@@ -1142,7 +1141,7 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 }
 
 server_bundle_refresh :: proc(server: ^Server) {
-	cwd, cwd_err := os.get_working_directory(context.temp_allocator)
+	cwd, cwd_err := nbio.get_working_directory(context.temp_allocator)
 	log.assertf(cwd_err == nil, "failed to get working directory: %v", cwd_err)
 
 	Ctx :: struct {
@@ -1183,10 +1182,13 @@ server_bundle_refresh :: proc(server: ^Server) {
 	sqlite.assert_ok(server.prune_assets, psres)
 
 	config: []u8
-	config_err: os.Error
+	config_err: nbio.Error
 
 	for path in ([]string{CONFIG_PATH_EDITED, CONFIG_PATH}) {
-		config, config_err = os.read_entire_file(path, context.temp_allocator)
+		config, config_err = nbio.read_entire_file(
+			path,
+			context.temp_allocator,
+		)
 		if config_err == nil do break
 	}
 	assert(config_err == nil)
@@ -1243,16 +1245,16 @@ visit_files :: proc(
 	dir, dir_err := nbio.join_path({cwd, dir}, context.allocator)
 	log.assertf(dir_err == nil, "failed to join path: %v", dir_err)
 
-	walker := os.walker_create(dir)
-	defer os.walker_destroy(&walker)
-	for entry in os.walker_walk(&walker) {
+	walker := nbio.walker_create(dir)
+	defer nbio.walker_destroy(&walker)
+	for entry in nbio.walker_walk(&walker) {
 		if entry.type != .Regular do continue
 		if !strings.has_suffix(entry.fullpath, ext) do continue
 
 		rel_path := entry.fullpath[len(dir) + 1:]
 		rel_path = rel_path[:len(rel_path) - len(ext)]
 
-		data, err := os.read_entire_file(entry.fullpath, context.allocator)
+		data, err := nbio.read_entire_file(entry.fullpath, context.allocator)
 		log.assertf(err == nil, "failed to read sprite file: %v", err)
 
 		visit(rel_path, data)
@@ -1326,10 +1328,10 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 		defer free_all(context.temp_allocator)
 
 		{
-			if _, err := os.stat(SERVER_KEY_PATH, context.temp_allocator);
+			if _, err := nbio.stat(SERVER_KEY_PATH, context.temp_allocator);
 			   err != nil {
 				sim.private_key_generate(&server.pk)
-				err := os.write_entire_file(SERVER_KEY_PATH, server.pk[:])
+				err := nbio.write_entire_file(SERVER_KEY_PATH, server.pk[:])
 				log.assertf(
 					err == nil,
 					"failed to create %v: %v",
@@ -1338,7 +1340,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 				)
 			}
 
-			bytes, err := os.read_entire_file(
+			bytes, err := nbio.read_entire_file(
 				SERVER_KEY_PATH,
 				context.temp_allocator,
 			)
@@ -1353,8 +1355,9 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 
 		server_bundle_refresh(server)
 
-		if _, err := os.stat(sim.MAP_DIR, context.temp_allocator); err != nil {
-			create_dir_err := os.make_directory_all(sim.MAP_DIR)
+		if _, err := nbio.stat(sim.MAP_DIR, context.temp_allocator);
+		   err != nil {
+			create_dir_err := nbio.make_directory_all(sim.MAP_DIR)
 			log.assertf(
 				create_dir_err == nil,
 				"failed to create the maps dir: %v",
@@ -1384,7 +1387,7 @@ server_init_without_game :: proc(hr: ^hot.Reloader) -> (server: ^Server) {
 					fpwerr,
 				)
 
-				write_map_err := os.write_entire_file_from_bytes(
+				write_map_err := nbio.write_entire_file(
 					full_path_with_ext,
 					final,
 				)

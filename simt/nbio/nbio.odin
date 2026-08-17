@@ -5,6 +5,7 @@ import "../../util/arna"
 import "base:intrinsics"
 import "base:runtime"
 import "core:container/priority_queue"
+import "core:io"
 import "core:math/rand"
 import "core:nbio"
 import "core:net"
@@ -145,6 +146,7 @@ Read_Entire_File_Error :: nbio.Read_Entire_File_Error
 
 File_Flags :: nbio.File_Flags
 Permissions :: nbio.Permissions
+File_Type :: nbio.File_Type
 Permissions_Default_File :: nbio.Permissions_Default_File
 
 NO_TIMEOUT :: nbio.NO_TIMEOUT
@@ -153,6 +155,138 @@ NO_TIMEOUT :: nbio.NO_TIMEOUT
 join_path :: os.join_path
 join_filename :: os.join_filename
 base :: os.base
+
+Error :: os.Error
+File_Info :: os.File_Info
+when !SIMULATE {
+	File :: os.File
+}
+Walker :: os.Walker
+
+open :: proc(
+	name: string,
+	flags := os.File_Flags{.Read},
+	perm := os.Permissions_Default,
+) -> (
+	^File,
+	Error,
+) {
+	when !SIMULATE {
+		return os.open(name, flags, perm)
+	} else {
+		panic("TODO")
+	}
+}
+
+to_stream :: proc(f: ^File) -> io.Stream {
+	when !SIMULATE {
+		return os.to_stream(f)
+	} else {
+		panic("TODO")
+	}
+}
+
+write_entire_file :: proc(
+	name: string,
+	data: []byte,
+	perm := os.Permissions_Read_All + {.Write_User},
+	truncate := true,
+) -> Error {
+	when !SIMULATE {
+		return os.write_entire_file(name, data, perm, truncate)
+	} else {
+		panic("TODO")
+	}
+}
+
+read_entire_file_sync :: proc(
+	name: string,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	[]byte,
+	Error,
+) {
+	when !SIMULATE {
+		return os.read_entire_file(name, allocator, loc)
+	} else {
+		panic("TODO")
+	}
+}
+
+read_directory_by_path :: proc(
+	path: string,
+	n: int,
+	allocator := context.allocator,
+) -> (
+	[]File_Info,
+	Error,
+) {
+	when !SIMULATE {
+		return os.read_directory_by_path(path, n, allocator)
+	} else {
+		panic("TODO")
+	}
+}
+
+get_working_directory :: proc(
+	allocator := context.allocator,
+) -> (
+	string,
+	Error,
+) {
+	when !SIMULATE {
+		return os.get_working_directory(allocator)
+	} else {
+		panic("TODO")
+	}
+}
+
+stat :: proc(
+	path: string,
+	allocator := context.allocator,
+) -> (
+	File_Info,
+	Error,
+) {
+	when !SIMULATE {
+		return os.stat(path, allocator)
+	} else {
+		panic("TODO")
+	}
+}
+
+make_directory_all :: proc(path: string) -> Error {
+	when !SIMULATE {
+		return os.make_directory_all(path)
+	} else {
+		panic("TODO")
+	}
+}
+
+walker_create :: proc(path: string) -> Walker {
+	when !SIMULATE {
+		return os.walker_create(path)
+	} else {
+		panic("TODO")
+	}
+}
+
+walker_destroy :: proc(w: ^Walker) {
+	when !SIMULATE {
+		os.walker_destroy(w)
+	} else {
+		panic("TODO")
+	}
+}
+
+walker_walk :: proc(w: ^Walker) -> (fi: File_Info, ok: bool) {
+	when !SIMULATE {
+		return os.walker_walk(w)
+	} else {
+		panic("TODO")
+	}
+}
 
 when SIMULATE {
 	Operation_Kind :: enum {
@@ -230,6 +364,7 @@ when SIMULATE {
 		},
 		stat:      struct {
 			handle: Handle,
+			type:   File_Type,
 			size:   i64,
 			err:    FS_Error,
 		},
@@ -827,6 +962,7 @@ when SIMULATE {
 				break
 			}
 
+			op.stat.type = .Regular
 			op.stat.size = i64(len(fd_ref.file.content))
 		case .read:
 			fd_ref, ok := _access_fd(l, i64(op.read.handle), .File)
@@ -1325,7 +1461,7 @@ stat_poly3 :: #force_inline proc(
 		return nbio.stat_poly3(handle, p, p2, p3, cb, l)
 	} else {
 		defer _put_user_data3(op, cb, p, p2, p3)
-		return _prep_stat(handle, _poly_cb(C, T, T2, T3), l)
+		return _prep_stat(handle, _poly_cb3(C, T, T2, T3), l)
 	}
 }
 
@@ -1461,7 +1597,12 @@ _put_user_data3 :: #force_inline proc(
 	)
 }
 
-read_entire_file :: proc(
+read_entire_file :: proc {
+	read_entire_file_async,
+	read_entire_file_sync,
+}
+
+read_entire_file_async :: proc(
 	path: string,
 	user_data: rawptr,
 	cb: Read_Entire_File_Callback,
