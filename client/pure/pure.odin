@@ -3,13 +3,11 @@ package pure_client
 import "../../sim"
 import "../../simt/nbio"
 import "../../util/arna"
-import "../../util/bit_arr"
 import "../../util/hot"
 import "../../util/nm"
 import "../../util/rtt"
 import "../../util/sqlite"
 import "base:runtime"
-import "core:crypto"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
@@ -17,18 +15,6 @@ import "core:time"
 MAX_LASERS :: 512
 ASSET_CACHE :: "asset-cache"
 SELECTED_PROFILE_CID :: 0
-
-Profile :: struct {
-	name: sim.Player_Name,
-	pk:   sim.Private_Key,
-}
-
-Connection_State :: enum {
-	Disconnected,
-	Connecting,
-	Connected,
-	Disconnecting,
-}
 
 Client_Config :: struct {
 	db:       sqlite.Connection,
@@ -44,54 +30,6 @@ Player :: struct {
 Deffered_Client_Input :: struct {
 	inner:     sim.Client_Input,
 	next_free: ^Deffered_Client_Input,
-}
-
-Retained_Array :: struct($E: typeid) {
-	slots:  []E,
-	active: int,
-}
-
-retained_add :: proc(arr: ^Retained_Array($E)) -> (res: ^E) {
-	if arr.active == len(arr.slots) do return
-
-	res = &arr.slots[arr.active]
-	arr.active += 1
-	res^ = {}
-
-	return
-}
-
-Retained_Iter_State :: struct {
-	i:    int,
-	keep: int,
-}
-
-retained_iter :: proc(
-	retained: ^Retained_Array($E),
-	state: ^Retained_Iter_State,
-) -> (
-	^E,
-	bool,
-) {
-	if state.i >= retained.active {
-		retained.active = state.keep
-		return nil, false
-	}
-
-	p := &retained.slots[state.i]
-
-	if p.age < p.lifetime {
-		retained.slots[state.keep] = p^
-		state.keep += 1
-	}
-
-	state.i += 1
-
-	return p, true
-}
-
-retained_active :: proc(retained: ^Retained_Array($E)) -> []E {
-	return retained.slots[:retained.active]
 }
 
 get_selected_user :: proc(r: ^Client) -> (profile: Profile) {
@@ -142,89 +80,6 @@ Ent_Extra :: struct {
 	energy_smoothing: f32,
 	gen:              u32,
 	trail_cooldown:   f32,
-}
-
-Upload_State :: struct {
-	error:    string,
-	arena:    arna.Allocator,
-	arena_rc: int,
-	gen:      int,
-	assets:   #soa[dynamic]Dropped_Asset,
-	inflight: int,
-	cursor:   int,
-}
-
-Dropped_Asset :: struct {
-	base:     sim.Asset,
-	path:     string,
-	issue:    string,
-	uploaded: bool,
-}
-
-Statements :: struct {
-	save_input_content:     sqlite.Statement `
-		INSERT INTO text_input VALUES (?, ?)
-			ON CONFLICT (id) DO UPDATE SET content = ?2
-	`,
-	load_input_content:     sqlite.Statement `
-		SELECT content FROM text_input WHERE id = ?
-	`,
-	delete_input_content:   sqlite.Statement `
-		DELETE FROM text_input WHERE id = ?
-	`,
-	save_profile:           sqlite.Statement `
-		INSERT INTO profile VALUES (?, ?)
-	`,
-	load_profiles:          sqlite.Statement `
-		SELECT * FROM profile
-	`,
-	count_profiles:         sqlite.Statement `
-		SELECT COUNT(*) FROM profile
-	`,
-	delete_profile:         sqlite.Statement `
-		DELETE FROM profile WHERE name = ?
-	`,
-	edit_profile:           sqlite.Statement `
-		UPDATE profile SET name = ? WHERE name = ?
-	`,
-	select_profile_by_name: sqlite.Statement `
-		SELECT * FROM profile WHERE name = ?
-	`,
-	select_theme_color:     sqlite.Statement `
-		SELECT hue, saturation, brightness, alpha FROM theme WHERE name = ?
-	`,
-	save_theme_color:       sqlite.Statement `
-		INSERT INTO theme VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET
-				hue = ?2, saturation = ?3, brightness = ?4, alpha = ?5
-	`,
-	save_server:            sqlite.Statement `
-		INSERT INTO server VALUES (?, ?, ?)
-			ON CONFLICT (nick_name) DO UPDATE SET
-				conn_string = ?2, pk = ?3
-	`,
-	load_server:            sqlite.Statement `
-		SELECT * FROM server WHERE nick_name = ?
-	`,
-	load_servers:           sqlite.Statement `
-		SELECT * FROM server
-	`,
-	delete_server:          sqlite.Statement `
-		DELETE FROM server WHERE nick_name = ?
-	`,
-	save_asset:             sqlite.Statement `
-		INSERT INTO asset VALUES (?, ?, ?, ?)
-			ON CONFLICT (id, server) DO UPDATE SET name = ?3, type = ?4
-	`,
-	get_server_assets:      sqlite.Statement `
-		SELECT * FROM asset WHERE server = ?
-	`,
-	get_asset:              sqlite.Statement `
-		SELECT * FROM asset WHERE id = ?
-	`,
-	delete_asset:           sqlite.Statement `
-		DELETE FROM Asset WHERE id = ?
-	`,
 }
 
 Client :: struct {
@@ -367,171 +222,4 @@ client_init :: proc(
 	client.rtt_worker_reqs = chan.as_send(reqs)
 
 	return
-}
-
-Saved_Text_Input :: struct {
-	id:      int,
-	content: string,
-}
-
-Saved_Server :: struct {
-	nick_name:   string,
-	conn_string: string,
-	pk:          sim.Identity,
-}
-
-Saved_Asset :: struct {
-	pk:   sim.Identity,
-	id:   sim.Asset_ID,
-	name: nm.Name,
-	type: sim.Asset_Type,
-}
-
-snap_to_tile :: proc(pos: sim.Vec) -> sim.Vec {
-	return sim.map_pos_to_vec(sim.map_vec_to_pos(pos))
-}
-
-map_tile_center :: sim.map_pos_to_vec
-
-fuzzy_rank_new_bitset :: proc(
-	name: string,
-	query: string,
-) -> ^bit_arr.Bit_Set {
-	matched_chars := new(bit_arr.Bit_Set, context.temp_allocator)
-	matched_chars^ = bit_arr.init(len(name), context.temp_allocator)
-	fuzzy_rank(name, query, matched_chars^)
-	return matched_chars
-}
-
-fuzzy_rank :: proc(
-	sample, pattern: string,
-	highlighted: bit_arr.Bit_Set = {},
-) -> int {
-	MATCH :: 10
-	BOUNDARY_BONUS :: 8
-	MISMATCH :: -2
-	SKIP_SAMPLE :: -1
-	SKIP_PATTERN :: -5
-	MAX_PATTERN :: 128
-
-	m := len(pattern)
-	if m == 0 do return 0
-	if m > MAX_PATTERN do m = MAX_PATTERN
-
-	prev: [MAX_PATTERN + 1]int
-	curr: [MAX_PATTERN + 1]int
-
-	char_occs: [256]u8
-	for c in transmute([]u8)pattern {
-		char_occs[c] += 1
-	}
-
-	for j in 1 ..= m {
-		prev[j] = prev[j - 1] + SKIP_PATTERN
-	}
-	best := prev[m]
-
-	for i in 1 ..= len(sample) {
-		sc := to_lower(sample[i - 1])
-		curr[0] = 0
-
-		matched := false
-		for j in 1 ..= m {
-			pc := to_lower(pattern[j - 1])
-
-			sub_step: int
-			if sc == pc {
-				if highlighted.bit_length != 0 && char_occs[sc] > 0 {
-					matched = true
-					bit_arr.set(highlighted, i - 1)
-				}
-				boundary := i == 1 || is_separator(sample[i - 2])
-				sub_step = MATCH + (BOUNDARY_BONUS if boundary else 0)
-			} else {
-				sub_step = MISMATCH
-			}
-
-			diag := prev[j - 1] + sub_step
-			skip_s := prev[j] + SKIP_SAMPLE
-			skip_p := curr[j - 1] + SKIP_PATTERN
-			curr[j] = max(diag, skip_s, skip_p)
-		}
-
-		char_occs[sc] -= u8(matched)
-
-		prev = curr
-	}
-
-	return curr[m]
-
-	to_lower :: proc(c: u8) -> u8 {
-		return (c + 32) if (c >= 'A' && c <= 'Z') else c
-	}
-
-	is_separator :: proc(c: u8) -> bool {
-		switch c {
-		case ' ', '_', '-', '.', '/', '\\', ':':
-			return true
-		}
-		return false
-	}
-}
-
-delete_profile :: proc(client: ^Client, name: string) {
-	_, delete_err := sqlite.exec(client.delete_profile, name)
-	sqlite.assert_ok(client.delete_profile, delete_err)
-}
-
-save_server :: proc(client: ^Client, new_server: Saved_Server) {
-	_, res := sqlite.exec(
-		client.save_server,
-		new_server.nick_name,
-		new_server.conn_string,
-		new_server.pk,
-	)
-	sqlite.assert_ok(client.save_server, res)
-}
-
-delete_server :: proc(client: ^Client, nick_name: string) {
-	_, delete_err := sqlite.exec(client.delete_server, nick_name)
-	sqlite.assert_ok(client.delete_server, delete_err)
-}
-
-edit_profile_name :: proc(client: ^Client, new, old: string) -> (err: string) {
-	cnt, save_err := sqlite.exec(client.edit_profile, new, old)
-
-	if save_err == .CONSTRAINT {
-		return "name already taken"
-	}
-
-	sqlite.assert_ok(client.edit_profile, save_err)
-	assert(cnt == 1)
-
-	return
-}
-
-create_profile :: proc(client: ^Client, name: string) -> string {
-	pk: sim.Private_Key
-	crypto.rand_bytes(pk[:])
-
-	if name == "" {
-		return "name cannot be empty"
-	}
-
-	_, res := sqlite.exec(client.save_profile, name, pk)
-	if res == .CONSTRAINT {
-		return "name already taken"
-	}
-
-	sqlite.assert_ok(client.save_profile, res)
-	return ""
-}
-
-select_profile :: proc(client: ^Client, name: string) {
-	_, save_err := sqlite.exec(
-		client.save_input_content,
-		SELECTED_PROFILE_CID,
-		name,
-	)
-	sqlite.assert_ok(client.save_input_content, save_err)
 }

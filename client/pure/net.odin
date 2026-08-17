@@ -23,6 +23,56 @@ import "core:time"
 
 CONNECTION_TIMEOUT :: 3 * time.Second
 
+Rtt_Worker_Request :: struct {
+	server:  nbio.Endpoint,
+	config:  sim.Server_Ping,
+	timeout: time.Duration,
+	// NOTE: hot reloading
+	execute: proc(_: ^Rtt_Worker_Request, _: ^Rtt_Worker_Ctx),
+}
+
+Rtt_Worker :: struct {
+	rt:   ^f32,
+	reqs: chan.Chan(Rtt_Worker_Request, .Recv),
+}
+
+Rtt_Worker_Ctx :: struct {
+	using base:  Rtt_Worker,
+	socket:      net.UDP_Socket,
+	es:          rtt.Estimator,
+	last_server: nbio.Endpoint,
+}
+
+Clear_Source :: enum {
+	Manual,
+	Udp,
+	Tcp,
+}
+
+Upload_State :: struct {
+	error:    string,
+	arena:    arna.Allocator,
+	arena_rc: int,
+	gen:      int,
+	assets:   #soa[dynamic]Dropped_Asset,
+	inflight: int,
+	cursor:   int,
+}
+
+Dropped_Asset :: struct {
+	base:     sim.Asset,
+	path:     string,
+	issue:    string,
+	uploaded: bool,
+}
+
+Connection_State :: enum {
+	Disconnected,
+	Connecting,
+	Connected,
+	Disconnecting,
+}
+
 /// <ip>#<identity>
 parse_conn_string :: proc(
 	conn_string: string,
@@ -671,12 +721,6 @@ client_on_udp_kill :: proc(conn: ^sim.UDP_Connection, l: ^nbio.Event_Loop) {
 	client_clear_state(client, "udp connection terminated", .Udp)
 }
 
-Clear_Source :: enum {
-	Manual,
-	Udp,
-	Tcp,
-}
-
 client_clear_state :: proc(
 	client: ^Client,
 	reason: string,
@@ -728,26 +772,6 @@ client_decrypt_packet :: proc(
 ) {
 	client := (^Client)(conn.host.asoc_data)
 	return sim.decrypt_packet(&client.hctx.tcp.secret, packet)
-}
-
-Rtt_Worker_Request :: struct {
-	server:  nbio.Endpoint,
-	config:  sim.Server_Ping,
-	timeout: time.Duration,
-	// NOTE: hot reloading
-	execute: proc(_: ^Rtt_Worker_Request, _: ^Rtt_Worker_Ctx),
-}
-
-Rtt_Worker :: struct {
-	rt:   ^f32,
-	reqs: chan.Chan(Rtt_Worker_Request, .Recv),
-}
-
-Rtt_Worker_Ctx :: struct {
-	using base:  Rtt_Worker,
-	socket:      net.UDP_Socket,
-	es:          rtt.Estimator,
-	last_server: nbio.Endpoint,
 }
 
 rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
