@@ -1,8 +1,6 @@
 package client
 
 import "../sim"
-import "../simt/nbio"
-import "../util/arna"
 import "../util/b58"
 import "../util/nm"
 import "../util/packer"
@@ -10,7 +8,6 @@ import orui "../vendored/orui/src"
 import "base:runtime"
 import "core:fmt"
 import "core:hash"
-import "core:log"
 import "core:math"
 import "core:reflect"
 import "core:sort"
@@ -158,11 +155,12 @@ ui_content_editor :: proc(client: ^Client) {
 				   },
 			   ) ||
 			   confirmed {
-				stats: sim.Ent_Stats
-				stats.name = nm.from_str(text)
 				pure.tcp_send(
 					client,
-					sim.Client_Content_Action{type = .Create, stats = stats},
+					sim.Client_Content_Action {
+						type = .Create,
+						stats = {name = nm.from_str(text)},
+					},
 				)
 			}
 
@@ -383,97 +381,12 @@ ui_file_upload :: proc(client: ^Client) {
 	hovered := rl.CheckCollisionPointRec(rl.GetMousePosition(), rect)
 
 	load: if hovered && rl.IsFileDropped() {
-		ctx.error = ""
 
 		raw_files := rl.LoadDroppedFiles()
 		defer rl.UnloadDroppedFiles(raw_files)
 		files := raw_files.paths[:raw_files.count]
 
-		gpa := context.allocator
-		context.allocator = arna.allocator(&ctx.arena)
-		ctx.arena_rc -= 1
-		if ctx.arena_rc < 0 {
-			free_all(context.allocator)
-		}
-		ctx.arena_rc += 1
-		ctx.assets = {}
-
-		resize(&ctx.assets, len(files))
-
-		for file, i in files {
-			file := strings.clone(string(file))
-			entry := &ctx.assets[i]
-
-			filename := nbio.base(file)
-
-			mtype: Maybe(sim.Asset_Type)
-			for ext, i in sim.EXT_BY_TYPE {
-				if strings.ends_with(filename, ext) {
-					mtype = i
-				}
-			}
-
-			entry.issue = "Invalid file extension."
-			type := mtype.? or_continue
-
-			filename = filename[:len(filename) - len(sim.EXT_BY_TYPE[type])]
-
-			entry.base.type = type
-			entry.issue = "Name is too long."
-			entry.base.name = nm.from_str(filename) or_continue
-
-			entry.path = file
-			entry.issue = ""
-
-			Ctx :: struct {
-				using client: ^Client,
-				file_idx:     int,
-				gen:          int,
-			}
-
-			ctx.arena_rc += 1
-			ctx := new_clone(Ctx{client, i, ctx.gen})
-
-			// TODO(low): the file can be big and that can mess up the
-			// allocator, we should do a streamed hashing
-			nbio.read_entire_file(
-				entry.path,
-				ctx,
-				on_read,
-				l = client.l,
-				allocator = gpa,
-			)
-
-			on_read :: proc(
-				user_data: rawptr,
-				data: []byte,
-				err: nbio.Read_Entire_File_Error,
-			) {
-				defer delete(data)
-
-				ctx := (^Ctx)(user_data)
-				ed_ctx: ^pure.Upload_State = &ctx.client.upload
-				ed_ctx.arena_rc -= 1
-				// NOTE: the arena is always held once this exists but the
-				// only place that can drop it is when the files get
-				// reuploaded
-
-				if ctx.gen != ed_ctx.gen {
-					return
-				}
-
-				entry := &ed_ctx.assets[ctx.file_idx]
-
-				if err.operation != .None {
-					entry.issue = "Can't load the file for some reason."
-					log.error("Failed to fully load the upload file", err)
-					return
-				}
-
-				sim.hash(data, &entry.base.hash)
-				entry.base.size = len(data)
-			}
-		}
+		pure.prepare_upload(client, files)
 	}
 
 	box(
@@ -651,8 +564,7 @@ ui_file_upload :: proc(client: ^Client) {
 				disabled = all_uploaded,
 			},
 		) {
-			ctx.cursor = 0
-			pure.upload_assets(client)
+			pure.upload_assets(client, init = true)
 		}
 
 		if ui_button(

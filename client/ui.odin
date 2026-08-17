@@ -8,7 +8,6 @@ import "../util/packer"
 import "../util/sqlite"
 import orui "../vendored/orui/src"
 import rt "base:runtime"
-import "core:crypto"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -610,7 +609,6 @@ ui_connection_menu :: proc(client: ^Client) {
 			   },
 		   ) ||
 		   confirmed {
-
 			endp, ok := net.parse_endpoint(string(ip))
 			if !ok {
 				client.ip_error = "expected ip adress:port"
@@ -657,7 +655,10 @@ ui_connection_menu :: proc(client: ^Client) {
 		ctx := &client.servers
 
 		i := 0
-		server_query, sqs := sqlite.query(client.load_servers, pure.Saved_Server)
+		server_query, sqs := sqlite.query(
+			client.load_servers,
+			pure.Saved_Server,
+		)
 		for row in sqlite.query_next(&server_query) {
 			defer i += 1
 
@@ -715,11 +716,7 @@ ui_connection_menu :: proc(client: ^Client) {
 					.ICON_BIN,
 					"Delete server",
 				) {
-					_, delete_err := sqlite.exec(
-						client.delete_server,
-						row.nick_name,
-					)
-					sqlite.assert_ok(client.delete_server, delete_err)
+					pure.delete_server(client, row.nick_name)
 				}
 
 				if ui_icon_button(
@@ -974,21 +971,16 @@ ui_connection_menu :: proc(client: ^Client) {
 						   {disabled = !is_valid},
 					   ) ||
 					   (confirmed && is_valid) {
-
-						new_server: pure.Saved_Server
-						new_server.nick_name = text
-						new_server.conn_string = string(
-							ctx.create_conn_string.buf[:],
+						pure.save_server(
+							client,
+							{
+								nick_name = text,
+								conn_string = string(
+									ctx.create_conn_string.buf[:],
+								),
+								pk = ctx.create_fetcher.sh.id,
+							},
 						)
-						new_server.pk = ctx.create_fetcher.sh.id
-
-						_, res := sqlite.exec(
-							client.save_server,
-							new_server.nick_name,
-							new_server.conn_string,
-							new_server.pk,
-						)
-						sqlite.assert_ok(client.save_server, res)
 					}
 				}
 			}
@@ -1046,11 +1038,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						.ICON_BIN,
 						"Delete profile",
 					) {
-						_, delete_err := sqlite.exec(
-							client.delete_profile,
-							nm.str(&row.name),
-						)
-						sqlite.assert_ok(client.delete_profile, delete_err)
+						pure.delete_profile(client, nm.str(&row.name))
 					}
 
 					changed := ui_icon_button(
@@ -1073,19 +1061,12 @@ ui_connection_menu :: proc(client: ^Client) {
 						changed |= confirmed
 
 						if changed {
-							cnt, save_err := sqlite.exec(
-								client.edit_profile,
+							ctx.editing_error = pure.edit_profile_name(
+								client,
 								text,
 								nm.str(&row.name),
 							)
-							ctx.editing_error = ""
-							if save_err == .CONSTRAINT {
-								ctx.editing_error = "name already taken"
-								changed = false
-							} else {
-								sqlite.assert_ok(client.edit_profile, save_err)
-								assert(cnt == 1)
-							}
+							changed = ctx.editing_error == ""
 						}
 					} else {
 						ui_label(
@@ -1151,21 +1132,7 @@ ui_connection_menu :: proc(client: ^Client) {
 					   "Create profile",
 				   ) ||
 				   confirmed {
-
-					pk: sim.Private_Key
-					crypto.rand_bytes(pk[:])
-
-					ctx.creation_error = ""
-					if name == "" {
-						ctx.creation_error = "name cannot be empty"
-					} else {
-						_, res := sqlite.exec(client.save_profile, name, pk)
-						if res == .CONSTRAINT {
-							ctx.creation_error = "name already taken"
-						} else {
-							sqlite.assert_ok(client.save_profile, res)
-						}
-					}
+					ctx.editing_error = pure.create_profile(client, name)
 				}
 			}
 
@@ -1346,8 +1313,10 @@ ui_game_hud :: proc(client: ^Client) {
 					.ICON_FILE_SAVE_CLASSIC,
 					"Save map changes",
 				) {
-					mapa := ui_map_export(client)
-					pure.tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
+					pure.tcp_send(
+						client,
+						sim.Client_Map_Edit{mapa = ui_map_export(client)},
+					)
 				}
 			}
 
@@ -1953,12 +1922,7 @@ ui_build :: proc(client: ^Client) {
 			ordered_remove(&client.map_editing.teams, ev.team_idx)
 			client.map_editing.team = 0
 		case .Select_Profile:
-			_, save_err := sqlite.exec(
-				client.save_input_content,
-				pure.SELECTED_PROFILE_CID,
-				nm.str(&ev.name),
-			)
-			sqlite.assert_ok(client.save_input_content, save_err)
+			pure.select_profile(client, nm.str(&ev.name))
 			client.profiles.editing = false
 		}
 	}
@@ -1997,4 +1961,3 @@ ui_build :: proc(client: ^Client) {
 		}
 	}
 }
-

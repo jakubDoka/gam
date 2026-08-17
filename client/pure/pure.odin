@@ -9,6 +9,7 @@ import "../../util/nm"
 import "../../util/rtt"
 import "../../util/sqlite"
 import "base:runtime"
+import "core:crypto"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
@@ -474,4 +475,63 @@ fuzzy_rank :: proc(
 		}
 		return false
 	}
+}
+
+delete_profile :: proc(client: ^Client, name: string) {
+	_, delete_err := sqlite.exec(client.delete_profile, name)
+	sqlite.assert_ok(client.delete_profile, delete_err)
+}
+
+save_server :: proc(client: ^Client, new_server: Saved_Server) {
+	_, res := sqlite.exec(
+		client.save_server,
+		new_server.nick_name,
+		new_server.conn_string,
+		new_server.pk,
+	)
+	sqlite.assert_ok(client.save_server, res)
+}
+
+delete_server :: proc(client: ^Client, nick_name: string) {
+	_, delete_err := sqlite.exec(client.delete_server, nick_name)
+	sqlite.assert_ok(client.delete_server, delete_err)
+}
+
+edit_profile_name :: proc(client: ^Client, new, old: string) -> (err: string) {
+	cnt, save_err := sqlite.exec(client.edit_profile, new, old)
+
+	if save_err == .CONSTRAINT {
+		return "name already taken"
+	}
+
+	sqlite.assert_ok(client.edit_profile, save_err)
+	assert(cnt == 1)
+
+	return
+}
+
+create_profile :: proc(client: ^Client, name: string) -> string {
+	pk: sim.Private_Key
+	crypto.rand_bytes(pk[:])
+
+	if name == "" {
+		return "name cannot be empty"
+	}
+
+	_, res := sqlite.exec(client.save_profile, name, pk)
+	if res == .CONSTRAINT {
+		return "name already taken"
+	}
+
+	sqlite.assert_ok(client.save_profile, res)
+	return ""
+}
+
+select_profile :: proc(client: ^Client, name: string) {
+	_, save_err := sqlite.exec(
+		client.save_input_content,
+		SELECTED_PROFILE_CID,
+		name,
+	)
+	sqlite.assert_ok(client.save_input_content, save_err)
 }

@@ -2,6 +2,7 @@ package pure_client
 
 import "../../sim"
 import "../../simt/nbio"
+import "../../util/arna"
 import "../../util/b58"
 import "../../util/bit_arr"
 import "../../util/nm"
@@ -365,10 +366,103 @@ req_connect :: proc(client: ^Client) -> (^Req, ^sim.Client_Request_Header) {
 	}
 }
 
-upload_assets :: proc(client: ^Client) {
+prepare_upload :: proc(client: ^Client, files: []cstring) {
+	ctx := &client.upload
+	ctx.error = ""
+
+	gpa := context.allocator
+	context.allocator = arna.allocator(&ctx.arena)
+	ctx.arena_rc -= 1
+	if ctx.arena_rc < 0 {
+		free_all(context.allocator)
+	}
+	ctx.arena_rc += 1
+	ctx.assets = {}
+
+	resize(&ctx.assets, len(files))
+
+	for file, i in files {
+		file := strings.clone(string(file))
+		entry := &ctx.assets[i]
+
+		filename := nbio.base(file)
+
+		mtype: Maybe(sim.Asset_Type)
+		for ext, i in sim.EXT_BY_TYPE {
+			if strings.ends_with(filename, ext) {
+				mtype = i
+			}
+		}
+
+		entry.issue = "Invalid file extension."
+		type := mtype.? or_continue
+
+		filename = filename[:len(filename) - len(sim.EXT_BY_TYPE[type])]
+
+		entry.base.type = type
+		entry.issue = "Name is too long."
+		entry.base.name = nm.from_str(filename) or_continue
+
+		entry.path = file
+		entry.issue = ""
+
+		Ctx :: struct {
+			using client: ^Client,
+			file_idx:     int,
+			gen:          int,
+		}
+
+		ctx.arena_rc += 1
+		ctx := new_clone(Ctx{client, i, ctx.gen})
+
+		// TODO(low): the file can be big and that can mess up the
+		// allocator, we should do a streamed hashing
+		nbio.read_entire_file(
+			entry.path,
+			ctx,
+			on_read,
+			l = client.l,
+			allocator = gpa,
+		)
+
+		on_read :: proc(
+			user_data: rawptr,
+			data: []byte,
+			err: nbio.Read_Entire_File_Error,
+		) {
+			defer delete(data)
+
+			ctx := (^Ctx)(user_data)
+			ed_ctx: ^Upload_State = &ctx.client.upload
+			ed_ctx.arena_rc -= 1
+			// NOTE: the arena is always held once this exists but the
+			// only place that can drop it is when the files get
+			// reuploaded
+
+			if ctx.gen != ed_ctx.gen {
+				return
+			}
+
+			entry := &ed_ctx.assets[ctx.file_idx]
+
+			if err.operation != .None {
+				entry.issue = "Can't load the file for some reason."
+				log.error("Failed to fully load the upload file", err)
+				return
+			}
+
+			sim.hash(data, &entry.base.hash)
+			entry.base.size = len(data)
+		}
+	}
+}
+
+upload_assets :: proc(client: ^Client, init := false) {
 	MAX_INFLIGHT_ASSETS :: 5
 
 	ctx := &client.upload
+
+	if init do ctx.cursor = 0
 
 	for client.inflight_assets < MAX_INFLIGHT_ASSETS {
 		if ctx.cursor >= len(ctx.assets) do break

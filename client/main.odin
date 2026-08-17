@@ -1023,7 +1023,7 @@ client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	packer.sheet_destroy(client.sheet)
 	ui_destroy(client)
 
-	sqlite.finalize(client.ui_statements)
+	sqlite.finalize(client.statements)
 	db_res := sqlite.close(client.db)
 	sqlite.assert_ok(client.db, db_res)
 }
