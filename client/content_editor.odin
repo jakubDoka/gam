@@ -158,11 +158,10 @@ ui_content_editor :: proc(client: ^Client) {
 				   },
 			   ) ||
 			   confirmed {
-				stats: sim.Ent_Stats
-				stats.name = nm.from_str(text)
-				pure.tcp_send(
+				emit_event(
 					client,
-					sim.Client_Content_Action{type = .Create, stats = stats},
+					.Create_Stat,
+					{text = strings.clone(text, context.temp_allocator)},
 				)
 			}
 
@@ -651,8 +650,7 @@ ui_file_upload :: proc(client: ^Client) {
 				disabled = all_uploaded,
 			},
 		) {
-			ctx.cursor = 0
-			pure.upload_assets(client)
+			emit_event(client, .Upload_Assets, {})
 		}
 
 		if ui_button(
@@ -664,7 +662,7 @@ ui_file_upload :: proc(client: ^Client) {
 				focused_color = .PRIMARY,
 			},
 		) {
-			ctx.assets = {}
+			client.upload.assets = {}
 		}
 	}
 }

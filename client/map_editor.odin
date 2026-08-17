@@ -5,7 +5,6 @@ import "../util/bit_arr"
 import orui "../vendored/orui/src"
 import "core:fmt"
 import la "core:math/linalg"
-import "core:math/rand"
 import "core:reflect"
 import "core:slice"
 import "core:sort"
@@ -283,8 +282,7 @@ ui_map_editor :: proc(client: ^Client) {
 				tooltip = reflect.enum_name_from_value(brush) or_else "",
 			},
 		) {
-			ctx.editing_brush = selected
-			ctx.brush = brush
+			emit_event(client, .Select_Brush, {brush = brush})
 		}
 
 		if ctx.editing_brush && selected {
@@ -339,11 +337,7 @@ ui_map_editor :: proc(client: ^Client) {
 						icon = selected ? .ICON_PENCIL_BIG : .ICON_NONE,
 					},
 				) {
-					ctx.editing_team = selected
-					ctx.team = tid
-					ctx.color_state.hsv = ui_color_to_hsv(
-						get_color(team.color),
-					)
+					emit_event(client, .Select_Map_Team, {team = tid})
 				}
 				continue
 			}
@@ -401,7 +395,7 @@ ui_map_editor :: proc(client: ^Client) {
 					icon = .ICON_CROSS_SMALL,
 					tooltip = "Close team editor",
 				) {
-					ctx.team = 0
+					client.map_editing.team = 0
 				}
 			}
 
@@ -424,10 +418,7 @@ ui_map_editor :: proc(client: ^Client) {
 				height = orui.fixed(TEAM_SIZE),
 			},
 		) {
-			append(
-				&ctx.teams,
-				sim.Ent_Team{color = sim.Color(rand.uint32() | 0x000000FF)},
-			)
+			emit_event(client, .Add_Team, {})
 		}
 	}
 

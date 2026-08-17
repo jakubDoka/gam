@@ -161,6 +161,26 @@ UI_Event_Kind :: enum {
 	Close_Map_Editor,
 	Focus,
 	Apply_Content_Changes,
+	Connect_To_Server,
+	Delete_Server,
+	Save_Server_Id,
+	Delete_Profile,
+	Rename_Profile,
+	Create_Profile,
+	Download_All_Assets,
+	Save_Map,
+	Spawn_Ship,
+	Build,
+	Delete_Building,
+	Rewire,
+	Create_Stat,
+	Upload_Assets,
+	Clear_Assets,
+	Select_Brush,
+	Select_Map_Team,
+	Close_Team_Editor,
+	Add_Team,
+	Send_Chat,
 }
 
 Key_Bind :: enum {
@@ -232,6 +252,15 @@ UI_Event :: struct {
 	target:       orui.Id,
 	carret_index: int,
 	stats:        sim.Ent_Stats_ID,
+	color:        UI_Color,
+	endpoint:     net.Endpoint,
+	ent:          sim.Ent_Net_ID,
+	parent:       sim.Ent_Net_ID,
+	pos:          sim.Vec,
+	text:         string,
+	identity:     sim.Identity,
+	brush:        UI_Map_Editor_Brush,
+	saved_server: pure.Saved_Server,
 }
 
 emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
@@ -500,6 +529,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						.ICON_RESTART,
 						"Reset to default",
 					) {
+						hsv := &client.ui.colors.picker_hsvs[vl]
 						hsv.hsv = ui_color_to_hsv(UI_COLORS_DEFAULT[vl])
 						client.colors.selected = .NONE
 					}
@@ -556,6 +586,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				)
 
 				if ui_clicked_off() {
+
 					client.colors.selected = .NONE
 				}
 
@@ -616,7 +647,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				client.ip_error = "expected ip adress:port"
 			} else {
 				client.ip_error = ""
-				pure.client_connect(client, endp)
+				emit_event(client, .Connect_To_Server, {endpoint = endp})
 			}
 		}
 	}
@@ -657,7 +688,10 @@ ui_connection_menu :: proc(client: ^Client) {
 		ctx := &client.servers
 
 		i := 0
-		server_query, sqs := sqlite.query(client.load_servers, pure.Saved_Server)
+		server_query, sqs := sqlite.query(
+			client.load_servers,
+			pure.Saved_Server,
+		)
 		for row in sqlite.query_next(&server_query) {
 			defer i += 1
 
@@ -706,7 +740,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						entry.state != .Connected,
 					},
 				) {
-					pure.client_connect(client, endp)
+					emit_event(client, .Connect_To_Server, {endpoint = endp})
 				}
 
 				if ui_icon_button(
@@ -715,11 +749,16 @@ ui_connection_menu :: proc(client: ^Client) {
 					.ICON_BIN,
 					"Delete server",
 				) {
-					_, delete_err := sqlite.exec(
-						client.delete_server,
-						row.nick_name,
+					emit_event(
+						client,
+						.Delete_Server,
+						{
+							text = strings.clone(
+								row.nick_name,
+								context.temp_allocator,
+							),
+						},
 					)
-					sqlite.assert_ok(client.delete_server, delete_err)
 				}
 
 				if ui_icon_button(
@@ -912,6 +951,8 @@ ui_connection_menu :: proc(client: ^Client) {
 						"Copy identity",
 						{disabled = already_copied},
 					) {
+						// TODO(eval): rl.SetClipboardText has a raylib dependency,
+						// deciding whether clipboard access belongs in client/pure
 						rl.SetClipboardText(
 							strings.clone_to_cstring(
 								b58_id,
@@ -975,20 +1016,23 @@ ui_connection_menu :: proc(client: ^Client) {
 					   ) ||
 					   (confirmed && is_valid) {
 
-						new_server: pure.Saved_Server
-						new_server.nick_name = text
-						new_server.conn_string = string(
-							ctx.create_conn_string.buf[:],
+						emit_event(
+							client,
+							.Save_Server_Id,
+							{
+								saved_server = {
+									nick_name = strings.clone(
+										text,
+										context.temp_allocator,
+									),
+									conn_string = strings.clone(
+										string(ctx.create_conn_string.buf[:]),
+										context.temp_allocator,
+									),
+									pk = ctx.create_fetcher.sh.id,
+								},
+							},
 						)
-						new_server.pk = ctx.create_fetcher.sh.id
-
-						_, res := sqlite.exec(
-							client.save_server,
-							new_server.nick_name,
-							new_server.conn_string,
-							new_server.pk,
-						)
-						sqlite.assert_ok(client.save_server, res)
 					}
 				}
 			}
@@ -1046,11 +1090,7 @@ ui_connection_menu :: proc(client: ^Client) {
 						.ICON_BIN,
 						"Delete profile",
 					) {
-						_, delete_err := sqlite.exec(
-							client.delete_profile,
-							nm.str(&row.name),
-						)
-						sqlite.assert_ok(client.delete_profile, delete_err)
+						emit_event(client, .Delete_Profile, {name = row.name})
 					}
 
 					changed := ui_icon_button(
@@ -1073,19 +1113,17 @@ ui_connection_menu :: proc(client: ^Client) {
 						changed |= confirmed
 
 						if changed {
-							cnt, save_err := sqlite.exec(
-								client.edit_profile,
-								text,
-								nm.str(&row.name),
+							emit_event(
+								client,
+								.Rename_Profile,
+								{
+									text = strings.clone(
+										text,
+										context.temp_allocator,
+									),
+									name = row.name,
+								},
 							)
-							ctx.editing_error = ""
-							if save_err == .CONSTRAINT {
-								ctx.editing_error = "name already taken"
-								changed = false
-							} else {
-								sqlite.assert_ok(client.edit_profile, save_err)
-								assert(cnt == 1)
-							}
 						}
 					} else {
 						ui_label(
@@ -1152,20 +1190,11 @@ ui_connection_menu :: proc(client: ^Client) {
 				   ) ||
 				   confirmed {
 
-					pk: sim.Private_Key
-					crypto.rand_bytes(pk[:])
-
-					ctx.creation_error = ""
-					if name == "" {
-						ctx.creation_error = "name cannot be empty"
-					} else {
-						_, res := sqlite.exec(client.save_profile, name, pk)
-						if res == .CONSTRAINT {
-							ctx.creation_error = "name already taken"
-						} else {
-							sqlite.assert_ok(client.save_profile, res)
-						}
-					}
+					emit_event(
+						client,
+						.Create_Profile,
+						{text = strings.clone(name, context.temp_allocator)},
+					)
 				}
 			}
 
@@ -1323,7 +1352,7 @@ ui_game_hud :: proc(client: ^Client) {
 					.ICON_FILE_SAVE,
 					"Download all assets",
 				) {
-					pure.fetch_all_assets(client)
+					emit_event(client, .Download_All_Assets, {})
 				}
 
 				ui_icon_dropdown(
@@ -1346,8 +1375,7 @@ ui_game_hud :: proc(client: ^Client) {
 					.ICON_FILE_SAVE_CLASSIC,
 					"Save map changes",
 				) {
-					mapa := ui_map_export(client)
-					pure.tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
+					emit_event(client, .Save_Map, {})
 				}
 			}
 
@@ -1497,15 +1525,15 @@ ui_chat :: proc(client: ^Client) {
 		)
 
 		if confirm {
-			pure.tcp_send(
+			emit_event(
 				client,
-				sim.Broadcast_Packet(
-					sim.Chat_Msg {
-						name = selected_profile.name,
-						id = client.handshake.ch.id,
-						content = string(ctx.prompt.buf[:]),
-					},
-				),
+				.Send_Chat,
+				{
+					text = strings.clone(
+						string(ctx.prompt.buf[:]),
+						context.temp_allocator,
+					),
+				},
 			)
 			clear(&ctx.prompt.buf)
 		}
@@ -1645,13 +1673,10 @@ ui_ship_selection :: proc(client: ^Client) {
 					padding = orui.padding(orui.hovered() ? 0 : PADDING),
 				},
 			) {
-				pure.tcp_send(
+				emit_event(
 					client,
-					sim.Client_Cmd {
-						type = .Spawn,
-						parent = spawn_parent.net_id,
-						id = s.id,
-					},
+					.Spawn_Ship,
+					{parent = spawn_parent.net_id, stats = s.id},
 				)
 			}
 		}
@@ -1698,18 +1723,16 @@ ui_build_popup :: proc(client: ^Client, tile: sim.Map_Pos) {
 				sprite = stat.sprite,
 			},
 		) {
-			pure.tcp_send(
+			emit_event(
 				client,
-				sim.Client_Cmd {
-					type = .Build,
+				.Build,
+				{
 					pos = pure.map_tile_center(tile),
-					id = sim.Ent_Stats_ID(i),
+					stats = sim.Ent_Stats_ID(i),
 					parent = p.net_id,
 					team = client.map_editing.team,
 				},
 			)
-
-			client.bs = {}
 		}
 	}
 }
@@ -1741,8 +1764,7 @@ ui_edit_popup :: proc(client: ^Client) {
 		.ICON_EXPLOSION,
 		"Delete building",
 	) {
-		pure.tcp_send(client, sim.Client_Cmd{type = .Delete, ent = e.net_id})
-		client.bs = {}
+		emit_event(client, .Delete_Building, {ent = e.net_id})
 	}
 
 	if client.player_idx != -1 {
@@ -1756,7 +1778,6 @@ ui_edit_popup :: proc(client: ^Client) {
 			   "Edit entity stats",
 		   ) {
 			emit_event(client, .Select_Stat, {stats = e.stats})
-			client.bs = {}
 		}
 	}
 }
@@ -1790,15 +1811,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		   .ICON_FILTER_POINT,
 		   "Connect buildings",
 	   ) {
-		pure.tcp_send(
-			client,
-			sim.Client_Cmd {
-				type = .Rewire,
-				parent = se.net_id,
-				ent = de.net_id,
-			},
-		)
-		client.bs = {}
+		emit_event(client, .Rewire, {parent = se.net_id, ent = de.net_id})
 	}
 
 	if de.parent == se.id &&
@@ -1808,8 +1821,7 @@ ui_connect_popup :: proc(client: ^Client) {
 		   .ICON_FILTER_BILINEAR,
 		   "Disconnect buildings",
 	   ) {
-		pure.tcp_send(client, sim.Client_Cmd{type = .Rewire, ent = de.net_id})
-		client.bs = {}
+		emit_event(client, .Rewire, {ent = de.net_id})
 	}
 }
 
@@ -1947,6 +1959,7 @@ ui_build :: proc(client: ^Client) {
 			clear(&ctx.edit_name.buf)
 			append(&ctx.edit_name.buf, nm.str(&stats.name))
 			ctx.stat_edit_state = stats^
+			client.bs = {}
 		case .Select_Team:
 			client.selected_team = ev.team
 		case .Delete_Team:
@@ -1960,6 +1973,135 @@ ui_build :: proc(client: ^Client) {
 			)
 			sqlite.assert_ok(client.save_input_content, save_err)
 			client.profiles.editing = false
+		case .Connect_To_Server:
+			pure.client_connect(client, ev.endpoint)
+		case .Delete_Server:
+			_, delete_err := sqlite.exec(client.delete_server, ev.text)
+			sqlite.assert_ok(client.delete_server, delete_err)
+		case .Save_Server_Id:
+			new_server := ev.saved_server
+
+			_, res := sqlite.exec(
+				client.save_server,
+				new_server.nick_name,
+				new_server.conn_string,
+				new_server.pk,
+			)
+			sqlite.assert_ok(client.save_server, res)
+		case .Delete_Profile:
+			_, delete_err := sqlite.exec(
+				client.delete_profile,
+				nm.str(&ev.name),
+			)
+			sqlite.assert_ok(client.delete_profile, delete_err)
+		case .Rename_Profile:
+			cnt, save_err := sqlite.exec(
+				client.edit_profile,
+				ev.text,
+				nm.str(&ev.name),
+			)
+			client.profiles.editing_error = ""
+			if save_err == .CONSTRAINT {
+				client.profiles.editing_error = "name already taken"
+			} else {
+				sqlite.assert_ok(client.edit_profile, save_err)
+				assert(cnt == 1)
+			}
+		case .Create_Profile:
+			pk: sim.Private_Key
+			crypto.rand_bytes(pk[:])
+
+			client.profiles.creation_error = ""
+			if ev.text == "" {
+				client.profiles.creation_error = "name cannot be empty"
+			} else {
+				_, res := sqlite.exec(client.save_profile, ev.text, pk)
+				if res == .CONSTRAINT {
+					client.profiles.creation_error = "name already taken"
+				} else {
+					sqlite.assert_ok(client.save_profile, res)
+				}
+			}
+		case .Download_All_Assets:
+			pure.fetch_all_assets(client)
+		case .Save_Map:
+			mapa := ui_map_export(client)
+			pure.tcp_send(client, sim.Client_Map_Edit{mapa = mapa})
+		case .Spawn_Ship:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Spawn,
+					parent = ev.parent,
+					id = ev.stats,
+				},
+			)
+		case .Build:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Build,
+					pos = ev.pos,
+					id = ev.stats,
+					parent = ev.parent,
+					team = ev.team,
+				},
+			)
+			client.bs = {}
+		case .Delete_Building:
+			pure.tcp_send(client, sim.Client_Cmd{type = .Delete, ent = ev.ent})
+			client.bs = {}
+		case .Rewire:
+			pure.tcp_send(
+				client,
+				sim.Client_Cmd {
+					type = .Rewire,
+					parent = ev.parent,
+					ent = ev.ent,
+				},
+			)
+			client.bs = {}
+		case .Create_Stat:
+			stats: sim.Ent_Stats
+			stats.name = nm.from_str(ev.text)
+			pure.tcp_send(
+				client,
+				sim.Client_Content_Action{type = .Create, stats = stats},
+			)
+		case .Upload_Assets:
+			client.upload.cursor = 0
+			pure.upload_assets(client)
+		case .Clear_Assets:
+			client.upload.assets = {}
+		case .Select_Brush:
+			ctx := &client.map_editing
+			ctx.editing_brush = ctx.brush == ev.brush
+			ctx.brush = ev.brush
+		case .Select_Map_Team:
+			ctx := &client.map_editing
+			ctx.editing_team = ctx.team == ev.team
+			ctx.team = ev.team
+			team := &ctx.teams[ev.team]
+			ctx.color_state.hsv = ui_color_to_hsv(get_color(team.color))
+		case .Close_Team_Editor:
+			client.map_editing.team = 0
+		case .Add_Team:
+			append(
+				&client.map_editing.teams,
+				sim.Ent_Team{color = sim.Color(rand.uint32() | 0x000000FF)},
+			)
+		case .Send_Chat:
+			selected_profile := pure.get_selected_user(client)
+			pure.tcp_send(
+				client,
+				sim.Broadcast_Packet(
+					sim.Chat_Msg {
+						name = selected_profile.name,
+						id = client.handshake.ch.id,
+						content = ev.text,
+					},
+				),
+			)
 		}
 	}
 	clear(&client.events)
@@ -1997,4 +2139,3 @@ ui_build :: proc(client: ^Client) {
 		}
 	}
 }
-
