@@ -8,8 +8,8 @@ import la "core:math/linalg"
 import "core:math/rand"
 import "core:reflect"
 import "core:slice"
-import "core:sort"
 import "core:strings"
+import "pure"
 import rl "vendor:raylib"
 
 THICKNESS :: 2
@@ -19,16 +19,13 @@ UI_Map_Editor :: struct {
 	expanded:           bool,
 	resizing:           bool,
 	map_hash:           sim.Hash,
-	changed_terrain:    bit_arr.Bit_Set,
-	teams:              [dynamic]sim.Ent_Team,
 	brush:              UI_Map_Editor_Brush,
 	editing_brush:      bool,
 	editing_brush_text: strings.Builder,
 	team:               sim.Ent_Team_ID,
 	editing_team:       bool,
 	color_state:        UI_Color_Picker_State,
-	width:              int,
-	height:             int,
+	using state:        pure.Map_Edit_State,
 }
 
 UI_Map_Editor_Brush :: enum int {
@@ -72,7 +69,7 @@ ui_map_editor_sync :: proc(client: ^Client) {
 ui_map_has_changes :: proc(client: ^Client) -> bool {
 	context.allocator = context.temp_allocator
 
-	mapa := ui_map_export(client)
+	mapa := pure.map_export(client, &client.map_editing)
 
 	buf := sim.serialize_to_bytes(mapa)
 
@@ -80,117 +77,6 @@ ui_map_has_changes :: proc(client: ^Client) -> bool {
 	sim.hash(buf, &hash)
 
 	return hash != client.map_editing.map_hash
-}
-
-ui_map_export :: proc(client: ^Client) -> (mapa: sim.Map) {
-	ctx := &client.map_editing
-
-	context.allocator = context.temp_allocator
-
-	mapa.width = client.ents.width
-	mapa.height = client.ents.height
-	mapa.sprites = client.ents.sprites
-
-	mapa.tiles = make(
-		[]int,
-		min(
-			sim.map_tile_storage_size(mapa.width, mapa.height),
-			bit_arr.mask_len(ctx.changed_terrain.bit_length),
-		),
-	)
-
-	for i in 0 ..< len(mapa.tiles) {
-		mapa.tiles[i] =
-			client.ents.mapa.tiles[i] ~ int(ctx.changed_terrain.masks[i])
-	}
-
-	if mapa.width != ctx.width || mapa.height != ctx.height {
-		old_tiles := bit_arr.Bit_Set {
-			raw_data(mapa.tiles),
-			mapa.width * mapa.height,
-		}
-		new_tiles := bit_arr.init(ctx.width * ctx.height)
-		for y in 0 ..< min(mapa.height, ctx.height) {
-			for x in 0 ..< min(mapa.width, ctx.width) {
-				vl := bit_arr.contains_unbounded(old_tiles, y * mapa.width + x)
-				bit_arr.set(new_tiles, y * ctx.width + x, vl)
-			}
-		}
-		mapa.width = ctx.width
-		mapa.height = ctx.height
-		len := sim.map_tile_storage_size(mapa.width, mapa.height)
-		mapa.tiles = new_tiles.masks[:len]
-	}
-
-	ents: [dynamic]sim.Map_Ent
-	append(&ents, sim.Map_Ent{})
-	map_ent_to_ent: [dynamic]^sim.Ent
-	append(&map_ent_to_ent, sim.NIL_ENT)
-
-	ent_iter := sim.ents_iter(&client.ents)
-	o: for e in sim.ents_iter_next(&ent_iter) {
-		s := sim.ents_stats_get(&client.ents, e.stats)
-		if s.kind != .Building do continue
-		pos := sim.map_vec_to_pos(e.pos)
-		if pos.x >= mapa.width do continue
-		if pos.y >= mapa.height do continue
-		append(&map_ent_to_ent, e)
-		append(&ents, sim.Map_Ent{stat = e.stats, team = e.team, pos = pos})
-	}
-
-	Ctx :: struct {
-		map_ents: []sim.Map_Ent,
-		ents:     []^sim.Ent,
-	}
-
-	ctx_len :: proc(id: sort.Interface) -> int {
-		return len(((^Ctx)(id.collection)).ents)
-	}
-
-	ctx_swap :: proc(id: sort.Interface, a: int, b: int) {
-		cx := (^Ctx)(id.collection)
-		cx.ents[a], cx.ents[b] = cx.ents[b], cx.ents[a]
-		cx.map_ents[a], cx.map_ents[b] = cx.map_ents[b], cx.map_ents[a]
-	}
-
-	ctx_less :: proc(id: sort.Interface, a: int, b: int) -> bool {
-		cx := (^Ctx)(id.collection)
-		return transmute(u64)cx.ents[a].pos < transmute(u64)cx.ents[b].pos
-	}
-
-	cx := Ctx {
-		ents     = map_ent_to_ent[:],
-		map_ents = ents[:],
-	}
-
-	sort.sort(
-		sort.Interface {
-			len = ctx_len,
-			swap = ctx_swap,
-			less = ctx_less,
-			collection = &cx,
-		},
-	)
-
-	ent_to_map_ent := make([]int, len(client.ents.slots))
-
-	for e, i in map_ent_to_ent {
-		ent_to_map_ent[e.id.index] = i
-	}
-
-	for &me, i in ents {
-		e := map_ent_to_ent[i]
-		if !sim.ents_is_valid(&client.ents, e.parent) {
-			continue
-		}
-		me.parent = ent_to_map_ent[e.parent.index]
-	}
-
-	mapa.ents = ents[:]
-	mapa.chargers = client.ents.mapa.chargers[:]
-	mapa.teams = ctx.teams[:]
-
-	return
 }
 
 ui_map_editor :: proc(client: ^Client) {

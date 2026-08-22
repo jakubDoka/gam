@@ -18,8 +18,6 @@ import "core:reflect" // marked
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sync/chan"
-import "core:thread"
 import "core:time"
 import "pure"
 import rl "vendor:raylib"
@@ -56,6 +54,7 @@ Client :: struct {
 	using ui:              UI_Reactor,
 	particles:             Particles,
 	input_display_texture: rl.RenderTexture2D,
+	had_broken_assets:     bool,
 }
 
 client_mouse_pos :: proc(client: ^Client) -> sim.Vec {
@@ -126,71 +125,68 @@ client_draw_input :: proc(client: ^Client) {
 	dsradius := sim.ents_radius(&client.ents, de.id)
 	dt := sim.ents_team_get(&client.ents, de.team)
 
-	{
-		if client.input_display_texture.texture.width != rl.GetScreenWidth() ||
-		   client.input_display_texture.texture.height !=
-			   rl.GetScreenHeight() {
-			rl.UnloadRenderTexture(client.input_display_texture)
-			client.input_display_texture = rl.LoadRenderTexture(
-				rl.GetScreenWidth(),
-				rl.GetScreenHeight(),
-			)
-		}
-
-		rl.BeginTextureMode(client.input_display_texture)
-		rl.ClearBackground(rl.BLANK)
-		rl.BeginMode2D(client.camera)
-
-		color := get_color(st.color)
-
-		if he != sim.NIL_ENT && se == sim.NIL_ENT {
-			rl.DrawRectangleRec(
-				square(he.pos, hsradius * 0.6),
-				get_color(ht.color),
-			)
-		}
-
-		if !has_valid_bs(client) {
-			color = invert_color(color)
-		}
-
-		if se != sim.NIL_ENT {
-			rl.DrawRectangleRec(square(se.pos, ssradius * 0.8), color)
-
-			THICKNESS :: 5
-
-			pos := mouse_pos
-
-			if de != sim.NIL_ENT {
-				rl.DrawRectangleRec(square(de.pos, dsradius * 0.8), color)
-				pos = de.pos
-			} else if ps, ok := client.bs.place_pos.?; ok {
-				pos = sim.map_pos_to_vec(ps)
-				rl.DrawRectangleRec(map_tile_rect(ps), color)
-			} else {
-				pos = pure.snap_to_tile(pos)
-				rl.DrawRectangleRec(square(pos, 32), color)
-			}
-
-			pos = pure.snap_to_tile(pos)
-
-			rl.DrawLineEx(pos, se.pos, THICKNESS, color)
-		}
-
-		square :: proc(pos: sim.Vec, radius: f32) -> rl.Rectangle {
-			return {pos.x - radius, pos.y - radius, radius * 2, radius * 2}
-		}
-
-		rl.EndMode2D()
-		rl.EndTextureMode()
-
-		rl.DrawTextureRec(
-			client.input_display_texture.texture,
-			{0, 0, f32(rl.GetScreenWidth()), f32(-rl.GetScreenHeight())},
-			{},
-			rl.ColorAlpha(rl.WHITE, 0.8),
+	if client.input_display_texture.texture.width != rl.GetScreenWidth() ||
+	   client.input_display_texture.texture.height != rl.GetScreenHeight() {
+		rl.UnloadRenderTexture(client.input_display_texture)
+		client.input_display_texture = rl.LoadRenderTexture(
+			rl.GetScreenWidth(),
+			rl.GetScreenHeight(),
 		)
 	}
+
+	rl.BeginTextureMode(client.input_display_texture)
+	rl.ClearBackground(rl.BLANK)
+	rl.BeginMode2D(client.camera)
+
+	color := get_color(st.color)
+
+	if he != sim.NIL_ENT && se == sim.NIL_ENT {
+		rl.DrawRectangleRec(
+			square(he.pos, hsradius * 0.6),
+			get_color(ht.color),
+		)
+	}
+
+	if !has_valid_bs(client) {
+		color = invert_color(color)
+	}
+
+	if se != sim.NIL_ENT {
+		rl.DrawRectangleRec(square(se.pos, ssradius * 0.8), color)
+
+		THICKNESS :: 5
+
+		pos := mouse_pos
+
+		if de != sim.NIL_ENT {
+			rl.DrawRectangleRec(square(de.pos, dsradius * 0.8), color)
+			pos = de.pos
+		} else if ps, ok := client.bs.place_pos.?; ok {
+			pos = sim.map_pos_to_vec(ps)
+			rl.DrawRectangleRec(map_tile_rect(ps), color)
+		} else {
+			pos = pure.snap_to_tile(pos)
+			rl.DrawRectangleRec(square(pos, 32), color)
+		}
+
+		pos = pure.snap_to_tile(pos)
+
+		rl.DrawLineEx(pos, se.pos, THICKNESS, color)
+	}
+
+	square :: proc(pos: sim.Vec, radius: f32) -> rl.Rectangle {
+		return {pos.x - radius, pos.y - radius, radius * 2, radius * 2}
+	}
+
+	rl.EndMode2D()
+	rl.EndTextureMode()
+
+	rl.DrawTextureRec(
+		client.input_display_texture.texture,
+		{0, 0, f32(rl.GetScreenWidth()), f32(-rl.GetScreenHeight())},
+		{},
+		rl.ColorAlpha(rl.WHITE, 0.8),
+	)
 }
 
 client_compute_input :: proc(client: ^Client) {
@@ -403,7 +399,7 @@ client_on_remove :: proc(ents: ^sim.Ents, e: ^sim.Ent) {
 @(export)
 client_init :: proc(
 	hr: ^hot.Reloader,
-	config: ^pure.Client_Config,
+	config: ^pure.Config,
 ) -> (
 	client: ^Client,
 ) {
@@ -452,12 +448,12 @@ refresh_sheet :: proc(client: ^Client) {
 	append(&client.assets, 0)
 
 	query, stmt := sqlite.query(
-		client.get_server_assets,
+		client.get_server_assets_of_type,
 		pure.Saved_Asset,
 		client.hctx.sh.id,
+		sim.Asset_Type.Sprite,
 	)
 	for asset in sqlite.query_next(&query) {
-		if asset.type != .Sprite do continue
 		append(&client.assets, asset.id)
 	}
 	sqlite.reset(stmt)
@@ -471,7 +467,7 @@ refresh_sheet :: proc(client: ^Client) {
 	images := make([]rl.Image, len(client.assets), context.temp_allocator)
 	defer for i in images do rl.UnloadImage(i)
 
-	has_missing := false
+	has_broken := false
 	for s, i in client.assets {
 		if s == 0 do continue
 
@@ -482,7 +478,7 @@ refresh_sheet :: proc(client: ^Client) {
 		if images[i] == {} {
 			_, res := sqlite.exec(client.delete_asset, s)
 			sqlite.assert_ok(client.delete_asset, res)
-			has_missing = true
+			has_broken = true
 
 			log.warn("encountered missin image, inconsistent cache", name)
 		}
@@ -496,7 +492,7 @@ refresh_sheet :: proc(client: ^Client) {
 		asset: pure.Saved_Asset
 		res, stmt := sqlite.query(client.get_asset, asset, sprite)
 		if res == .DONE {
-			has_missing = true
+			has_broken = true
 			log.warn("sprite is in the cache but not in db", sprite)
 			continue
 		}
@@ -505,7 +501,15 @@ refresh_sheet :: proc(client: ^Client) {
 		client.sheet.frames[i].name = asset.name
 	}
 
-	if has_missing do pure.fetch_all_assets(client)
+	if has_broken {
+		if client.had_broken_assets {
+			log.warn("failed to recover the broken state of assets")
+		} else {
+			pure.fetch_all_assets(client)
+		}
+	}
+
+	client.had_broken_assets = has_broken
 }
 
 @(export)
@@ -624,7 +628,12 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 
 		if s.kind == .Beam {
 			px := pure.client_ent_extra_get(client, e.parent)
-			it := sim.beam_walk_init(&client.ents, e.id, px.rot_smoothing)
+			it := sim.beam_walk_init(
+				&client.ents,
+				e.id,
+				px.pos_smoothing,
+				px.rot_smoothing,
+			)
 			for pp in sim.beam_walk_next(&client.ents, &it) {}
 			t = sim.ents_team_get(&client.ents, e.team)
 			x.pos_smoothing = 0
@@ -783,7 +792,12 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 
 				rad := s.radius * f32((math.sin(rl.GetTime() * 50) + 5) / 6)
 
-				it := sim.beam_walk_init(&client.ents, e.id, px.rot_smoothing)
+				it := sim.beam_walk_init(
+					&client.ents,
+					e.id,
+					px.pos_smoothing,
+					px.rot_smoothing,
+				)
 				t = sim.ents_team_get(&client.ents, e.team)
 				for pp in sim.beam_walk_next(&client.ents, &it) {
 					rl.DrawCircleV(pp, rad, get_color(t.color))
@@ -994,38 +1008,17 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	rl.EndDrawing()
 }
 
-client_shutdown :: proc(client: ^Client) {
-	sim.tcp_connection_kill(&client.hctx.tcp, client.l)
-	sim.udp_connection_kill(&client.udp, client.l)
-
-	hot.sip.io_remove(client.tick_interval)
-	hot.sip.io_remove(client.ping_interval)
-
+@(export)
+client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	for e in client.servers.server_info_cache do server_info_close(e)
 	server_info_close(&client.servers.create_fetcher)
 
-	io_res := hot.sip.io_run(client.l)
-	assert(io_res == nil)
-
-	chan.close(client.rtt_worker_reqs)
-	thread.join(client.rtt_worker)
-}
-
-@(export)
-client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
-	client_shutdown(client)
-
-	delete(client.map_buf)
-	delete(client.players)
 	delete(client.assets)
 
-	delete(client.ents.stats)
 	packer.sheet_destroy(client.sheet)
 	ui_destroy(client)
 
-	sqlite.finalize(client.statements)
-	db_res := sqlite.close(client.db)
-	sqlite.assert_ok(client.db, db_res)
+	pure.client_deinit(hr, client)
 }
 
 client_ent_color :: proc(client: ^Client, eid: sim.Ent_ID) -> rl.Color {
@@ -1062,7 +1055,7 @@ client_static_deinit :: proc() {
 	sim.unregister_user_formatters()
 }
 
-client_config_default :: proc() -> (cc: pure.Client_Config) {
+client_config_default :: proc() -> (cc: pure.Config) {
 	data_dir, data_dir_err := os.user_data_dir(context.temp_allocator)
 	if data_dir_err != nil {
 		log.error("failed to resolve the data dir:", data_dir_err)
@@ -1112,6 +1105,32 @@ client_config_default :: proc() -> (cc: pure.Client_Config) {
 	return
 }
 
+Frame_Timer :: struct {
+	get_time: proc() -> f64,
+	target:   f64,
+	previous: f64,
+}
+
+frame_end :: proc(t: ^Frame_Timer, l: ^nbio.Event_Loop) {
+	current := t.get_time()
+	wait_time := current - t.previous
+	t.previous = current
+	frame := wait_time
+
+	for frame < t.target {
+		runerr := nbio.tick(
+			l,
+			time.Duration((t.target - frame) * f64(time.Second)),
+		)
+		assert(runerr == nil)
+
+		current = t.get_time()
+		wait_time := current - t.previous
+		t.previous = current
+		frame += wait_time
+	}
+}
+
 when ODIN_BUILD_MODE == .Executable || ODIN_BUILD_MODE == .Object {
 	main :: proc() {
 		main_proc()
@@ -1152,16 +1171,19 @@ main_proc :: proc() {
 		"-define:SQLITE_SHARED=true",
 	}
 	hr.dyn_defs = {{"LATENCY", sim.LATENCY}, {"LOCAL", sim.LOCAL}}
-	hr.lib = {
-		memory_size = client_memory_size,
-		static_init = client_static_init,
-		init        = auto_cast client_init,
-		update      = auto_cast client_update,
-		deinit      = auto_cast client_deinit,
-	}
 	hr.init_allocator = arna.allocator(&init_arna)
+	hr.lib = hot.decl_api(
+		hot.Api(^Client) {
+			memory_size = client_memory_size,
+			static_init = client_static_init,
+			init = client_init,
+			update = client_update,
+			deinit = client_deinit,
+		},
+	)
+	hr.reload = hot.reload_impl
 
-	config: pure.Client_Config
+	config: pure.Config
 	{context.allocator = arna.allocator(&global_arna)
 		config = client_config_default()}
 	hr.config = &config
@@ -1181,7 +1203,7 @@ main_proc :: proc() {
 	core_time.get_time = auto_cast rl.GetTime
 
 	for !rl.WindowShouldClose() {
-		_ = hot.reload(&hr, {})
+		_ = hr->reload({})
 
 		hot.update(&hr)
 
@@ -1198,31 +1220,5 @@ main_proc :: proc() {
 		sim.global_allocator_destroy(context.allocator)
 		hot.unload_libraries(&hr)
 		arna.bulk_destroy(&temp_arna, &global_arna, &init_arna)
-	}
-}
-
-Frame_Timer :: struct {
-	get_time: proc() -> f64,
-	target:   f64,
-	previous: f64,
-}
-
-frame_end :: proc(t: ^Frame_Timer, l: ^nbio.Event_Loop) {
-	current := t.get_time()
-	wait_time := current - t.previous
-	t.previous = current
-	frame := wait_time
-
-	for frame < t.target {
-		runerr := nbio.tick(
-			l,
-			time.Duration((t.target - frame) * f64(time.Second)),
-		)
-		assert(runerr == nil)
-
-		current = t.get_time()
-		wait_time := current - t.previous
-		t.previous = current
-		frame += wait_time
 	}
 }

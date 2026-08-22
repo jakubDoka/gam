@@ -98,27 +98,30 @@ client_handle_packet :: proc(
 ) -> (
 	ignored: bool,
 ) {
-	client.last_server_packet = time.now()
+	client.last_server_packet = nbio.now(client.l)
 
 	packet := packet
 	switch &p in packet {
 	case sim.Server_Ping:
-		ok := chan.send(
-			client.rtt_worker_reqs,
-			Rtt_Worker_Request {
-				server = client.server_endpoint,
-				config = p,
-				timeout = sim.PING_INTERVAL,
-				execute = rtt_worker_execute,
-			},
-		)
-		assert(ok)
+		if client.rtt_worker != nil {
+			ok := chan.send(
+				client.rtt_worker_reqs,
+				Rtt_Worker_Request {
+					server = client.server_endpoint,
+					config = p,
+					timeout = sim.PING_INTERVAL,
+					execute = rtt_worker_execute,
+				},
+			)
+			assert(ok)
+		}
 	case sim.Server_State:
 		client.tps = p.tps
 
 		{
 			stats := client.ents.stats[:]
 			packet: sim.Server_Packet = sim.Server_Stats {
+				name  = client.ents.stats_name,
 				stats = sim.custom_encoding_stats(&stats),
 			}
 
@@ -177,7 +180,10 @@ client_handle_packet :: proc(
 			synced.parry_progress -= client.rtt
 
 			if synced.net_id == p.you &&
-			   f32(f64(time.since(client.last_inpulse)) / f64(time.Second)) <
+			   f32(
+				   f64(nbio.since(client.l, client.last_inpulse)) /
+				   f64(time.Second),
+			   ) <
 				   client.rtt * 3 {
 				synced.vel = ne.vel
 			}
@@ -242,15 +248,18 @@ client_handle_packet :: proc(
 
 		for m in marks {
 			m.id.gen -= 1
+			assert(sim.ent_is_alive(m))
 		}
 
 		for e, i in client.ents.slots {
 			client.ent_extra[i].pos_smoothing -= e.pos
 		}
+
 	case sim.Server_Map:
 		delete(client.map_buf)
 		client.map_buf = slice.clone(p.bytes)
-		mapa, _ := sim.map_load(client.map_buf)
+		mapa, ok := sim.map_load(client.map_buf)
+		if !ok do break
 		client.ents.mapa = mapa
 
 		client_fetch_missig_assets(
@@ -262,11 +271,8 @@ client_handle_packet :: proc(
 
 		client.has_dirty_config = p.dirty_stats
 
-		log.debug("received the cold state, our id:", client.hctx.ch.id)
-
 		for &pl in p.players {
 			append(&client.players, Player{pl, {}, {}})
-			log.debug("player:", pl.id, ":", nm.str(&pl.name))
 		}
 
 		client.player_idx = -1
@@ -277,6 +283,7 @@ client_handle_packet :: proc(
 		}
 	case sim.Server_Stats:
 		clear(&client.ents.stats)
+		client.ents.stats_name = p.name
 
 		d := sim.Decoder{p.stats.raw}
 		for len(d.remining) != 0 {
@@ -299,10 +306,10 @@ client_handle_packet :: proc(
 				go_deeper: bool,
 				ok: bool = true,
 			) {
-				client := (^[dynamic]sim.Asset_ID)(context.user_ptr)
+				assets := (^[dynamic]sim.Asset_ID)(context.user_ptr)
 				sw: switch &v in val {
 				case sim.Asset_ID:
-					sim.add_asset(client, v)
+					sim.add_asset(assets, v)
 				case:
 					go_deeper = true
 				}
@@ -334,7 +341,7 @@ client_handle_packet :: proc(
 				{
 					name = p.name,
 					seed = p.id,
-					time = time.now(),
+					time = nbio.now(client.l),
 					content = p.content,
 				},
 			)
@@ -350,6 +357,9 @@ client_handle_packet :: proc(
 				}
 			}
 		}
+	case sim.Asset:
+		save_asset(client, client.sh.id, &p)
+		client_fetch_missig_assets(client, {sim.hash_prefix(&p.hash)})
 	}
 
 	return
@@ -362,6 +372,7 @@ client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 	}
 
 	ctx := new_clone(Ctx{client = client})
+	defer if ctx.to_stat == 0 do free(ctx)
 
 	for s in set {
 		if s == 0 do continue
@@ -388,7 +399,6 @@ client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 		}
 	}
 
-	fetch_assets(client)
 }
 
 Req :: struct {
@@ -401,6 +411,7 @@ Req :: struct {
 
 req_connect :: proc(client: ^Client) -> (^Req, ^sim.Client_Request_Header) {
 	req := new(Req)
+	req.timeout = time.Second * 3
 	req.l = client.l
 	req.host.asoc_data = client
 	req.get_pk = get_pk
@@ -570,6 +581,7 @@ fetch_assets :: proc(client: ^Client) {
 		req_slot.conn_id = client.conn_id
 		req_slot.download_content.id = next
 		req.path = strings.clone(asset_path(client, next))
+		log.debug("fetching asset:", req.path)
 		req.asset_path = asset_path_
 		req.cleanup = on_kill
 		sim.fetch_asset(req)
@@ -592,22 +604,21 @@ fetch_assets :: proc(client: ^Client) {
 		client := (^Client)(req.host.asoc_data)
 		client.inflight_assets -= 1
 
-		assert(req.fetch.asset_meta.size == req.fetch.written, "TODO")
-
 		if req.last_error == "" {
-			_, res := sqlite.exec(
-				client.save_asset,
-				req.sh.id,
-				sim.hash_prefix(&req.fetch.asset_meta.hash),
-				nm.str(&req.fetch.asset_meta.name),
-				req.fetch.asset_meta.type,
+			fmt.assertf(
+				req.fetch.asset_meta.size == req.fetch.written,
+				"TODO %v %v",
+				req.fetch.asset_meta.size,
+				req.fetch.written,
 			)
-			sqlite.assert_ok(client.save_asset, res)
+
+			save_asset(client, req.sh.id, &req.fetch.asset_meta)
 		} else {
-			panic("TDOD: show an error")
+			// TODO: show an error
 		}
 
 		fetch_assets(client)
+		delete(req.path)
 
 		if len(req.error) != 0 {
 			log.error(req.error)
@@ -616,6 +627,17 @@ fetch_assets :: proc(client: ^Client) {
 		req^ = {}
 		free(req)
 	}
+}
+
+save_asset :: proc(client: ^Client, sh_id: sim.Identity, asset: ^sim.Asset) {
+	_, res := sqlite.exec(
+		client.save_asset,
+		sh_id,
+		sim.hash_prefix(&asset.hash),
+		nm.str(&asset.name),
+		asset.type,
+	)
+	sqlite.assert_ok(client.save_asset, res)
 }
 
 client_ent_by_net_id :: proc(client: ^Client, id: sim.Ent_Net_ID) -> ^sim.Ent {
@@ -706,7 +728,7 @@ client_connect :: proc(client: ^Client, endp: nbio.Endpoint) {
 		}
 
 		client.connection_stage = .Connected
-		client.last_server_packet = time.now()
+		client.last_server_packet = nbio.now(client.l)
 
 		return true
 	}
@@ -792,7 +814,9 @@ rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
 
 	net.set_option(socket, .Receive_Timeout, ws.timeout)
 
-	now := time.now()
+	tm :: time
+
+	now := tm.now()
 	nonce: u8 = 0
 
 	Packet :: struct {
@@ -838,7 +862,7 @@ rtt_worker_execute :: proc(ws: ^Rtt_Worker_Request, worker: ^Rtt_Worker_Ctx) {
 
 	nonce += 1
 
-	rtt.update(&worker.es, time.since(now) + sim.LATENCY * time.Millisecond)
+	rtt.update(&worker.es, tm.since(now) + sim.LATENCY * time.Millisecond)
 	sync.atomic_store(worker.rt, rtt.smoothed(&worker.es))
 
 	pkt.tag = sim.compute_next_ping_tag(&ws.config.sk, nonce)
@@ -909,7 +933,7 @@ fetch_all_assets :: proc(client: ^Client) {
 client_on_ping :: proc(client: ^Client) {
 	if client.connection_stage != .Connected do return
 
-	if time.since(client.last_server_packet) > CONNECTION_TIMEOUT {
+	if nbio.since(client.l, client.last_server_packet) > CONNECTION_TIMEOUT {
 		client_clear_state(client, "connection timed out")
 		return
 	}

@@ -1,10 +1,10 @@
 package pure_client
 
 import "../../sim"
+import "../../simt/nbio"
 import "../../util/nm"
 import "../../util/sqlite"
 import "base:runtime"
-import "core:crypto"
 
 Profile :: struct {
 	name: sim.Player_Name,
@@ -23,75 +23,80 @@ Saved_Server :: struct {
 }
 
 Saved_Asset :: struct {
-	pk:   sim.Identity,
-	id:   sim.Asset_ID,
-	name: nm.Name,
-	type: sim.Asset_Type,
+	server: sim.Identity,
+	id:     sim.Asset_ID,
+	name:   nm.Name,
+	type:   sim.Asset_Type,
 }
 
+// TODO(low): more consistent naming
 Statements :: struct {
-	save_input_content:     sqlite.Statement `
+	save_input_content:        sqlite.Statement `
 		INSERT INTO text_input VALUES (?, ?)
 			ON CONFLICT (id) DO UPDATE SET content = ?2
 	`,
-	load_input_content:     sqlite.Statement `
+	load_input_content:        sqlite.Statement `
 		SELECT content FROM text_input WHERE id = ?
 	`,
-	delete_input_content:   sqlite.Statement `
+	delete_input_content:      sqlite.Statement `
 		DELETE FROM text_input WHERE id = ?
 	`,
-	save_profile:           sqlite.Statement `
+	save_profile:              sqlite.Statement `
 		INSERT INTO profile VALUES (?, ?)
 	`,
-	load_profiles:          sqlite.Statement `
+	load_profiles:             sqlite.Statement `
 		SELECT * FROM profile
 	`,
-	count_profiles:         sqlite.Statement `
+	count_profiles:            sqlite.Statement `
 		SELECT COUNT(*) FROM profile
 	`,
-	delete_profile:         sqlite.Statement `
+	delete_profile:            sqlite.Statement `
 		DELETE FROM profile WHERE name = ?
 	`,
-	edit_profile:           sqlite.Statement `
+	edit_profile:              sqlite.Statement `
 		UPDATE profile SET name = ? WHERE name = ?
 	`,
-	select_profile_by_name: sqlite.Statement `
+	select_profile_by_name:    sqlite.Statement `
 		SELECT * FROM profile WHERE name = ?
 	`,
-	select_theme_color:     sqlite.Statement `
+	select_theme_color:        sqlite.Statement `
 		SELECT hue, saturation, brightness, alpha FROM theme WHERE name = ?
 	`,
-	save_theme_color:       sqlite.Statement `
+	save_theme_color:          sqlite.Statement `
 		INSERT INTO theme VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT (name) DO UPDATE SET
 				hue = ?2, saturation = ?3, brightness = ?4, alpha = ?5
 	`,
-	save_server:            sqlite.Statement `
+	save_server:               sqlite.Statement `
 		INSERT INTO server VALUES (?, ?, ?)
 			ON CONFLICT (nick_name) DO UPDATE SET
 				conn_string = ?2, pk = ?3
 	`,
-	load_server:            sqlite.Statement `
+	load_server:               sqlite.Statement `
 		SELECT * FROM server WHERE nick_name = ?
 	`,
-	load_servers:           sqlite.Statement `
+	load_servers:              sqlite.Statement `
 		SELECT * FROM server
 	`,
-	delete_server:          sqlite.Statement `
+	delete_server:             sqlite.Statement `
 		DELETE FROM server WHERE nick_name = ?
 	`,
-	save_asset:             sqlite.Statement `
+	save_asset:                sqlite.Statement `
 		INSERT INTO asset VALUES (?, ?, ?, ?)
 			ON CONFLICT (id, server) DO UPDATE SET name = ?3, type = ?4
+			ON CONFLICT (server, name) DO UPDATE SET id = ?2, type = ?4 
 	`,
-	get_server_assets:      sqlite.Statement `
+	get_server_assets:         sqlite.Statement `
 		SELECT * FROM asset WHERE server = ?
 	`,
-	get_asset:              sqlite.Statement `
+	get_server_assets_of_type: sqlite.Statement `
+		SELECT * FROM asset WHERE server = ? AND type = ?
+	`,
+	get_asset:                 sqlite.Statement `
 		SELECT * FROM asset WHERE id = ?
 	`,
-	delete_asset:           sqlite.Statement `
-		DELETE FROM Asset WHERE id = ?
+	delete_asset:              sqlite.Statement `
+		DELETE FROM asset WHERE id = ?
 	`,
 }
 
@@ -130,7 +135,7 @@ edit_profile_name :: proc(client: ^Client, new, old: string) -> (err: string) {
 
 create_profile :: proc(client: ^Client, name: string) -> string {
 	pk: sim.Private_Key
-	crypto.rand_bytes(pk[:])
+	nbio.rand_bytes(pk[:])
 
 	if name == "" {
 		return "name cannot be empty"

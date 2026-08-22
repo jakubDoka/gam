@@ -5,8 +5,8 @@ core:
     sprite: core
   health:
     energy: 100
-    energy_drain: -3
-    recharge_speed: 2
+    energy_drain: -15
+    recharge_speed: 15
     bind_range: 500
 snipa:
   playable: true

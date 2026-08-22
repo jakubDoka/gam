@@ -1,6 +1,6 @@
 package sim
 
-import crypto "core:crypto"
+import "../simt/nbio"
 import aes "core:crypto/aes"
 import "core:crypto/blake2s"
 import ed "core:crypto/ed25519"
@@ -31,7 +31,7 @@ split_crypt_tag :: proc(
 }
 
 encrypt :: proc(sk: ^Secret_Key, tag: ^Tag, text: []u8) {
-	crypto.rand_bytes(tag[:12])
+	nbio.rand_bytes(tag[:12])
 	ctx: aes.Context_GCM
 	aes.init_gcm(&ctx, sk[:])
 	aes.seal_gcm(&ctx, text, tag[12:], tag[:12], transmute([]u8)AAD, text)
@@ -69,10 +69,10 @@ client_handshake_init :: proc(
 	id: ed.Public_Key
 	ed.public_key_set_priv(&id, &expkey)
 
-	crypto.rand_bytes(res.challenge[:])
+	nbio.rand_bytes(res.challenge[:])
 	ed.public_key_bytes(&id, res.id[:])
 
-	crypto.rand_bytes(xpk[:])
+	nbio.rand_bytes(xpk[:])
 	x.scalarmult_basepoint(res.x[:], xpk[:])
 
 	return
@@ -100,10 +100,10 @@ server_handshake_init :: proc(
 	id: ed.Public_Key
 	ed.public_key_set_priv(&id, &expkey)
 
-	crypto.rand_bytes(res.challenge[:])
+	nbio.rand_bytes(res.challenge[:])
 	ed.public_key_bytes(&id, res.id[:])
 
-	crypto.rand_bytes(xpk[:])
+	nbio.rand_bytes(xpk[:])
 	x.scalarmult_basepoint(res.x[:], xpk[:])
 
 	sig_msg := Sig_Msg {

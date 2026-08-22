@@ -34,6 +34,7 @@ Send_State :: struct {
 
 send_asset :: proc(conn: ^Handshake) -> bool {
 	conn.tcp.send_buf = make([]u8, DONWLOAD_BUF_SIZE)
+	conn.tcp.timeout = time.Second * 3
 
 	path := conn->asset_path()
 	nbio.open_poly(path, conn, on_open, l = conn.l)
@@ -305,7 +306,6 @@ hctx_fail_guard_end :: #force_inline proc(
 		hctx.last_error = hctx.error
 		log.error(hctx.error, hctx.ctx, location = loc)
 		tcp_connection_kill(hctx, hctx.l)
-		hctx_drop_ref(hctx)
 	}
 }
 
@@ -402,6 +402,7 @@ hctx_connect_client :: proc(
 			hctx,
 			"server hello has incorrect length",
 			op.recv.received,
+			size_of(Server_Hello),
 		)
 		if op.recv.received != size_of(Server_Hello) do return
 
@@ -438,7 +439,7 @@ hctx_connect_client :: proc(
 
 		log.debug("handshake complete, booting")
 
-		hctx->on_boot()
+		if !hctx->on_boot() do return
 
 		hctx.error = ""
 	}
@@ -458,6 +459,8 @@ hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 	)
 
 	on_conn_recv_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		nbio.set_lable(hctx.l, hctx.sock, "recv hello")
+
 		hctx_fail_guard(hctx, "handhake did no arrive", op.recv.err)
 		if op.recv.err != nil do return
 
@@ -485,8 +488,12 @@ hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 	}
 
 	on_conn_send_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		nbio.set_lable(hctx.l, hctx.sock, "send hello")
+
 		hctx_fail_guard(hctx, "failed to send the server hello", op.send.err)
 		if op.send.err != nil do return
+
+		log.debug("server hello sent")
 
 		nbio.recv_poly(
 			hctx.sock,
@@ -502,6 +509,7 @@ hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 	}
 
 	on_conn_recv_end_hello :: proc(op: ^nbio.Operation, hctx: ^Handshake) {
+		nbio.set_lable(hctx.l, hctx.sock, "recv end hello")
 		hctx_fail_guard(
 			hctx,
 			"failed to receive client termination",
@@ -509,7 +517,7 @@ hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 		)
 		if op.recv.err != nil do return
 
-		log.debug("received client hello from:", op.recv.source)
+		log.debug("received client end hello from:", op.recv.source)
 
 		hctx_fail_ctx(
 			hctx,
@@ -528,9 +536,11 @@ hctx_connect_server :: proc(hctx: ^Handshake, l: ^nbio.Event_Loop) {
 			&hctx.ceh,
 			&hctx.secret,
 		)
+		hctx_fail_ctx(hctx, "authentication failed")
 		if !ok do return
 
-		hctx->on_boot()
+		if !hctx->on_boot() do return
+
 		hctx.error = ""
 	}
 }
@@ -797,7 +807,7 @@ tcp_connection_recv :: proc(op: ^nbio.Operation, conn: ^TCP_Connection) {
 	defer if kill do tcp_connection_kill(conn, op.l)
 
 	if op.recv.err != nil {
-		log.error("encoungered connection error:", op.recv.err)
+		log.error("encountered connection error:", op.recv.err)
 		return
 	}
 
@@ -864,6 +874,8 @@ tcp_connection_send :: proc(
 	packet: any,
 	l: ^nbio.Event_Loop,
 ) -> bool {
+	assert(context.allocator != context.temp_allocator)
+
 	when LATENCY != 0 {
 		buf := serialize_to_bytes(packet)
 
@@ -1034,6 +1046,7 @@ interval_poly :: proc(
 		op_slot: ^^nbio.Operation,
 	) {
 		cb(v)
+		if op.type == .None do return
 		opa := nbio.timeout_poly3(
 			op.timeout.duration,
 			v,

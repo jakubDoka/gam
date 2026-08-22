@@ -10,19 +10,23 @@ import "core:testing"
 
 SPRITE_DIR :: "config/sprites"
 MAP_DIR :: "config/maps"
+STATS_DIR :: "config/stats"
 MAP_EXT :: ".gmap"
 SPRITE_EXT :: ".png"
+STATS_EXT :: ".gyml"
 
 @(rodata)
 EXT_BY_TYPE := [Asset_Type]string {
 	.Map    = MAP_EXT,
 	.Sprite = SPRITE_EXT,
+	.Stats  = STATS_EXT,
 }
 
 @(rodata)
 DIR_BY_TYPE := [Asset_Type]string {
 	.Map    = MAP_DIR,
 	.Sprite = SPRITE_DIR,
+	.Stats  = STATS_DIR,
 }
 
 Relative_Slice :: struct {

@@ -375,7 +375,11 @@ Ent :: struct {
 	using synced:  Ent_Synced,
 }
 
-ent_reset :: proc(ent: ^Ent) {
+ent_reset :: proc(ents: ^Ents, ent: ^Ent) {
+	ent.next_free = ents.free
+	ents.free = ent
+
+	assert(ent_is_alive(ent))
 	ent^ = {
 		id        = {ent.id.gen + 1, ent.id.index},
 		next_free = ent.next_free,
@@ -415,6 +419,7 @@ Ents :: struct {
 	on_laser:      proc(_: ^Ents, _: ^Ent),
 	on_deflect:    proc(_: ^Ents, target: ^Ent, by: ^Ent),
 	stats:         [dynamic]Ent_Stats,
+	stats_name:    nm.Name,
 	using mapa:    Map,
 	spawn_seq:     ^Ent_Net_ID,
 	quad_tree:     Quad_Tree,
@@ -1373,7 +1378,7 @@ ents_update :: proc(ents: ^Ents) {
 		}
 	}
 
-	for e in ents_remove_next(ents) {
+	for e := ents.queued_remove; e != nil; e = e.next_queued_remove {
 		s := ents_stats_get(ents, e.stats)
 
 		if s.explosion.radius > 0 {
@@ -1392,8 +1397,10 @@ ents_update :: proc(ents: ^Ents) {
 		}
 
 		if ents.on_remove != nil do ents->on_remove(e)
+	}
 
-		ent_reset(e)
+	for e in ents_remove_next(ents) {
+		ent_reset(ents, e)
 	}
 }
 
@@ -1405,14 +1412,15 @@ Beam_Walk :: struct {
 beam_walk_init :: proc(
 	ents: ^Ents,
 	e: Ent_ID,
-	smoothing: f32 = 0,
+	pos_smoothing: Vec = {},
+	rot_smoothing: f32 = 0,
 ) -> Beam_Walk {
 	e := ents_get(ents, e)
 	p := ents_get(ents, e.parent)
 	s := ents_stats_get(ents, e.stats)
-	e.pos = p.pos
+	e.pos = p.pos + pos_smoothing
 	e.team = p.team
-	return {step = vec_of(p.rot + smoothing) * s.speed, e = e.id}
+	return {step = vec_of(p.rot + rot_smoothing) * s.speed, e = e.id}
 }
 
 beam_walk_next :: proc(ents: ^Ents, bw: ^Beam_Walk) -> (Vec, bool) {
@@ -1579,11 +1587,10 @@ ents_destroy :: proc(ents: ^Ents) {
 }
 
 ents_clear :: proc(ents: ^Ents) {
+	ents.queued_remove = nil
 	remove_iter := ents_iter(ents)
 	for e in ents_iter_next(&remove_iter) {
-		e.next_free = ents.free
-		ents.free = e
-		ent_reset(e)
+		ent_reset(ents, e)
 	}
 	ents.mapa = {}
 }
@@ -1637,8 +1644,6 @@ ents_remove_next :: proc(ents: ^Ents) -> (res: ^Ent, ok: bool) {
 	ok = res != nil
 	if ok {
 		ents.queued_remove = res.next_queued_remove
-		res.next_free = ents.free
-		ents.free = res
 	}
 	return
 }

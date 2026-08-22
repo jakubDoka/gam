@@ -3,11 +3,13 @@ package pure_client
 import "../../sim"
 import "../../simt/nbio"
 import "../../util/arna"
+import "../../util/bit_arr"
 import "../../util/hot"
 import "../../util/nm"
 import "../../util/rtt"
 import "../../util/sqlite"
 import "base:runtime"
+import "core:sort"
 import "core:sync/chan"
 import "core:thread"
 import "core:time"
@@ -16,9 +18,10 @@ MAX_LASERS :: 512
 ASSET_CACHE :: "asset-cache"
 SELECTED_PROFILE_CID :: 0
 
-Client_Config :: struct {
-	db:       sqlite.Connection,
-	data_dir: string,
+Config :: struct {
+	db:             sqlite.Connection,
+	data_dir:       string,
+	predefined_rtt: Maybe(f32),
 }
 
 Player :: struct {
@@ -39,7 +42,7 @@ get_selected_user :: proc(r: ^Client) -> (profile: Profile) {
 		selected_profile,
 		SELECTED_PROFILE_CID,
 	)
-	if serr != .DONE do sqlite.assert_ok(r.load_input_content, serr)
+	if serr != .DONE do sqlite.assert_ok(s, serr)
 	sqlite.reset(s)
 
 	serr, s = sqlite.query(
@@ -47,7 +50,7 @@ get_selected_user :: proc(r: ^Client) -> (profile: Profile) {
 		profile,
 		nm.str(&selected_profile),
 	)
-	if serr != .DONE do sqlite.assert_ok(r.select_profile_by_name, serr)
+	if serr != .DONE do sqlite.assert_ok(s, serr)
 	sqlite.reset(s)
 
 	return
@@ -84,8 +87,9 @@ Ent_Extra :: struct {
 
 Client :: struct {
 	using hctx:            sim.Handshake,
-	using config:          ^Client_Config,
+	using config:          ^Config,
 	using statements:      Statements,
+	did_shutdown:          bool,
 	has_dirty_config:      bool,
 	upload:                Upload_State,
 	messages:              Chat_Ring,
@@ -164,11 +168,7 @@ client_rewire :: proc(hr: ^hot.Reloader, client: ^Client) {
 }
 
 // NOTE: the actual client can be a superclass so no alocation here
-client_init :: proc(
-	client: ^Client,
-	hr: ^hot.Reloader,
-	config: ^Client_Config,
-) {
+client_init :: proc(client: ^Client, hr: ^hot.Reloader, config: ^Config) {
 	context.allocator = hr.init_allocator
 	append(&hr.rewire_table, ..REWIRE_TABLE[:])
 
@@ -211,15 +211,207 @@ client_init :: proc(
 		client.l,
 	)
 
-	reqs, _ := chan.create_buffered(
-		chan.Chan(Rtt_Worker_Request, .Both),
-		16,
-		context.allocator,
+	if p, ok := config.predefined_rtt.?; ok {
+		client.shared_rtt = p
+	} else {
+		reqs, _ := chan.create_buffered(
+			chan.Chan(Rtt_Worker_Request, .Both),
+			16,
+			context.allocator,
+		)
+		client.rtt_worker = rtt_worker_run(
+			{rt = &client.shared_rtt, reqs = chan.as_recv(reqs)},
+		)
+		client.rtt_worker_reqs = chan.as_send(reqs)
+	}
+
+	return
+}
+
+client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
+	client_shutdown(client)
+
+	delete(client.map_buf)
+	delete(client.players)
+
+	delete(client.ents.stats)
+
+	sqlite.finalize(client.statements)
+	db_res := sqlite.close(client.db)
+	sqlite.assert_ok(client.db, db_res)
+}
+
+client_shutdown :: proc(client: ^Client) {
+	if client.did_shutdown do return
+	client.did_shutdown = true
+
+	sim.tcp_connection_kill(&client.hctx.tcp, client.l)
+	sim.udp_connection_kill(&client.udp, client.l)
+
+	hot.sip.io_remove(client.tick_interval)
+	hot.sip.io_remove(client.ping_interval)
+
+	io_res := hot.sip.io_run(client.l)
+	assert(io_res == nil)
+
+	if client.rtt_worker != nil {
+		chan.close(client.rtt_worker_reqs)
+		thread.join(client.rtt_worker)
+	}
+}
+
+find_spawn_parent :: proc(
+	client: ^Client,
+	selected_team: sim.Ent_Team_ID,
+) -> ^sim.Ent {
+	spawn_parent := sim.NIL_ENT
+	spawn_iter := sim.ents_iter(&client.ents)
+	for e in sim.ents_iter_next(&spawn_iter) {
+		s := sim.ents_stats_get(&client.ents, e.stats)
+		if !s.can_spawn_player do continue
+		if e.team != selected_team do continue
+		spawn_parent = e
+	}
+
+	return spawn_parent
+}
+
+compute_team_params :: proc(
+	client: ^Client,
+) -> (
+	counts: []int,
+	alives: []bool,
+) {
+	counts = make([]int, len(client.ents.teams), context.temp_allocator)
+	for p in client.players {
+		e := sim.ents_get(&client.ents, p.ent)
+		if int(e.team) >= len(counts) do continue
+		counts[e.team] += 1
+	}
+
+	alives = make([]bool, len(client.ents.teams), context.temp_allocator)
+	iter := sim.ents_iter(&client.ents)
+	for e in sim.ents_iter_next(&iter) {
+		s := sim.ents_stats_get(&client.ents, e.stats)
+		if int(e.team) >= len(counts) do continue
+		alives[e.team] |= s.can_spawn_player
+	}
+
+	return
+}
+
+Map_Edit_State :: struct {
+	changed_terrain: bit_arr.Bit_Set,
+	teams:           [dynamic]sim.Ent_Team,
+	width:           int,
+	height:          int,
+}
+
+map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
+	context.allocator = context.temp_allocator
+
+	mapa.width = client.ents.width
+	mapa.height = client.ents.height
+	mapa.sprites = client.ents.sprites
+
+	mapa.tiles = make(
+		[]int,
+		min(
+			sim.map_tile_storage_size(mapa.width, mapa.height),
+			bit_arr.mask_len(ctx.changed_terrain.bit_length),
+		),
 	)
-	client.rtt_worker = rtt_worker_run(
-		{rt = &client.shared_rtt, reqs = chan.as_recv(reqs)},
+
+	for i in 0 ..< len(mapa.tiles) {
+		mapa.tiles[i] =
+			client.ents.mapa.tiles[i] ~ int(ctx.changed_terrain.masks[i])
+	}
+
+	if mapa.width != ctx.width || mapa.height != ctx.height {
+		old_tiles := bit_arr.Bit_Set {
+			raw_data(mapa.tiles),
+			mapa.width * mapa.height,
+		}
+		new_tiles := bit_arr.init(ctx.width * ctx.height)
+		for y in 0 ..< min(mapa.height, ctx.height) {
+			for x in 0 ..< min(mapa.width, ctx.width) {
+				vl := bit_arr.contains_unbounded(old_tiles, y * mapa.width + x)
+				bit_arr.set(new_tiles, y * ctx.width + x, vl)
+			}
+		}
+		mapa.width = ctx.width
+		mapa.height = ctx.height
+		len := sim.map_tile_storage_size(mapa.width, mapa.height)
+		mapa.tiles = new_tiles.masks[:len]
+	}
+
+	ents: [dynamic]sim.Map_Ent
+	append(&ents, sim.Map_Ent{})
+	map_ent_to_ent: [dynamic]^sim.Ent
+	append(&map_ent_to_ent, sim.NIL_ENT)
+
+	ent_iter := sim.ents_iter(&client.ents)
+	o: for e in sim.ents_iter_next(&ent_iter) {
+		s := sim.ents_stats_get(&client.ents, e.stats)
+		if s.kind != .Building do continue
+		pos := sim.map_vec_to_pos(e.pos)
+		if pos.x >= mapa.width do continue
+		if pos.y >= mapa.height do continue
+		append(&map_ent_to_ent, e)
+		append(&ents, sim.Map_Ent{stat = e.stats, team = e.team, pos = pos})
+	}
+
+	Ctx :: struct {
+		map_ents: []sim.Map_Ent,
+		ents:     []^sim.Ent,
+	}
+
+	ctx_len :: proc(id: sort.Interface) -> int {
+		return len(((^Ctx)(id.collection)).ents)
+	}
+
+	ctx_swap :: proc(id: sort.Interface, a: int, b: int) {
+		cx := (^Ctx)(id.collection)
+		cx.ents[a], cx.ents[b] = cx.ents[b], cx.ents[a]
+		cx.map_ents[a], cx.map_ents[b] = cx.map_ents[b], cx.map_ents[a]
+	}
+
+	ctx_less :: proc(id: sort.Interface, a: int, b: int) -> bool {
+		cx := (^Ctx)(id.collection)
+		return transmute(u64)cx.ents[a].pos < transmute(u64)cx.ents[b].pos
+	}
+
+	cx := Ctx {
+		ents     = map_ent_to_ent[:],
+		map_ents = ents[:],
+	}
+
+	sort.sort(
+		sort.Interface {
+			len = ctx_len,
+			swap = ctx_swap,
+			less = ctx_less,
+			collection = &cx,
+		},
 	)
-	client.rtt_worker_reqs = chan.as_send(reqs)
+
+	ent_to_map_ent := make([]int, len(client.ents.slots))
+
+	for e, i in map_ent_to_ent {
+		ent_to_map_ent[e.id.index] = i
+	}
+
+	for &me, i in ents {
+		e := map_ent_to_ent[i]
+		if !sim.ents_is_valid(&client.ents, e.parent) {
+			continue
+		}
+		me.parent = ent_to_map_ent[e.parent.index]
+	}
+
+	mapa.ents = ents[:]
+	mapa.chargers = client.ents.mapa.chargers[:]
+	mapa.teams = ctx.teams[:]
 
 	return
 }

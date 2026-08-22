@@ -28,72 +28,6 @@ PADDING :: 4
 ROW_HEIGHT :: 32
 HEIGHT :: ROW_HEIGHT * 0.66
 
-UI_Statements :: struct {
-	save_input_content:     sqlite.Statement `
-		INSERT INTO text_input VALUES (?, ?)
-			ON CONFLICT (id) DO UPDATE SET content = ?2
-	`,
-	load_input_content:     sqlite.Statement `
-		SELECT content FROM text_input WHERE id = ?
-	`,
-	delete_input_content:   sqlite.Statement `
-		DELETE FROM text_input WHERE id = ?
-	`,
-	save_profile:           sqlite.Statement `
-		INSERT INTO profile VALUES (?, ?)
-	`,
-	load_profiles:          sqlite.Statement `
-		SELECT * FROM profile
-	`,
-	count_profiles:         sqlite.Statement `
-		SELECT COUNT(*) FROM profile
-	`,
-	delete_profile:         sqlite.Statement `
-		DELETE FROM profile WHERE name = ?
-	`,
-	edit_profile:           sqlite.Statement `
-		UPDATE profile SET name = ? WHERE name = ?
-	`,
-	select_profile_by_name: sqlite.Statement `
-		SELECT * FROM profile WHERE name = ?
-	`,
-	select_theme_color:     sqlite.Statement `
-		SELECT hue, saturation, brightness, alpha FROM theme WHERE name = ?
-	`,
-	save_theme_color:       sqlite.Statement `
-		INSERT INTO theme VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (name) DO UPDATE SET
-				hue = ?2, saturation = ?3, brightness = ?4, alpha = ?5
-	`,
-	save_server:            sqlite.Statement `
-		INSERT INTO server VALUES (?, ?, ?)
-			ON CONFLICT (nick_name) DO UPDATE SET
-				conn_string = ?2, pk = ?3
-	`,
-	load_server:            sqlite.Statement `
-		SELECT * FROM server WHERE nick_name = ?
-	`,
-	load_servers:           sqlite.Statement `
-		SELECT * FROM server
-	`,
-	delete_server:          sqlite.Statement `
-		DELETE FROM server WHERE nick_name = ?
-	`,
-	save_asset:             sqlite.Statement `
-		INSERT INTO asset VALUES (?, ?, ?, ?)
-			ON CONFLICT (id, server) DO UPDATE SET name = ?3, type = ?4
-	`,
-	get_server_assets:      sqlite.Statement `
-		SELECT * FROM asset WHERE server = ?
-	`,
-	get_asset:              sqlite.Statement `
-		SELECT * FROM asset WHERE id = ?
-	`,
-	delete_asset:           sqlite.Statement `
-		DELETE FROM Asset WHERE id = ?
-	`,
-}
-
 Theme_Color :: struct #raw_union {
 	using vec:    UI_Color_Picker_State,
 	using values: struct {
@@ -142,7 +76,7 @@ key_or_mouse_from_key :: proc(key: Key) -> Key_Or_Mouse {
 	case Mod_And_Key:
 		return k.key
 	case:
-		panic("wut")
+		panic("unreachable")
 	}
 }
 
@@ -343,16 +277,20 @@ UI_Profiles :: struct {
 }
 
 UI_Content_Editor :: struct {
-	expanded:         bool,
-	selected:         sim.Ent_Stats_ID,
-	search:           strings.Builder,
-	prop_search:      strings.Builder,
-	prev_scroll:      f32,
-	stat_edit_state:  sim.Ent_Stats,
-	stat_editor:      Stat_Editor_State,
-	edit_name:        strings.Builder,
-	create_stat:      bool,
-	create_stat_name: strings.Builder,
+	current_stats_name: nm.Name,
+	expanded:           bool,
+	selected:           sim.Ent_Stats_ID,
+	search:             strings.Builder,
+	prop_search:        strings.Builder,
+	prev_scroll:        f32,
+	stat_edit_state:    sim.Ent_Stats,
+	stat_editor:        Stat_Editor_State,
+	edit_name:          strings.Builder,
+	create_stats_name:  strings.Builder,
+	create_stat:        bool,
+	switch_stats:       bool,
+	creating_stats:     bool,
+	create_stat_name:   strings.Builder,
 }
 
 Stat_Editor_State :: struct {
@@ -1315,7 +1253,12 @@ ui_game_hud :: proc(client: ^Client) {
 				) {
 					pure.tcp_send(
 						client,
-						sim.Client_Map_Edit{mapa = ui_map_export(client)},
+						sim.Client_Map_Edit {
+							mapa = pure.map_export(
+								client,
+								&client.map_editing,
+							),
+						},
 					)
 				}
 			}
@@ -1545,20 +1488,7 @@ ui_ship_selection :: proc(client: ^Client) {
 			{width = orui.grow(), align_main = .Center, gap = PADDING},
 		)
 
-		counts := make([]int, len(client.ents.teams), context.temp_allocator)
-		for p in client.players {
-			e := sim.ents_get(&client.ents, p.ent)
-			if int(e.team) >= len(counts) do continue
-			counts[e.team] += 1
-		}
-
-		alives := make([]bool, len(client.ents.teams), context.temp_allocator)
-		iter := sim.ents_iter(&client.ents)
-		for e in sim.ents_iter_next(&iter) {
-			s := sim.ents_stats_get(&client.ents, e.stats)
-			if int(e.team) >= len(counts) do continue
-			alives[e.team] |= s.can_spawn_player
-		}
+		counts, alives := pure.compute_team_params(client)
 
 		for t, i in client.ents.teams[team_prefix:] {
 			tid := sim.Ent_Team_ID(team_prefix + i)
@@ -1588,14 +1518,7 @@ ui_ship_selection :: proc(client: ^Client) {
 			{width = orui.grow(), align_main = .Center, gap = PADDING},
 		)
 
-		spawn_parent := sim.NIL_ENT
-		spawn_iter := sim.ents_iter(&client.ents)
-		for e in sim.ents_iter_next(&spawn_iter) {
-			s := sim.ents_stats_get(&client.ents, e.stats)
-			if !s.can_spawn_player do continue
-			if e.team != client.selected_team do continue
-			spawn_parent = e
-		}
+		spawn_parent := pure.find_spawn_parent(client, client.selected_team)
 
 		for &s, i in client.ents.stats {
 			if !s.playable do continue
@@ -1886,6 +1809,7 @@ ui_build :: proc(client: ^Client) {
 
 	for &ev in client.events {
 		if ev.bind != .Nil {
+			fmt.println(ev)
 			append(
 				&client.captured_key_binds,
 				key_or_mouse_from_key(BIND_TO_KEY[ev.bind]),
@@ -1902,7 +1826,6 @@ ui_build :: proc(client: ^Client) {
 		     .Open_Map_Editor,
 		     .Apply_Content_Changes,
 		     .Focus:
-			assert(ev.bind != .Nil)
 			slot := &winning_kb_events[ev.bind]
 			if slot.priority < ev.priority {
 				slot^ = ev

@@ -124,3 +124,98 @@ iter_sanity :: proc(t: ^testing.T) {
 	_, ok := iter_next(&it)
 	testing.expect(t, !ok)
 }
+
+DL_List :: struct {
+	first: ^DL_Node,
+	last:  ^DL_Node,
+}
+
+DL_Node :: struct {
+	next: ^DL_Node,
+	prev: ^DL_Node `fmt:"-"`,
+}
+
+dl_push :: proc(list: ^DL_List, node: ^DL_Node) {
+	if list^ == {} {
+		list.first = auto_cast list
+		list.last = auto_cast list
+	}
+
+	node.prev = (^DL_Node)(list)
+	node.next = list.first
+	list.first.prev = node
+	list.first = node
+}
+
+dl_remove :: proc(node: ^DL_Node) {
+	if node^ == {} do return
+
+	node.next.prev = node.prev
+	node.prev.next = node.next
+
+	if node.prev == node.next {
+		node.prev^ = {}
+	}
+
+	node^ = {}
+}
+
+DL_Iter :: struct {
+	cursor: ^DL_Node,
+	last:   ^DL_Node,
+}
+
+dl_iter :: proc(list: ^DL_List) -> DL_Iter {
+	if list.first == nil do return {}
+	return {list.first, auto_cast list}
+}
+
+dl_iter_next :: proc(
+	iter: ^DL_Iter,
+	$N: typeid,
+	node_offset: uintptr,
+) -> (
+	^N,
+	bool,
+) {
+	if iter.cursor == iter.last do return nil, false
+
+	vl := (^N)(uintptr(iter.cursor) - node_offset)
+	iter.cursor = iter.cursor.next
+
+	return vl, true
+}
+
+@(test)
+dl_sanity :: proc(t: ^testing.T) {
+	nodes: [3]DL_Node
+	list: DL_List
+
+	for &n in nodes {
+		dl_push(&list, &n)
+	}
+
+	for &n in nodes {
+		dl_remove(&n)
+	}
+
+	testing.expect_value(t, list.first, nil)
+
+	for &n in nodes {
+		dl_push(&list, &n)
+	}
+
+	dl_remove(&nodes[1])
+
+	iter := dl_iter(&list)
+
+	n, ok := dl_iter_next(&iter, DL_Node, 0)
+	testing.expect(t, ok)
+	testing.expect_value(t, n, &nodes[2])
+
+	n, ok = dl_iter_next(&iter, DL_Node, 0)
+	testing.expect(t, ok)
+	testing.expect_value(t, n, &nodes[0])
+
+	testing.expect_value(t, iter.cursor, iter.last)
+}

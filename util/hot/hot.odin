@@ -1,6 +1,7 @@
 package hot_reload
 
 import "../../simt/nbio"
+import "base:intrinsics"
 import "base:runtime"
 import "core:debug/trace"
 import "core:dynlib"
@@ -39,15 +40,25 @@ Static_Init_Params :: struct {
 	trace:       ^trace.Context,
 }
 
-Api :: struct {
+Api :: struct($T: typeid) {
 	dlib:          dynlib.Library,
 	memory_size:   proc() -> int,
 	static_init:   proc(_: Static_Init_Params),
 	static_deinit: proc(),
-	init:          proc(_: ^Reloader, config: rawptr) -> rawptr,
-	update:        proc(_: ^Reloader, state: rawptr),
-	rewire:        proc(_: ^Reloader, state: rawptr),
-	deinit:        proc(_: ^Reloader, state: rawptr),
+	init:          proc(
+		_: ^Reloader,
+		config: (intrinsics.type_field_type(
+				T,
+				"config",
+			) when intrinsics.type_has_field(T, "config") else rawptr),
+	) -> T,
+	update:        proc(_: ^Reloader, state: T),
+	rewire:        proc(_: ^Reloader, state: T),
+	deinit:        proc(_: ^Reloader, state: T),
+}
+
+decl_api :: proc(api: Api($T)) -> Api(rawptr) {
+	return transmute(Api(rawptr))api
 }
 
 Options :: struct {
@@ -69,7 +80,7 @@ Reloader :: struct {
 	dyn_defs:          []Define,
 	state:             rawptr,
 	init_allocator:    runtime.Allocator,
-	using lib:         Api,
+	using lib:         Api(rawptr),
 	rewire_table:      Rewire_Table,
 	retired_libraries: [dynamic; 512]dynlib.Library,
 	max_mtime:         time.Time,
@@ -103,6 +114,7 @@ Rewireing :: struct {
 }
 
 load_fn :: proc(fn: any) -> rawptr {
+
 	assert(reflect.is_procedure(type_info_of(fn.id)))
 	return (^rawptr)(fn.data)^
 }
@@ -169,7 +181,7 @@ interrupted :: proc() -> bool {
 }
 
 @(require_results)
-reload :: proc(
+reload_impl :: proc(
 	hr: ^Reloader,
 	options: Options,
 	loc := #caller_location,
@@ -179,21 +191,16 @@ reload :: proc(
 	if !hr.inited {
 		hr.inited = true
 
-		posix.signal(.SIGINT, on_sigint)
-		on_sigint :: proc "c" (sig: posix.Signal) {
-			if sync.atomic_load(sip.interrupted) {
-				posix.exit(1)
+		when ODIN_OS == .Linux {
+			posix.signal(.SIGINT, on_sigint)
+			on_sigint :: proc "c" (sig: posix.Signal) {
+				if sync.atomic_load(sip.interrupted) {
+					posix.exit(1)
+				}
+
+				sync.atomic_store(sip.interrupted, true)
 			}
-
-			sync.atomic_store(sip.interrupted, true)
 		}
-	}
-
-	if hr.reload != nil {
-		prev := hr.reload
-		defer hr.reload = prev
-		hr.reload = nil
-		return prev(hr, options, loc)
 	}
 
 	if !HOT_RELOAD {
@@ -209,7 +216,7 @@ reload :: proc(
 
 	if !should_reload do return
 
-	new_lib: Api
+	new_lib: Api(rawptr)
 
 	{context.allocator = context.temp_allocator
 		log.debug("hot reloading")

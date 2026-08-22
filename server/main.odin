@@ -3,15 +3,17 @@ package server
 import "../sim"
 import "../simt/nbio"
 import "../util/arna"
+import "../util/bit_arr"
 import "../util/hot"
 import "../util/nm"
 import "../util/rtt"
 import "../util/sqlite"
 import "base:runtime"
 import "core:container/lru"
-import "core:crypto"
+import "core:fmt"
 import "core:io"
 import "core:log"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:reflect"
@@ -81,26 +83,27 @@ DEFAULT_MAPS := [?]Default_Map {
 }
 
 Connection :: struct {
-	using hctx:    sim.Handshake,
-	tcp_endpoint:  nbio.Endpoint,
-	udp_endpoint:  nbio.Endpoint,
-	last_packet:   time.Time,
-	input:         sim.Input_State,
-	ent:           sim.Ent_ID,
-	rtt:           rtt.Estimator,
-	using player:  sim.Player,
-	next_free:     ^Connection,
-	resolving_udp: sim.DL_Node,
-	listener:      sim.DL_Node,
-	in_game:       sim.DL_Node,
-	game:          ^Game,
-	last_info:     sim.Server_Info,
-	list_stmt:     sqlite.Query(sim.Asset),
+	using hctx:     sim.Handshake,
+	observed_ticks: int,
+	tcp_endpoint:   nbio.Endpoint,
+	udp_endpoint:   nbio.Endpoint,
+	last_packet:    time.Time,
+	input:          sim.Input_State,
+	ent:            sim.Ent_ID,
+	rtt:            rtt.Estimator,
+	using player:   sim.Player,
+	next_free:      ^Connection,
+	resolving_udp:  bit_arr.DL_Node,
+	listener:       bit_arr.DL_Node,
+	in_game:        bit_arr.DL_Node,
+	game:           ^Game,
+	last_info:      sim.Server_Info,
+	list_stmt:      sqlite.Query(sim.Asset),
 }
 
 Game :: struct {
 	using server:         ^Server,
-	players:              sim.DL_List,
+	players:              bit_arr.DL_List,
 	ents:                 sim.Ents,
 	net_id:               sim.Ent_Net_ID,
 	map_index:            int,
@@ -108,24 +111,21 @@ Game :: struct {
 	last_cold_state_hash: sim.Hash,
 	last_stats_hash:      sim.Hash,
 	clean_stats_hash:     sim.Hash,
+	last_map_hash:        sim.Hash,
 }
 
-player_next :: proc(cursor: ^^sim.DL_Node) -> (^Connection, bool) {
-	return sim.dl_iter_next(cursor, Connection, offset_of(Connection, in_game))
+player_next :: proc(cursor: ^bit_arr.DL_Iter) -> (^Connection, bool) {
+	return bit_arr.dl_iter_next(
+		cursor,
+		Connection,
+		offset_of(Connection, in_game),
+	)
 }
 
 game_add_player :: proc(game: ^Game, conn: ^Connection) {
 	conn.game = game
 
-	sim.dl_push(&game.players, &conn.in_game)
-
-	server_tcp_send(game, conn, sim.Server_Map{game.map_buf})
-	stats := game.ents.stats[:]
-	server_tcp_send(
-		game,
-		conn,
-		sim.Server_Stats{stats = sim.custom_encoding_stats(&stats)},
-	)
+	bit_arr.dl_push(&game.players, &conn.in_game)
 }
 
 game_tick :: proc(game: ^Game) {
@@ -138,7 +138,7 @@ game_tick :: proc(game: ^Game) {
 		game := (^Game)(uintptr(ents) - offset_of(Game, ents))
 		server := game.server
 
-		cursor := game.players.first
+		cursor := bit_arr.dl_iter(&game.players)
 		for p in player_next(&cursor) {
 			server_tcp_send(
 				server,
@@ -154,17 +154,24 @@ game_tick :: proc(game: ^Game) {
 		}
 	}
 
-	cursor := game.players.first
+	cursor := bit_arr.dl_iter(&game.players)
 	for p in player_next(&cursor) {
 		rtt := rtt.smoothed(&p.rtt)
 		sim.ents_integrate_input(&game.ents, p.ent, rtt, &p.input)
+		p.observed_ticks += 1
 	}
 
 	sim.ents_update(&game.ents)
 
+	// NOTE: we do a immediate mode synchronization -> check if hash of a
+	// packet changed and send it. Nice property of this is that we dont need
+	// to remember to sync on mutation although we trade extra computation.
+	//
+	// Its to be evaluated if that is an actuall performance problem.
 	{
 		stats := game.ents.stats[:]
 		packet := sim.Server_Stats {
+			name  = game.ents.stats_name,
 			stats = sim.custom_encoding_stats(&stats),
 		}
 
@@ -178,7 +185,7 @@ game_tick :: proc(game: ^Game) {
 	{
 		players := make([dynamic]sim.Player, context.temp_allocator)
 
-		cursor := game.players.first
+		cursor := bit_arr.dl_iter(&game.players)
 		for c in player_next(&cursor) {
 			e := sim.ents_get(&game.ents, c.ent)
 			c.player.net_ent = e.net_id
@@ -198,6 +205,12 @@ game_tick :: proc(game: ^Game) {
 		)
 	}
 
+	{
+		packet := sim.Server_Map{game.map_buf}
+
+		ensure_up_to_date_hash(game, &game.last_map_hash, packet, "map")
+	}
+
 	ensure_up_to_date_hash :: proc(
 		game: ^Game,
 		hash: ^sim.Hash,
@@ -209,13 +222,13 @@ game_tick :: proc(game: ^Game) {
 		new_hash: sim.Hash
 		sim.hash(buf, &new_hash)
 
-		if new_hash != hash^ {
-			hash^ = new_hash
-			cursor := game.players.first
-			for c in player_next(&cursor) {
+		cursor := bit_arr.dl_iter(&game.players)
+		for c in player_next(&cursor) {
+			if new_hash != hash^ || c.observed_ticks == 1 {
 				sim.tcp_connection_send(&c.hctx, buf, game.l)
 			}
 		}
+		hash^ = new_hash
 	}
 }
 
@@ -277,8 +290,8 @@ Server_Statements :: struct {
 	save_asset:          sqlite.Statement `
 		INSERT INTO asset (id, name, hash, size, type, visited)
 		VALUES (?, ?, ?, ?, ?, 1)
-		ON CONFLICT (name) DO UPDATE
-			SET id = ?1, hash = ?3, size = ?4, type = ?5, visited = 1
+		ON CONFLICT (name, type) DO UPDATE
+			SET id = ?1, hash = ?3, size = ?4, visited = 1
 		ON CONFLICT (hash) DO UPDATE SET name = ?2, visited = 1
 	`,
 	count_assets:        sqlite.Statement `
@@ -319,9 +332,10 @@ Ping_Entry :: struct {
 	conn:    ^Connection,
 }
 
-Server_Config :: struct {
-	cwd: string,
-	db:  sqlite.Connection,
+Config :: struct {
+	endpoint: nbio.Endpoint,
+	cwd:      string,
+	db:       sqlite.Connection,
 }
 
 Server :: struct {
@@ -337,8 +351,8 @@ Server :: struct {
 	ping_interval:           ^nbio.Operation,
 	tick_interval:           ^nbio.Operation,
 	last_udp_conn:           ^Connection,
-	resolving_udp:           sim.DL_List,
-	listeners:               sim.DL_List,
+	resolving_udp:           bit_arr.DL_List,
+	listeners:               bit_arr.DL_List,
 	lobby:                   Game,
 	next_frame:              time.Time,
 	next_peer_id:            u32,
@@ -353,7 +367,7 @@ Server :: struct {
 	hr:                      ^hot.Reloader,
 	did_shutdown:            bool,
 	last_ping:               time.Time,
-	using config:            ^Server_Config,
+	using config:            ^Config,
 }
 
 server_add_violation :: proc(server: ^Server, ip: Saved_IP) {
@@ -388,14 +402,14 @@ server_handle_packet :: proc(
 	packet := sim.unmarshall_as(sim.Client_Packet, packet_bytes) or_return
 
 	reason := ""
-	defer if !ok do log.warn("invalid packet from client (", reason, "):", packet)
+	defer if !ok do log.warn("invalid packet from client (", reason, ")")
 
 	from := (^Connection)(from)
 	game := from.game
 
 	assert(game != nil)
 
-	from.last_packet = time.now()
+	from.last_packet = nbio.now(server.l)
 
 	// TODO: as of right now custom client can fuck us
 	switch &p in packet {
@@ -408,7 +422,7 @@ server_handle_packet :: proc(
 				[dynamic]sim.Client_Input_Keys,
 				context.temp_allocator,
 			)
-			cursor := game.players.first
+			cursor := bit_arr.dl_iter(&game.players)
 			for p in player_next(&cursor) {
 				append(&players, p.input.keys)
 			}
@@ -446,10 +460,31 @@ server_handle_packet :: proc(
 			team := p.team
 			if parent.team != 0 do team = parent.team
 
+			reason = "building outside bind range"
+			ps := sim.ents_stats_get(&game.ents, parent.stats)
+			if parent != sim.NIL_ENT {
+				if linalg.distance(p.pos, parent.pos) > ps.bind_range {
+					return
+				}
+			}
+
+			reason = "building over something elese"
+			tile := sim.map_vec_to_pos(p.pos)
+			for it := sim.ents_iter(&game.ents); e in sim.ents_iter_next(&it) {
+				s := sim.ents_stats_get(&game.ents, e.stats)
+				if tile == sim.map_vec_to_pos(e.pos) && s.kind == .Building {
+					return
+				}
+			}
+
+			reason = "placing into solid terrain"
+			if sim.map_tile_is_solid(&game.ents, tile) do return
+
 			e := sim.ents_add(&game.ents, &game.net_id)
+			if e == sim.NIL_ENT do break
 			s := sim.ents_stats_get(&game.ents, p.id)
 			e.energy_consumed = s.energy - 0.1
-			e.pos = p.pos
+			e.pos = sim.map_pos_to_vec(tile)
 			e.stats = p.id
 			e.parent = parent.id
 			e.team = team
@@ -470,9 +505,12 @@ server_handle_packet :: proc(
 				e.parent_net_id = ep.net_id
 			}
 		case .Spawn:
+			reason = "already spawned"
+			if sim.ents_is_valid(&game.ents, from.ent) do return
+
 			counts := make([]int, len(game.ents.teams), context.temp_allocator)
 
-			cursor := game.players.first
+			cursor := bit_arr.dl_iter(&game.players)
 			for p in player_next(&cursor) {
 				e := sim.ents_get(&game.ents, p.ent)
 				counts[e.team] += 1
@@ -480,6 +518,7 @@ server_handle_packet :: proc(
 
 			c := game_ent_by_net_id(game, p.parent)
 
+			reason = "invalid team to spawn"
 			if !sim.team_spawnable(c.team, counts) do return
 
 			e := sim.ents_add(&game.ents, &game.net_id)
@@ -597,9 +636,16 @@ server_handle_packet :: proc(
 
 			reason = ""
 		case .Save:
+			group_asset := sim.Asset {
+				name = game.ents.stats_name,
+				type = .Stats,
+			}
+
+			path := asset_path(&group_asset)
+
 			edited_file, edited_file_err := nbio.open(
 				server.l,
-				CONFIG_PATH_EDITED,
+				path,
 				{.Create, .Trunc, .Write},
 			)
 			log.assertf(
@@ -633,6 +679,54 @@ server_handle_packet :: proc(
 			server_bundle_refresh(server)
 
 			game.clean_stats_hash = game.last_stats_hash
+		case .Switch:
+			name := nm.str(&p.switch_to)
+
+			reason = "invalid asset name to switch to"
+			if !sim.validate_asset_name(name) do return
+
+			asset := sim.Asset {
+				name = p.switch_to,
+				type = .Stats,
+			}
+			path := asset_path(&asset)
+
+			reason = "nonexistent asset name to switch to"
+			content, err := nbio.read_entire_file(
+				server.l,
+				path,
+				context.temp_allocator,
+			)
+			if err != nil {
+				log.warn("failed to load stat group to switch to:", err)
+				return
+			}
+
+		case .Create_Group:
+			name := nm.str(&p.create_as)
+
+			reason = "invalid asset name to create"
+			if !sim.validate_asset_name(name) do return
+
+			asset := sim.Asset {
+				name = p.create_as,
+				type = .Stats,
+			}
+			sim.hash({}, &asset.hash)
+
+			path := asset_path(&asset)
+
+			err := nbio.make_directory_all(nbio.dir(path))
+			fmt.assertf(
+				err == nil || err == .Exist,
+				"failed to create parents of stat group: %v",
+				err,
+			)
+
+			err = nbio.write_entire_file(server.l, path, {})
+			assert(err == nil)
+
+			save_asset(server, &asset)
 		}
 	case sim.Client_Map_Edit:
 		map_path := pick_map(
@@ -645,6 +739,7 @@ server_handle_packet :: proc(
 
 		okm := sim.marshall(p.mapa, &me)
 		assert(okm)
+		reason = "map with overlapping regions"
 		if sim.encoded_len(&me) > len(packet_bytes) {
 			log.warn(
 				"map sent from player has overlapping regions:",
@@ -656,18 +751,22 @@ server_handle_packet :: proc(
 		}
 
 		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
+		defer if !ok do delete(buf)
 		me = {buf}
-		ok := sim.marshall(p.mapa, &me)
-		assert(ok)
+		oka := sim.marshall(p.mapa, &me)
+		assert(oka)
+
+		okam := game_set_map(game, buf)
+		reason = "unloadable map"
+		if !okam do return
 
 		err := nbio.write_entire_file(server.l, map_path, buf)
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
-		game_set_map(game, buf)
-
 		server_bundle_refresh(server)
+		ok = true
 	case sim.Broadcast_Packet:
-		cursor := game.players.first
+		cursor := bit_arr.dl_iter(&game.players)
 		for player in player_next(&cursor) {
 			server_tcp_send(server, player, p)
 		}
@@ -752,12 +851,12 @@ game_load_next_map :: proc(game: ^Game) {
 	)
 	assert(map_bytes_err == nil)
 
-	game_set_map(game, map_bytes)
+	ok := game_set_map(game, map_bytes)
+	assert(ok)
 }
 
-game_set_map :: proc(game: ^Game, buf: []u8) {
-	mapa, ok := sim.map_load(buf)
-	assert(ok)
+game_set_map :: proc(game: ^Game, buf: []u8) -> bool {
+	mapa := sim.map_load(buf) or_return
 
 	delete(game.map_buf)
 	game.map_buf = buf
@@ -776,6 +875,7 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 
 	for ent, i in game.ents.mapa.ents[prefix:] {
 		e := sim.ents_add(&game.ents, &game.net_id)
+		if e == sim.NIL_ENT do break
 		e.pos = sim.map_pos_to_vec(ent.pos)
 		e.stats = ent.stat
 		e.team = ent.team
@@ -788,10 +888,7 @@ game_set_map :: proc(game: ^Game, buf: []u8) {
 		e.parent = p.id
 	}
 
-	cursor := game.players.first
-	for c in player_next(&cursor) {
-		server_tcp_send(game, c, sim.Server_Map{buf})
-	}
+	return true
 }
 
 server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
@@ -811,12 +908,15 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 
 	ip := ip_to_integers(op.accept.client_endpoint.address)
 	if server_is_banned(server, ip) {
-		log.debug("ip is banned:", op.accept)
+		log.warn("ip is banned:", op.accept)
 		return
 	}
 
 	if server.free_conns == nil {
 		log.warn("connection capacity reached, dropping")
+		for conn in server.conn_buf {
+			fmt.print(conn.id, conn.rc, conn.sock, "")
+		}
 		return
 	}
 
@@ -828,12 +928,14 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 	conn^ = {}
 	conn.l = op.l
 	conn.tcp_endpoint = op.accept.client_endpoint
-	conn.last_packet = time.now()
+	conn.last_packet = nbio.now(server.l)
 	conn.hctx.sock = op.accept.client
 	conn.hctx.host.asoc_data = server
 	conn.hctx.cleanup = server_on_tcp_kill
 	conn.hctx.on_boot = on_boot
 	conn.hctx.get_pk = get_pk
+
+	nbio.set_lable(server.l, conn.sock, "init")
 
 	conn_id := int(
 		(uintptr(conn) - uintptr(raw_data(server.conn_buf))) /
@@ -906,6 +1008,12 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 
 		h := handlers[request.kind]
 		if h != nil {
+			nbio.set_lable(
+				server.l,
+				conn.sock,
+				reflect.enum_name_from_value(request.kind) or_else panic(""),
+			)
+
 			return h(server, conn, request)
 		}
 
@@ -921,7 +1029,7 @@ stream_server_info :: proc(
 	log.debug("registering info listener")
 
 	sim.tcp_connection_boot(&conn.hctx, 0, 512, l = server.l)
-	sim.dl_push(&server.listeners, &conn.listener)
+	bit_arr.dl_push(&server.listeners, &conn.listener)
 
 	return true
 }
@@ -945,7 +1053,7 @@ boot_player :: proc(
 	conn.input.next_net_id.peer = server.next_peer_id
 	conn.pk = conn.hctx.ch.id
 
-	sim.dl_push(&server.resolving_udp, &conn.resolving_udp)
+	bit_arr.dl_push(&server.resolving_udp, &conn.resolving_udp)
 
 	game_add_player(&server.lobby, conn)
 
@@ -961,7 +1069,7 @@ recv_asset :: proc(
 	conn.cleanup = on_kill
 
 	sim.fetch_asset(conn)
-	conn->on_boot()
+	return conn->on_boot()
 
 	asset_path_ :: proc(conn: ^Connection) -> string {
 		return asset_path(&conn.fetch.asset_meta)
@@ -971,22 +1079,31 @@ recv_asset :: proc(
 		server := (^Server)(conn.host.asoc_data)
 
 		if conn.last_error == "" {
-			curr := conn.fetch.asset_meta
-			_, sares := sqlite.exec(
-				server.save_asset,
-				sim.hash_prefix(&curr.hash),
-				nm.str(&curr.name),
-				curr.hash,
-				curr.size,
-				curr.type,
-			)
-			sqlite.assert_ok(server.save_asset, sares)
+			save_asset(server, &conn.fetch.asset_meta)
 		}
 
 		server_on_tcp_kill(conn)
 	}
+}
 
-	return true
+save_asset :: proc(server: ^Server, asset: ^sim.Asset, broadcast := true) {
+	_, sares := sqlite.exec(
+		server.save_asset,
+		sim.hash_prefix(&asset.hash),
+		nm.str(&asset.name),
+		asset.hash,
+		asset.size,
+		asset.type,
+	)
+	sqlite.assert_ok(server.save_asset, sares)
+
+	if broadcast {
+		for _, conn in server.connections {
+			if .Edit_Content in conn.permissions {
+				server_tcp_send(server, conn, asset^)
+			}
+		}
+	}
 }
 
 list_assets :: proc(
@@ -1085,9 +1202,9 @@ server_on_tcp_kill :: proc(conn: ^Connection) {
 	conn.next_free = server.free_conns
 	server.free_conns = conn
 
-	sim.dl_remove(&conn.resolving_udp)
-	sim.dl_remove(&conn.listener)
-	sim.dl_remove(&conn.in_game)
+	bit_arr.dl_remove(&conn.resolving_udp)
+	bit_arr.dl_remove(&conn.listener)
+	bit_arr.dl_remove(&conn.in_game)
 
 	delete_key(&server.connections, conn.udp_endpoint)
 	delete_key(&server.connections, conn.tcp_endpoint)
@@ -1112,7 +1229,7 @@ server_on_tcp_packet :: proc(
 
 server_schedule_tick :: proc(server: ^Server) {
 	server.next_frame = time.time_add(server.next_frame, FRAME_TARGET)
-	diff := time.diff(time.now(), server.next_frame)
+	diff := time.diff(nbio.now(server.l), server.next_frame)
 	server.next_frame = time.time_add(server.next_frame, -min(diff, 0))
 	server.tick_interval = nbio.timeout_poly(
 		max(diff, 1),
@@ -1122,9 +1239,9 @@ server_schedule_tick :: proc(server: ^Server) {
 	)
 
 	server.frames_since_tps_sample += 1
-	if time.since(server.frame_sample_time) > time.Second {
+	if nbio.since(server.l, server.frame_sample_time) > time.Second {
 		server.tps = server.frames_since_tps_sample
-		server.frame_sample_time = time.now()
+		server.frame_sample_time = nbio.now(server.l)
 		server.frames_since_tps_sample = 0
 	}
 }
@@ -1134,7 +1251,7 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 
 	interrupted := hot.interrupted()
 
-	res := hot.reload(server.hr, {skip_full_reload = true})
+	res := server.hr->reload({skip_full_reload = true})
 
 	if interrupted || res == .Full_Reboot {
 		server_shutdown(server)
@@ -1155,9 +1272,11 @@ server_bundle_refresh :: proc(server: ^Server) {
 	Ctx :: struct {
 		server: ^Server,
 		type:   sim.Asset_Type,
+		allc:   runtime.Allocator,
 	}
 	ctx: Ctx
 	ctx.server = server
+	ctx.allc = context.allocator
 	context.user_ptr = &ctx
 
 	ctx.type = .Map
@@ -1170,6 +1289,8 @@ server_bundle_refresh :: proc(server: ^Server) {
 		sim.SPRITE_EXT,
 		visit_file,
 	)
+	ctx.type = .Stats
+	visit_files(server.l, server.cwd, sim.STATS_DIR, sim.STATS_EXT, visit_file)
 
 	visit_file :: proc(name: string, content: []u8) {
 		ctx := (^Ctx)(context.user_ptr)
@@ -1181,15 +1302,8 @@ server_bundle_refresh :: proc(server: ^Server) {
 		asset.type = ctx.type
 		delete(content)
 
-		_, sares := sqlite.exec(
-			ctx.server.save_asset,
-			sim.hash_prefix(&asset.hash),
-			nm.str(&asset.name),
-			asset.hash,
-			asset.size,
-			asset.type,
-		)
-		sqlite.assert_ok(ctx.server.save_asset, sares)
+		context.allocator = ctx.allc
+		save_asset(ctx.server, &asset, broadcast = false)
 	}
 
 	_, psres := sqlite.exec(server.prune_assets)
@@ -1198,7 +1312,9 @@ server_bundle_refresh :: proc(server: ^Server) {
 	config: []u8
 	config_err: nbio.Error
 
-	for path in ([]string{CONFIG_PATH_EDITED, CONFIG_PATH}) {
+	paths := []string{CONFIG_PATH_EDITED, CONFIG_PATH}
+
+	for path in paths {
 		config, config_err = nbio.read_entire_file(
 			server.l,
 			path,
@@ -1206,14 +1322,35 @@ server_bundle_refresh :: proc(server: ^Server) {
 		)
 		if config_err == nil do break
 	}
-	assert(config_err == nil)
+	fmt.assertf(
+		config_err == nil,
+		"Failed to load config from %v: %v",
+		paths,
+		config_err,
+	)
 
+	stats := load_stats(server, string(config))
+
+	{
+		// TODO(low): this should be extracted out
+		// low: idk
+		game := &server.lobby
+
+		delete(game.ents.stats)
+		game.ents.stats_name = nm.from_str("default")
+		game.ents.stats = stats
+	}
+}
+
+load_stats :: proc(server: ^Server, config: string) -> [dynamic]sim.Ent_Stats {
 	loader: sim.Asset_Loader
 	loader.asoc_data = server
 	loader.path = CONFIG_PATH
-	loader.source = auto_cast config
+	loader.source = config
 	loader.load_sprite = load_sprite
 	sim.load_config(&loader)
+
+	return loader.stats
 
 	load_sprite :: proc(
 		loader: ^sim.Asset_Loader,
@@ -1237,14 +1374,6 @@ server_bundle_refresh :: proc(server: ^Server) {
 		return asset.id, ""
 	}
 
-	{
-		// TODO(low): this should be extracted out
-		// low: idk
-		game := &server.lobby
-
-		delete(game.ents.stats)
-		game.ents.stats = loader.stats
-	}
 }
 
 visit_files :: proc(
@@ -1263,7 +1392,7 @@ visit_files :: proc(
 
 	// TODO(low): make this recursive
 	fifo, fifo_err := nbio.read_all_directory_by_path(l, dir)
-	log.assertf(fifo_err == nil, "failed to read fir entries: %v", fifo_err)
+	log.assertf(fifo_err == nil, "failed to read dir entries: %v", fifo_err)
 
 	for entry in fifo {
 		if entry.type != .Regular do continue
@@ -1308,12 +1437,7 @@ server_static_deinit :: proc() {
 }
 
 @(export)
-server_init :: proc(
-	hr: ^hot.Reloader,
-	config: ^Server_Config,
-) -> (
-	server: ^Server,
-) {
+server_init :: proc(hr: ^hot.Reloader, config: ^Config) -> (server: ^Server) {
 	server = server_init_without_game(hr, config)
 
 	init_world: {
@@ -1328,7 +1452,7 @@ server_init :: proc(
 
 server_init_without_game :: proc(
 	hr: ^hot.Reloader,
-	config: ^Server_Config,
+	config: ^Config,
 ) -> (
 	server: ^Server,
 ) {
@@ -1401,8 +1525,6 @@ server_init_without_game :: proc(
 			copy(server.pk[:], bytes)
 		}
 
-		server_bundle_refresh(server)
-
 		if _, err := nbio.stat(server.l, sim.MAP_DIR, context.temp_allocator);
 		   err != nil {
 			create_dir_err := nbio.make_directory_all(sim.MAP_DIR)
@@ -1449,6 +1571,8 @@ server_init_without_game :: proc(
 		}
 	}
 
+	server_bundle_refresh(server)
+
 	init_net: {
 		udp_sock, create_err := nbio.create_udp_socket(.IP4, server.l)
 		log.assertf(
@@ -1457,11 +1581,7 @@ server_init_without_game :: proc(
 			create_err,
 		)
 
-		bind_err := nbio.bind(
-			server.l,
-			udp_sock,
-			{nbio.IP4_Any, sim.GAME_PORT},
-		)
+		bind_err := nbio.bind(server.l, udp_sock, server.endpoint)
 		log.assertf(bind_err == nil, "failed to bind udp socket: %v", bind_err)
 
 		server.udp.sock = udp_sock
@@ -1475,10 +1595,7 @@ server_init_without_game :: proc(
 
 		sim.udp_connection_boot(&server.udp, true, server.l)
 
-		tcp_sock, listen_err := nbio.listen_tcp(
-			{nbio.IP4_Any, sim.GAME_PORT},
-			l = server.l,
-		)
+		tcp_sock, listen_err := nbio.listen_tcp(server.endpoint, l = server.l)
 		log.assertf(
 			listen_err == nil,
 			"failed to listen tcp socket: %v",
@@ -1572,11 +1689,11 @@ server_on_udp_ping :: proc(
 
 	switch slot.stage {
 	case .Queued:
-		slot.arrival = time.now()
+		slot.arrival = nbio.now(server.l)
 		slot.stage = .Sent
 		return
 	case .Sent:
-		rtts := time.since(slot.arrival) + sim.LATENCY
+		rtts := nbio.since(server.l, slot.arrival) + sim.LATENCY
 		rtt.update(&slot.conn.rtt, rtts)
 		slot.stage = .Recvd
 		ok = false
@@ -1614,9 +1731,9 @@ server_decrypt_packet :: proc(
 
 	server.last_udp_conn = server.connections[endpoint]
 	if server.last_udp_conn == nil {
-
-		cursor := server.resolving_udp.first
-		for c in sim.dl_iter_next(
+		cursor := bit_arr.dl_iter(&server.resolving_udp)
+		caused_decryption := false
+		for c in bit_arr.dl_iter_next(
 			&cursor,
 			Connection,
 			offset_of(Connection, resolving_udp),
@@ -1626,7 +1743,7 @@ server_decrypt_packet :: proc(
 			bytes, err := sim.decrypt_packet(&c.hctx.secret, packet)
 			if err != .Ok do continue
 
-			sim.dl_remove(&c.resolving_udp)
+			bit_arr.dl_remove(&c.resolving_udp)
 			server.last_udp_conn = c
 			c.udp_endpoint = endpoint
 			server.connections[endpoint] = c
@@ -1646,14 +1763,14 @@ server_on_ping :: proc(server: ^Server) {
 	killed_conns: ^Connection
 
 	for _, conn in server.connections {
-		if time.since(conn.last_packet) > CONNECTION_TIMEOUT {
+		if nbio.since(server.l, conn.last_packet) > CONNECTION_TIMEOUT {
 			conn.next_free = killed_conns
 			killed_conns = conn
 			continue
 		}
 
 		p: sim.Server_Ping
-		crypto.rand_bytes(reflect.as_bytes(p))
+		nbio.rand_bytes(reflect.as_bytes(p))
 		lru.set(
 			&server.active_pings,
 			p.id,
@@ -1666,6 +1783,7 @@ server_on_ping :: proc(server: ^Server) {
 		conn := killed_conns
 		assert(conn != killed_conns.next_free)
 		killed_conns = conn.next_free
+		log.warn("connection timed out:", conn.tcp_endpoint)
 		sim.tcp_connection_kill(&conn.hctx, server.l)
 	}
 
@@ -1673,8 +1791,8 @@ server_on_ping :: proc(server: ^Server) {
 		player_count = len(server.connections),
 	}
 
-	cursor := server.listeners.first
-	for conn in sim.dl_iter_next(
+	cursor := bit_arr.dl_iter(&server.listeners)
+	for conn in bit_arr.dl_iter_next(
 		&cursor,
 		Connection,
 		offset_of(Connection, listener),
@@ -1686,7 +1804,7 @@ server_on_ping :: proc(server: ^Server) {
 	}
 
 	server.ping_seq += 1
-	server.last_ping = time.now()
+	server.last_ping = nbio.now(server.l)
 }
 
 REWIRE_TABLE := [?]rawptr {
@@ -1731,8 +1849,9 @@ server_shutdown :: proc(server: ^Server) {
 		sim.tcp_connection_kill(&c.hctx, server.l)
 	}
 
-	for c in sim.dl_iter_next(
-		&server.resolving_udp.first,
+	iter := bit_arr.dl_iter(&server.resolving_udp)
+	for c in bit_arr.dl_iter_next(
+		&iter,
 		Connection,
 		offset_of(Connection, resolving_udp),
 	) {
@@ -1756,11 +1875,11 @@ server_deinit :: proc(hr: ^hot.Reloader, server: ^Server) {
 
 	conn := sqlite.db_handle(server.insert_user)
 	sqlite.finalize(server.statements)
-	rs := sqlite.close(conn)
-	sqlite.assert_ok(conn, rs)
 }
 
-server_config_default :: proc() -> (sc: Server_Config) {
+server_config_default :: proc() -> (sc: Config) {
+	sc.endpoint = {nbio.IP4_Any, sim.GAME_PORT}
+
 	db, err := sqlite.open(SERVER_DB_PATH)
 	log.assertf(err == nil, "failed to open the db: %v", err)
 	sc.db = db
@@ -1770,6 +1889,13 @@ server_config_default :: proc() -> (sc: Server_Config) {
 	sc.cwd = cwd
 
 	return
+}
+
+API :: hot.Api(^Server) {
+	memory_size = server_memory_size,
+	static_init = server_static_init,
+	init        = server_init,
+	deinit      = server_deinit,
 }
 
 when ODIN_BUILD_MODE == .Executable {
@@ -1814,16 +1940,11 @@ main_proc :: proc() {
 		"-define:SQLITE_SHARED=true",
 	}
 	hr.dyn_defs = {{"LATENCY", sim.LATENCY}, {"LOCAL", sim.LOCAL}}
-	hr.lib = {
-		memory_size = server_memory_size,
-		static_init = server_static_init,
-		init        = auto_cast server_init,
-		deinit      = auto_cast server_deinit,
-	}
-	hr.reload = hot.reload
+	hr.lib = hot.decl_api(API)
+	hr.reload = hot.reload_impl
 	hr.init_allocator = arna.allocator(&init_arna)
 
-	config: Server_Config
+	config: Config
 	{context.allocator = arna.allocator(&global_arna)
 		config = server_config_default()}
 	hr.config = &config
@@ -1833,7 +1954,7 @@ main_proc :: proc() {
 	hr.l = l
 
 	for !hot.interrupted() {
-		_ = hot.reload(&hr, {})
+		_ = hr->reload({})
 
 		runerr := nbio.run(hr.l)
 		log.assertf(runerr == nil, "failed to run the event loop: %v", runerr)
@@ -1841,6 +1962,8 @@ main_proc :: proc() {
 
 	if sim.TRACK_ALLOCATIONS {
 		hot.deinit(&hr)
+		rs := sqlite.close(config.db)
+		sqlite.assert_ok(config.db, rs)
 		nbio.destroy_event_loop(l)
 		context.logger = {}
 		server_static_deinit()

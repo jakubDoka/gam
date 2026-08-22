@@ -1,5 +1,6 @@
 package sim
 
+import "core:fmt"
 import la "core:math/linalg"
 import "core:slice"
 import "core:testing"
@@ -425,75 +426,4 @@ test_spatial :: proc(t: ^testing.T) {
 	testing.expect(t, !ents[1].seen)
 	testing.expect(t, !ents[2].seen)
 	testing.expect(t, !ents[3].seen)
-}
-
-DL_List :: struct {
-	first: ^DL_Node,
-}
-
-DL_Node :: struct {
-	next: ^DL_Node,
-	prev: ^DL_Node `fmt:"-"`,
-}
-
-dl_push :: proc(list: ^DL_List, node: ^DL_Node) {
-	node.prev = (^DL_Node)(list)
-	node.next = list.first
-	if list.first != nil {
-		list.first.prev = node
-	}
-	list.first = node
-}
-
-dl_remove :: proc(node: ^DL_Node) {
-	if node.next != nil do node.next.prev = node.prev
-	if node.prev != nil do node.prev.next = node.next
-}
-
-dl_iter_next :: proc(
-	node: ^^DL_Node,
-	$N: typeid,
-	node_offset: uintptr,
-) -> (
-	^N,
-	bool,
-) {
-	if node^ == nil do return nil, false
-
-	vl := (^N)(uintptr(node^) - node_offset)
-	node^ = node^.next
-
-	return vl, true
-}
-
-@(test)
-dl_sanity :: proc(t: ^testing.T) {
-	nodes: [3]DL_Node
-	list: DL_List
-
-	for &n in nodes {
-		dl_push(&list, &n)
-	}
-
-	for &n in nodes {
-		dl_remove(&n)
-	}
-
-	testing.expect_value(t, list.first, nil)
-
-	for &n in nodes {
-		dl_push(&list, &n)
-	}
-
-	dl_remove(&nodes[1])
-
-	n, ok := dl_iter_next(&list.first, DL_Node, 0)
-	testing.expect(t, ok)
-	testing.expect_value(t, n, &nodes[2])
-
-	n, ok = dl_iter_next(&list.first, DL_Node, 0)
-	testing.expect(t, ok)
-	testing.expect_value(t, n, &nodes[0])
-
-	testing.expect_value(t, list.first, nil)
 }

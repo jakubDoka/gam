@@ -56,7 +56,13 @@ IS_MOUSE := [Press_Kind]proc "cdecl" (_: rl.MouseButton) -> bool {
 	.Released = rl.IsMouseButtonReleased,
 }
 
-is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: Key_Bind) -> bool {
+is_key :: proc(
+	kind: Press_Kind,
+	r: ^UI_Reactor,
+	key: Key_Bind,
+) -> (
+	triggered: bool,
+) {
 	key_mode := IS_KEY[kind]
 	mouse_mode := IS_MOUSE[kind]
 
@@ -67,7 +73,9 @@ is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: Key_Bind) -> bool {
 	)
 	if ok do return false
 
-	r.last_key_bind = key
+	defer if triggered {
+		r.last_key_bind = key
+	}
 	switch b in BIND_TO_KEY[key] {
 	case rl.KeyboardKey:
 		return key_mode(b) && (r.orui_ctx.prev_focus_id == 0 || b == .ESCAPE)
@@ -85,7 +93,7 @@ is_key :: proc(kind: Press_Kind, r: ^UI_Reactor, key: Key_Bind) -> bool {
 			(rl.IsKeyDown(b.mod) || rl.IsKeyDown(countermod)) \
 		)
 	case:
-		panic("wut")
+		panic("unreachable")
 	}
 }
 
@@ -458,6 +466,30 @@ Text_Input_Config :: struct {
 	dont_autofocus:  bool,
 }
 
+ui_text_focus :: proc(id: orui.Id) {
+	elem := orui.get_element(id)
+	if elem == nil do return
+	orui.current_context.focus_id = id
+	if elem.text_input != nil {
+		orui.current_context.caret_index = len(elem.text_input.buf)
+	}
+}
+
+ui_set_validity :: proc(id: orui.Id, value: bool) {
+	if !value {
+		ctx := orui.current_context
+		elem_idx :=
+			orui.element_index_by_id(
+				ctx,
+				orui.current_buffer(ctx),
+				id,
+			) or_else panic("")
+
+		elem := &ctx.elements[orui.current_buffer(ctx)][elem_idx]
+		elem.color = ui_color(.PRIMARY)
+	}
+}
+
 ui_text_input :: proc(
 	id: orui.Id,
 	state: ^strings.Builder,
@@ -498,6 +530,11 @@ ui_text_input :: proc(
 
 	placeholder := config.placeholder
 
+	if !already_initialized && !config.dont_autofocus {
+		orui.current_context.focus_id = orui.current_context.current_id
+		orui.current_context.caret_index = len(state.buf)
+	}
+
 	confirmed := orui.text_input(
 		id,
 		state,
@@ -525,11 +562,6 @@ ui_text_input :: proc(
 			e.custom_event = nil
 		},
 	)
-
-	if !already_initialized && !config.dont_autofocus {
-		orui.current_context.focus_id = orui.current_context.current_id
-		orui.current_context.caret_index = len(state.buf)
-	}
 
 	res := string(state.buf[:])
 
@@ -740,22 +772,21 @@ ui_select :: proc(
 	should_close =
 		!hovered && already_initialized && rl.IsMouseButtonPressed(.LEFT)
 
-	if can_scroll(options) {
-		should_close &= !orui.scrollbar(
-			options,
-			{
-				position = {.Absolute, {-4, 0}},
-				placement = orui.placement(.Right, .Right),
-				width = orui.fixed(8),
-				height = orui.percent(0.98),
-			},
-			{
-				direction = .TopToBottom,
-				width = orui.percent(1),
-				background_color = ui_color(.PRIMARY),
-			},
-		)
-	}
+	// TODO(low): we are frame behind here
+	should_close &= !orui.scrollbar(
+		options,
+		{
+			position = {.Absolute, {-4, 0}},
+			placement = orui.placement(.Right, .Right),
+			width = orui.fixed(8),
+			height = orui.percent(0.98),
+		},
+		{
+			direction = .TopToBottom,
+			width = orui.percent(1),
+			background_color = ui_color(.PRIMARY),
+		},
+	)
 
 	return
 }

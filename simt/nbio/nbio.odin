@@ -1,41 +1,60 @@
 package simt_nbio
 
 import ".."
+import "core:container/xar"
+import "core:crypto"
+import "core:log"
+
 import "../../util/arna"
+import "../../util/bit_arr"
 import "base:intrinsics"
 import "base:runtime"
 import "core:container/priority_queue"
+import "core:fmt"
 import "core:io"
 import "core:math/rand"
 import "core:nbio"
 import "core:net"
 import "core:os"
-import "core:slice" // marked
+import "core:slice"
 import "core:strings"
 import "core:time"
 
 SIMULATE :: simt.SIMULATE
 
+Machine_Config :: struct {
+	ip: Address,
+}
+
 when SIMULATE {
 	Event_Loop :: struct {
+		using config: Machine_Config,
+		port_alloc:   int,
+		files:        map[string]^File,
+		using shared: ^Shared,
+	}
+
+	shareholder: ^Shared
+
+	Shared :: struct {
+		rc:             int,
+		listeners:      map[Endpoint]^Listener,
+		bindings:       map[Endpoint]UDP_Socket,
 		free_ops:       ^Operation,
 		free_listeners: ^Listener,
 		allocator_arna: arna.Allocator,
 		allocator:      runtime.Allocator,
-		rng:            runtime.Random_Generator,
 		tasks:          priority_queue.Priority_Queue(Task),
 		time:           time.Duration,
-		fds:            [dynamic]File_Descriptor,
-		free_fds:       [dynamic]i64,
-		files:          map[string]^File,
-		listeners:      map[Endpoint]^Listener,
-		bindings:       map[Endpoint]UDP_Socket,
+		fds:            xar.Array(File_Descriptor, 5),
+		free_fds:       ^File_Descriptor,
 	}
 
 	Listener :: struct {
 		queued:    TCP_Socket,
 		accept_op: ^Operation,
 		next_free: ^Listener,
+		l:         ^Event_Loop,
 	}
 
 	File :: struct {
@@ -51,15 +70,16 @@ when SIMULATE {
 	}
 
 	File_Descriptor :: struct {
+		idx:            i64,
+		label:          string,
+		next_free_fd:   ^File_Descriptor,
 		kind:           File_Descriptor_Kind,
 		mode:           File_Flags,
 		using file:     ^File,
 		using listener: ^Listener,
 		next:           TCP_Socket,
-		first_recv_op:  ^Operation,
-		last_recv_op:   ^Operation,
-		first_send_op:  ^Operation,
-		last_send_op:   ^Operation,
+		recv_ops:       bit_arr.DL_List,
+		send_ops:       bit_arr.DL_List,
 		peer:           TCP_Socket,
 		endpoint:       Endpoint,
 	}
@@ -77,6 +97,8 @@ when SIMULATE {
 	}
 } else {
 	Event_Loop :: nbio.Event_Loop
+
+	Shared :: struct {}
 }
 
 when SIMULATE {
@@ -170,6 +192,41 @@ when !SIMULATE {
 }
 Walker :: os.Walker
 
+set_lable :: proc(l: ^Event_Loop, fd: Closable, value: string) {
+	when SIMULATE {
+		fd := _access_fd(l, fd) or_else panic("")
+		fd.label = value
+	}
+}
+
+rand_bytes :: proc(fill: []u8) {
+	when !SIMULATE {
+		crypto.rand_bytes(fill)
+	} else {
+		ok := runtime.random_generator_read_bytes(
+			context.random_generator,
+			fill,
+		)
+		assert(ok)
+	}
+}
+
+now :: proc(l: ^Event_Loop) -> time.Time {
+	when !SIMULATE {
+		return time.now()
+	} else {
+		return {i64(l.time)}
+	}
+}
+
+since :: proc(l: ^Event_Loop, a: time.Time) -> time.Duration {
+	when !SIMULATE {
+		return time.since(a)
+	} else {
+		return l.time - time.Duration(a._nsec)
+	}
+}
+
 open :: proc(
 	l: ^Event_Loop,
 	name: string,
@@ -257,7 +314,7 @@ read_all_directory_by_path :: proc(
 			if dir(fpath) == path do count += 1
 		}
 
-		buf := make([]File_Info, count)
+		buf := make([]File_Info, count, allocator)
 		i := 0
 		for fpath in l.files {
 			if dir(fpath) == path {
@@ -302,8 +359,8 @@ make_directory_all :: proc(path: string) -> Error {
 }
 
 when SIMULATE {
-	Operation_Kind :: enum {
-		none,
+	Operation_Type :: enum {
+		None,
 		accept,
 		dial,
 		open,
@@ -317,113 +374,128 @@ when SIMULATE {
 	}
 
 	Operation :: struct {
-		l:         ^Event_Loop,
-		next_free: ^Operation,
-		next:      ^Operation,
-		gen:       int,
-		cb:        proc(_: ^Operation),
-		user_data: [nbio.MAX_USER_ARGUMENTS + 1]rawptr,
-		kind:      Operation_Kind,
-		accept:    struct {
-			socket:          TCP_Socket,
-			client:          TCP_Socket,
-			client_endpoint: Endpoint,
-			err:             Accept_Error,
-		},
-		dial:      struct {
-			endpoint: Endpoint,
-			socket:   TCP_Socket,
-			err:      Network_Error,
-		},
-		open:      struct {
-			path:   string,
-			handle: Handle,
-			mode:   File_Flags,
-			perm:   Permissions,
-			dir:    Handle,
-			err:    FS_Error,
-		},
-		read:      struct {
-			handle: Handle,
-			offset: int,
-			all:    bool,
-			buf:    []u8,
-			read:   int,
-			err:    FS_Error,
-		},
-		write:     struct {
-			handle:  Handle,
-			offset:  int,
-			all:     bool,
-			buf:     []u8,
-			written: int,
-			err:     FS_Error,
-		},
-		recv:      struct {
-			socket:        Any_Socket,
-			source:        Endpoint,
-			all:           bool,
-			received:      int,
-			err:           Recv_Error,
-			_backing_bufs: [1][]u8,
-		},
-		send:      struct {
-			socket:        Any_Socket,
-			endpoint:      Endpoint,
-			all:           bool,
-			sent:          int,
-			err:           Send_Error,
-			_backing_bufs: [1][]u8,
-		},
-		stat:      struct {
-			handle: Handle,
-			type:   File_Type,
-			size:   i64,
-			err:    FS_Error,
-		},
-		timeout:   struct {
-			duration: time.Duration,
-		},
-		close:     struct {
-			subject: Closable,
-			err:     FS_Error,
+		l:            ^Event_Loop,
+		next_free:    ^Operation,
+		rs_queue:     bit_arr.DL_Node,
+		gen:          int,
+		cb:           proc(_: ^Operation),
+		user_data:    [nbio.MAX_USER_ARGUMENTS + 1]rawptr,
+		type:         Operation_Type,
+		using config: struct #raw_union {
+			accept:  struct {
+				socket:          TCP_Socket,
+				client:          TCP_Socket,
+				client_endpoint: Endpoint,
+				err:             Accept_Error,
+			},
+			dial:    struct {
+				endpoint: Endpoint,
+				socket:   TCP_Socket,
+				err:      Network_Error,
+			},
+			open:    struct {
+				path:   string,
+				handle: Handle,
+				mode:   File_Flags,
+				perm:   Permissions,
+				dir:    Handle,
+				err:    FS_Error,
+			},
+			read:    struct {
+				handle: Handle,
+				offset: int,
+				all:    bool,
+				buf:    []u8,
+				read:   int,
+				err:    FS_Error,
+			},
+			write:   struct {
+				handle:  Handle,
+				offset:  int,
+				all:     bool,
+				buf:     []u8,
+				written: int,
+				err:     FS_Error,
+			},
+			recv:    struct {
+				socket:        Any_Socket,
+				source:        Endpoint,
+				all:           bool,
+				received:      int,
+				err:           Recv_Error,
+				_backing_bufs: [1][]u8,
+			},
+			send:    struct {
+				socket:        Any_Socket,
+				endpoint:      Endpoint,
+				all:           bool,
+				sent:          int,
+				err:           Send_Error,
+				_backing_bufs: [1][]u8,
+			},
+			stat:    struct {
+				handle: Handle,
+				type:   File_Type,
+				size:   i64,
+				err:    FS_Error,
+			},
+			timeout: struct {
+				duration: time.Duration,
+			},
+			close:   struct {
+				subject: Closable,
+				err:     FS_Error,
+			},
 		},
 	}
 } else {
 	Operation :: nbio.Operation
 }
 
-create_event_loop :: proc() -> (^Event_Loop, General_Error) {
+create_event_loop :: proc(
+	config: Machine_Config = {},
+) -> (
+	^Event_Loop,
+	General_Error,
+) {
 	when !SIMULATE {
 		err := nbio.acquire_thread_event_loop()
 		return nbio.current_thread_event_loop(), err
 	} else {
-		arena: arna.Allocator
-		err := arna.init(&arena, 1024 * 1024 * 16)
-		assert(err == nil)
+		if shareholder == nil {
+			arena: arna.Allocator
+			err := arna.init(&arena, 1024 * 1024 * 16)
+			assert(err == nil)
 
-		l := new(Event_Loop, arna.allocator(&arena))
-		l.allocator_arna = arena
-		l.allocator = arna.allocator(&l.allocator_arna)
+			l := new(Shared, arna.allocator(&arena))
+			l.allocator_arna = arena
+			l.allocator = arna.allocator(&l.allocator_arna)
 
-		priority_queue.init(
-			&l.tasks,
-			less,
-			priority_queue.default_swap_proc(Task),
-			allocator = l.allocator,
-		)
-		less :: proc(a, b: Task) -> bool {
-			return a.fire_at < b.fire_at
+			priority_queue.init(
+				&l.tasks,
+				less,
+				priority_queue.default_swap_proc(Task),
+				allocator = l.allocator,
+			)
+			less :: proc(a, b: Task) -> bool {
+				return a.fire_at < b.fire_at
+			}
+
+			l.fds.allocator = l.allocator
+			l.listeners.allocator = l.allocator
+			l.bindings.allocator = l.allocator
+
+			xar.append(&l.fds, File_Descriptor{})
+
+			shareholder = l
 		}
 
-		l.free_fds.allocator = l.allocator
-		l.fds.allocator = l.allocator
-		l.files.allocator = l.allocator
-		l.listeners.allocator = l.allocator
-		l.bindings.allocator = l.allocator
+		shareholder.rc += 1
 
-		// NOTE: leak the 0 fd since we check for 0 in our code
-		resize(&l.fds, 1)
+		l := new(Event_Loop, shareholder.allocator)
+		l.shared = shareholder
+		l.files.allocator = shareholder.allocator
+		l.config = config
 
 		return l, nil
 	}
@@ -433,13 +505,25 @@ destroy_event_loop :: proc(l: ^Event_Loop) {
 	when !SIMULATE {
 		nbio.release_thread_event_loop()
 	} else {
-		arna.destroy(&l.allocator_arna)
-	}
-}
+		assert(priority_queue.len(l.tasks) == 0)
 
-set_loop_rng :: proc(l: ^Event_Loop, rng: runtime.Random_Generator) {
-	when SIMULATE {
-		l.rng = rng
+		l.rc -= 1
+		if l.rc == 0 {
+			cnt := 0
+			for ; l.free_fds != nil; cnt += 1 {
+				l.free_fds = l.free_fds.next_free_fd
+			}
+
+			for it := xar.iterator(&l.fds); fd in xar.iterate_by_ptr(&it) {
+				if fd.kind != .Invalid {
+					log.errorf("%#v", fd)
+				}
+			}
+
+			arna.destroy(&l.allocator_arna)
+
+			shareholder = nil
+		}
 	}
 }
 
@@ -550,6 +634,8 @@ listen_tcp :: proc(
 			fd.listener^ = {}
 		}
 
+		fd.listener.l = l
+
 		fd.endpoint = endpoint
 		l.listeners[endpoint] = fd.listener
 
@@ -561,9 +647,17 @@ bind :: proc(l: ^Event_Loop, socket: Any_Socket, ep: Endpoint) -> Bind_Error {
 	when !SIMULATE {
 		return nbio.bind(socket, ep)
 	} else {
+
+		ep := ep
+		if ep.port == 0 {
+			l.port_alloc += 1
+			ep.port = l.port_alloc
+		}
+		ep.address = l.ip
+
 		socket := socket.(UDP_Socket)
 
-		fd, ok := _access_fd(l, i64(socket), .UDP_Socket)
+		fd, ok := _access_fd(l, socket)
 		if !ok {
 			return .Invalid_Argument
 		}
@@ -604,7 +698,7 @@ when SIMULATE {
 			_add_task(l, 0, op, .Execute)
 		}
 
-		fd_ref, ok := _access_fd(l, i64(socket), .TCP_Socket)
+		fd_ref, ok := _access_fd(l, socket)
 		if !ok {
 			op.accept.err = .Invalid_Argument
 			return
@@ -653,6 +747,8 @@ when SIMULATE {
 		op = _new_op(l, .recv, cb, timeout)
 		assert(len(bufs) == 1)
 		op.recv.socket = socket
+		assert(len(bufs) == 1)
+		assert(len(bufs[0]) != 0)
 		op.recv._backing_bufs = bufs[0]
 		op.recv.all = all
 
@@ -674,6 +770,8 @@ when SIMULATE {
 		op = _new_op(l, .send, cb, timeout)
 		op.send.socket = socket
 		op.send.endpoint = endpoint
+		assert(len(bufs) == 1)
+		assert(len(bufs[0]) != 0)
 		op.send._backing_bufs = bufs[0]
 		op.send.all = all
 
@@ -773,9 +871,10 @@ when SIMULATE {
 
 	_run_accept :: proc(l: ^Event_Loop, listener: ^Listener) {
 		for listener.accept_op != nil && listener.queued != 0 {
-			fd := &l.fds[listener.queued]
+			fd := xar.get_ptr(&l.fds, listener.queued)
 			listener.accept_op.accept.client = listener.queued
-			listener.accept_op.accept.client_endpoint = fd.endpoint
+			listener.accept_op.accept.client_endpoint =
+				xar.get_ptr(&l.fds, fd.peer).endpoint
 			listener.queued = fd.next
 			op := listener.accept_op
 			listener.accept_op = nil
@@ -785,9 +884,8 @@ when SIMULATE {
 
 	_execute_op :: proc(op: ^Operation) {
 		l := op.l
-		context.allocator = l.allocator
-		switch op.kind {
-		case .none:
+		switch op.type {
+		case .None:
 			panic("unreachable")
 		case .accept:
 		case .dial:
@@ -799,6 +897,10 @@ when SIMULATE {
 
 			local_fd, local_idx := _new_fd(l, .TCP_Socket)
 			peer_fd, peer_idx := _new_fd(l, .TCP_Socket)
+			listener.l.port_alloc += 1
+			peer_fd.endpoint = {listener.l.ip, listener.l.port_alloc}
+			l.port_alloc += 1
+			local_fd.endpoint = {l.ip, l.port_alloc}
 
 			local_fd.peer = TCP_Socket(peer_idx)
 			peer_fd.peer = TCP_Socket(local_idx)
@@ -811,23 +913,13 @@ when SIMULATE {
 			_run_accept(l, listener)
 		// NOTE: the structure of both of these is identical
 		case .send, .recv:
-			fd_ref: ^File_Descriptor
-			ok: bool
-
-			is_udp := false
-
-			switch s in op.recv.socket {
-			case UDP_Socket:
-				fd_ref, ok = _access_fd(l, i64(s), .UDP_Socket)
-				is_udp = true
-			case TCP_Socket:
-				fd_ref, ok = _access_fd(l, i64(s), .TCP_Socket)
-			}
-
+			fd_ref, ok := _access_fd(l, op.send.socket)
 			if !ok {
 				op.recv.err = net.TCP_Recv_Error.Invalid_Argument
 				break
 			}
+
+			is_udp := fd_ref.kind == .UDP_Socket
 
 			peer: i64
 			switch s in op.send.socket {
@@ -838,75 +930,57 @@ when SIMULATE {
 				peer = i64(fd_ref.peer)
 			}
 
-			if peer == 0 && (op.kind != .recv || !is_udp) {
-				to_invalidate := [?]^Operation {
-					fd_ref.first_send_op,
-					fd_ref.first_recv_op,
-				}
-
-				invalidation_errors := [?]Recv_Error{.Connection_Closed, nil}
-
-				for &ti, i in to_invalidate {
-					for ti != nil {
-						pti := ti
-						ti = pti.next
-
-						pti.recv.err = invalidation_errors[i]
-						_exec_cb(pti)
-					}
-				}
-
-				if op.kind == .send || op.recv.all {
+			if peer == 0 && (op.type != .recv || !is_udp) {
+				if op.type == .send || op.recv.all {
 					op.send.err = .Connection_Closed
 				}
 
 				break
 			}
 
-			if op.kind == .send {
-				fd_ref = &l.fds[peer]
-
-				if fd_ref.last_send_op != nil {
-					fd_ref.last_send_op.next = op
-				} else {
-					fd_ref.first_send_op = op
-				}
-				fd_ref.last_send_op = op
+			if op.type == .send {
+				fd_ref = xar.get_ptr(&l.fds, peer)
+				bit_arr.dl_push(&fd_ref.send_ops, &op.rs_queue)
 			} else {
-				if fd_ref.last_recv_op != nil {
-					fd_ref.last_recv_op.next = op
-				} else {
-					fd_ref.first_recv_op = op
-				}
-				fd_ref.last_recv_op = op
+				bit_arr.dl_push(&fd_ref.recv_ops, &op.rs_queue)
 			}
 
-			for fd_ref.first_recv_op != nil && fd_ref.first_send_op != nil {
+			for fd_ref.send_ops != {} && fd_ref.recv_ops != {} {
 				send, recv: ^Operation =
-					fd_ref.first_send_op, fd_ref.first_recv_op
+					container_of(fd_ref.send_ops.last, Operation, "rs_queue"),
+					container_of(fd_ref.recv_ops.last, Operation, "rs_queue")
+				fsbuf, frbuf: []u8 =
+					send.send._backing_bufs[0], recv.recv._backing_bufs[0]
 				sbuf, rbuf: []u8 =
-					send.send._backing_bufs[0][send.send.sent:],
-					recv.recv._backing_bufs[0][recv.recv.received:]
+					fsbuf[send.send.sent:], frbuf[recv.recv.received:]
+
+				source_end: Endpoint
+
+				fd := _access_fd(l, send.send.socket) or_else panic("")
+
+				source_end = fd.endpoint
+
+				fmt.assertf(len(sbuf) != 0, "%v", send.send.sent)
+				fmt.assertf(len(rbuf) != 0, "%v", recv.recv.received)
 
 				to_copy := min(len(rbuf), len(sbuf))
 				copy(rbuf[:to_copy], sbuf[:to_copy])
 
 				if fd_ref.kind == .UDP_Socket {
-					// NOTE: not true in general but relevant for out code
+					// NOTE: not true in general but relevant for our code
 					assert(to_copy == len(sbuf))
 				}
 
 				send.send.sent += to_copy
 				recv.recv.received += to_copy
+				recv.recv.source = source_end
 
-				if !send.send.all || send.send.sent == len(sbuf) {
+				if !send.send.all || send.send.sent == len(fsbuf) {
 					_exec_cb(send)
-					fd_ref.first_send_op = send.next
 				}
 
-				if !recv.recv.all || recv.recv.received == len(sbuf) {
+				if !recv.recv.all || recv.recv.received == len(fsbuf) {
 					_exec_cb(recv)
-					fd_ref.first_recv_op = recv.next
 				}
 			}
 
@@ -923,43 +997,44 @@ when SIMULATE {
 			fd.file = file
 			op.open.handle = Handle(id)
 		case .close:
-			fd: i64
-			kind: File_Descriptor_Kind
-			switch t in op.close.subject {
-			case UDP_Socket:
-				fd = i64(t)
-				kind = .UDP_Socket
-			case TCP_Socket:
-				fd = i64(t)
-				kind = .TCP_Socket
-			case Handle:
-				fd = i64(t)
-				kind = .File
-			}
-
-			fd_ref, ok := _access_fd(l, fd, kind)
+			fd_ref, ok := _access_fd(l, op.close.subject)
 			if !ok {
 				op.close.err = .Invalid_Argument
 				break
 			}
 
-			if kind == .UDP_Socket {
+			if fd_ref.kind == .UDP_Socket {
 				delete_key(&l.bindings, fd_ref.endpoint)
 			}
 
-			if kind == .TCP_Socket {
-				delete_key(&l.listeners, fd_ref.endpoint)
-			}
-
 			if fd_ref.listener != nil {
+				delete_key(&l.listeners, fd_ref.endpoint)
 				fd_ref.listener.next_free = l.free_listeners
 				l.free_listeners = fd_ref.listener
 			}
 
-			fd_ref^ = {}
-			append(&l.free_fds, fd)
+			if fd_ref.peer != 0 {
+				assert(fd_ref.kind == .TCP_Socket)
+				ofd := _access_fd(l, fd_ref.peer) or_else panic("")
+				fmt.assertf(
+					ofd.peer == TCP_Socket(fd_ref.idx),
+					"%v %v",
+					ofd.peer,
+					fd_ref.idx,
+				)
+				ofd.peer = 0
+				_remove_fd_ops(ofd)
+			}
+
+			_remove_fd_ops(fd_ref)
+
+			fd_ref^ = {
+				idx = fd_ref.idx,
+			}
+			fd_ref.next_free_fd = l.free_fds
+			l.free_fds = fd_ref
 		case .stat:
-			fd_ref, ok := _access_fd(l, i64(op.stat.handle), .File)
+			fd_ref, ok := _access_fd(l, op.stat.handle)
 			if !ok {
 				op.stat.err = .Invalid_Argument
 				break
@@ -968,7 +1043,7 @@ when SIMULATE {
 			op.stat.type = .Regular
 			op.stat.size = i64(len(fd_ref.file.content))
 		case .read:
-			fd_ref, ok := _access_fd(l, i64(op.read.handle), .File)
+			fd_ref, ok := _access_fd(l, op.read.handle)
 			if !ok {
 				op.read.err = .Invalid_Argument
 				break
@@ -998,7 +1073,7 @@ when SIMULATE {
 				)
 			}
 		case .write:
-			fd_ref, ok := _access_fd(l, i64(op.write.handle), .File)
+			fd_ref, ok := _access_fd(l, op.write.handle)
 			if !ok {
 				op.write.err = .Invalid_Argument
 				break
@@ -1048,6 +1123,7 @@ when SIMULATE {
 
 		if .Create in mode && file == nil {
 			file = new(File)
+			file.content.allocator = l.allocator
 			file.perm = perm
 			l.files[strings.clone(name)] = file
 		}
@@ -1066,18 +1142,68 @@ when SIMULATE {
 		fd: ^File_Descriptor,
 		idx: i64,
 	) {
-		defer fd.kind = kind
-
-		if free, ok := pop_safe(&l.free_fds); ok {
-			return &l.fds[free], free
+		defer {
+			assert(idx != 0)
+			fd.kind = kind
 		}
 
-		idx = i64(len(l.fds))
-		append(&l.fds, File_Descriptor{})
-		return &l.fds[idx], idx
+		if l.free_fds != nil {
+			f := l.free_fds
+			l.free_fds = f.next_free_fd
+			return f, f.idx
+		}
+
+		idx = i64(xar.len(l.fds))
+		xar.append(&l.fds, File_Descriptor{idx = idx})
+		return xar.get_ptr(&l.fds, idx), idx
 	}
 
-	_access_fd :: proc(
+	_access_fd :: proc(l: ^Event_Loop, cls: union {
+			UDP_Socket,
+			TCP_Socket,
+			Handle,
+			Closable,
+			Any_Socket,
+		}) -> (^File_Descriptor, bool) {
+		fd: i64
+		kind: File_Descriptor_Kind
+		switch t in cls {
+		case UDP_Socket:
+			fd = i64(t)
+			kind = .UDP_Socket
+		case TCP_Socket:
+			fd = i64(t)
+			kind = .TCP_Socket
+		case Handle:
+			fd = i64(t)
+			kind = .File
+		case Closable:
+			switch t in t {
+			case UDP_Socket:
+				fd = i64(t)
+				kind = .UDP_Socket
+			case TCP_Socket:
+				fd = i64(t)
+				kind = .TCP_Socket
+			case Handle:
+				fd = i64(t)
+				kind = .File
+			}
+		case Any_Socket:
+			switch t in t {
+			case UDP_Socket:
+				fd = i64(t)
+				kind = .UDP_Socket
+			case TCP_Socket:
+				fd = i64(t)
+				kind = .TCP_Socket
+			}
+		}
+
+		return _access_fd_(l, fd, kind)
+	}
+
+	_access_fd_ :: proc(
 		l: ^Event_Loop,
 		fd: i64,
 		kind: File_Descriptor_Kind,
@@ -1085,11 +1211,11 @@ when SIMULATE {
 		ref: ^File_Descriptor,
 		ok: bool,
 	) {
-		if int(fd) > len(l.fds) || fd < 0 {
+		if int(fd) > xar.len(l.fds) || fd < 0 {
 			return
 		}
 
-		fd_ref := &l.fds[fd]
+		fd_ref := xar.get_ptr(&l.fds, fd)
 		if fd_ref.kind != kind {
 			return
 		}
@@ -1102,7 +1228,6 @@ when SIMULATE {
 		min: time.Duration,
 		max: time.Duration,
 	) -> time.Duration {
-		context.random_generator = l.rng
 		return time.Duration(rand.int_range(int(min), int(max)))
 	}
 
@@ -1112,6 +1237,8 @@ when SIMULATE {
 		op: ^Operation,
 		kind: Task_Kind,
 	) {
+		fmt.assertf(op.type != .None, "%v", rawptr(op))
+
 		gen: int
 		if op != nil do gen = op.gen
 
@@ -1123,7 +1250,7 @@ when SIMULATE {
 
 	_new_op :: proc(
 		l: ^Event_Loop,
-		kind: Operation_Kind,
+		kind: Operation_Type,
 		cb: proc(_: ^Operation) = nil,
 		timeout: time.Duration = NO_TIMEOUT,
 	) -> (
@@ -1138,10 +1265,10 @@ when SIMULATE {
 			op = new(Operation, l.allocator)
 		}
 
-		op.kind, op.cb, op.l = kind, cb, l
+		op.type, op.cb, op.l = kind, cb, l
 		op.gen += 1
 
-		if timeout != NO_TIMEOUT do _add_task(l, timeout, op, .Cancel)
+		if timeout > 0 do _add_task(l, timeout, op, .Cancel)
 
 		return
 	}
@@ -1149,20 +1276,21 @@ when SIMULATE {
 	_remove_op :: proc(op: ^Operation) {
 		if op == nil do return
 
-		assert(op.kind != .none)
+		fmt.assertf(op.type != .None, "%v", rawptr(op))
 
 		l := op.l
 		op.next_free = l.free_ops
 		l.free_ops = op
+		bit_arr.dl_remove(&op.rs_queue)
 
-		op.kind = .none
+		op.type = .None
 		op.gen += 1
 	}
 
 	_timeout_op :: proc(op: ^Operation) {
 		l := op.l
-		switch op.kind {
-		case .none:
+		switch op.type {
+		case .None:
 			panic("unreachable")
 		case .accept:
 			op.accept.err = .Timeout
@@ -1193,7 +1321,33 @@ when SIMULATE {
 
 	_exec_cb :: proc(op: ^Operation) {
 		op->cb()
-		_remove_op(op)
+		if op.type != .None {
+			_remove_op(op)
+		}
+	}
+
+	_remove_fd_ops :: proc(fd_ref: ^File_Descriptor) {
+		to_invalidate := [?]bit_arr.DL_Iter {
+			bit_arr.dl_iter(&fd_ref.send_ops),
+			bit_arr.dl_iter(&fd_ref.recv_ops),
+		}
+
+		invalidation_errors := [?]Recv_Error{.Connection_Closed, nil}
+
+		for &ti, i in to_invalidate {
+			for tim in bit_arr.dl_iter_next(
+				&ti,
+				Operation,
+				offset_of(Operation, rs_queue),
+			) {
+				if tim.recv.received != 0 {
+					tim.recv.err = .Connection_Closed
+				} else {
+					tim.recv.err = invalidation_errors[i]
+				}
+				_exec_cb(tim)
+			}
+		}
 	}
 }
 
@@ -1247,7 +1401,6 @@ recv_poly :: #force_inline proc(
 	when !SIMULATE {
 		return nbio.recv_poly(socket, bufs, p, cb, all, timeout, l)
 	} else {
-
 		defer _put_user_data(op, cb, p)
 		return _prep_recv(socket, bufs, all, timeout, _poly_cb(C, T), l)
 	}

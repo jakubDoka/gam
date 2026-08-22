@@ -67,6 +67,7 @@ Client_Request_Type :: enum int {
 Asset_Type :: enum int {
 	Map,
 	Sprite,
+	Stats,
 }
 
 Asset :: struct {
@@ -79,7 +80,9 @@ Asset :: struct {
 Client_Content_Action :: struct {
 	type:    Content_Action_Type,
 	using _: struct #raw_union {
-		stats: Ent_Stats,
+		stats:     Ent_Stats,
+		switch_to: nm.Name,
+		create_as: nm.Name,
 	},
 }
 
@@ -87,6 +90,8 @@ Content_Action_Type :: enum {
 	Create,
 	Edit,
 	Save,
+	Switch,
+	Create_Group,
 }
 
 Client_Input :: struct {
@@ -205,6 +210,7 @@ Server_Map :: struct {
 	bytes: []u8,
 }
 
+// TODO: maybe make this a 0 padded array
 Player_Name :: nm.Name
 
 Player_Permission :: enum int {
@@ -226,6 +232,11 @@ Server_Cold_State :: struct {
 	players:     []Player,
 }
 
+Server_Global_Cold_State :: struct {
+	stats: []string,
+	maps:  []string,
+}
+
 Server_Cmd_Type :: enum int {
 	Laser,
 }
@@ -240,6 +251,7 @@ Server_Cmd :: struct {
 }
 
 Server_Stats :: struct {
+	name:    nm.Name,
 	stats:   Custom_Encoding,
 	sprites: []u32,
 }
@@ -276,6 +288,7 @@ Server_Packet :: union #no_nil {
 	Server_Cmd,
 	Broadcast_Packet,
 	Server_Event,
+	Asset,
 }
 
 Crypt_Header :: struct {
@@ -803,6 +816,27 @@ recurse :: proc(
 		log.error("unhandled type for decoding:", val.id)
 		return false
 	}
+
+	return true
+}
+
+validate_asset_name :: proc(name: string) -> bool {
+	slash_fuel := 0 // TODO: we don't handle dirs yet on the server
+	prev_slash := false
+	for ch in transmute([]u8)name {
+		switch ch {
+		case '/':
+			if prev_slash do return false
+			slash_fuel -= 1
+		case 'a' ..= 'z', '-':
+		case:
+			return false
+		}
+
+		prev_slash = ch == '/'
+	}
+
+	if slash_fuel < 0 do return false
 
 	return true
 }
