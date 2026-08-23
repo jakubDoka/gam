@@ -235,7 +235,7 @@ hybrid_scan_entity :: #force_inline proc(
 	xi := (#simd[SIMD_LANES]f32)(x)
 	yi := (#simd[SIMD_LANES]f32)(y)
 	ri := (#simd[SIMD_LANES]f32)(radius)
-	j := start
+	j := mem.align_backward_int(start, SIMD_LANES)
 	for ; j + SIMD_LANES <= len(candidates); j += SIMD_LANES {
 		xj := simd.from_slice(
 			#simd[SIMD_LANES]f32,
@@ -259,7 +259,9 @@ hybrid_scan_entity :: #force_inline proc(
 
 		for ; bits != 0; bits &= bits - 1 {
 			idx := j + int(simd.count_trailing_zeros(bits))
-			record_collision(world, index, candidates.index[idx])
+			if idx >= start {
+				record_collision(world, index, candidates.index[idx])
+			}
 		}
 	}
 }

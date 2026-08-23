@@ -80,9 +80,10 @@ Asset :: struct {
 Client_Content_Action :: struct {
 	type:    Content_Action_Type,
 	using _: struct #raw_union {
-		stats:     Ent_Stats,
-		switch_to: nm.Name,
-		create_as: nm.Name,
+		stats:      Ent_Stats,
+		switch_to:  nm.Name,
+		create_as:  nm.Name,
+		delete_the: nm.Name,
 	},
 }
 
@@ -92,6 +93,8 @@ Content_Action_Type :: enum {
 	Save,
 	Switch,
 	Create_Group,
+	Save_Map,
+	Delete_Map,
 }
 
 Client_Input :: struct {
@@ -821,6 +824,8 @@ recurse :: proc(
 }
 
 validate_asset_name :: proc(name: string) -> bool {
+	if len(name) == 0 do return false
+
 	slash_fuel := 0 // TODO: we don't handle dirs yet on the server
 	prev_slash := false
 	for ch in transmute([]u8)name {

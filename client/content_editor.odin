@@ -148,7 +148,7 @@ ui_content_editor :: proc(client: ^Client) {
 			)
 		} else {
 			box(id("content-editor-r1"), {width = orui.grow(), gap = PADDING})
-			name := nm.str(&client.ents.stats_name)
+			name := nm.str(&client.ents.map_name)
 
 			ui_label(
 				id("stats-name"),

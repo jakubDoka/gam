@@ -171,7 +171,7 @@ game_tick :: proc(game: ^Game) {
 	{
 		stats := game.ents.stats[:]
 		packet := sim.Server_Stats {
-			name  = game.ents.stats_name,
+			name  = game.ents.map_name,
 			stats = sim.custom_encoding_stats(&stats),
 		}
 
@@ -637,7 +637,7 @@ server_handle_packet :: proc(
 			reason = ""
 		case .Save:
 			group_asset := sim.Asset {
-				name = game.ents.stats_name,
+				name = game.ents.map_name,
 				type = .Stats,
 			}
 
@@ -687,21 +687,22 @@ server_handle_packet :: proc(
 
 			asset := sim.Asset {
 				name = p.switch_to,
-				type = .Stats,
+				type = .Map,
 			}
 			path := asset_path(&asset)
 
+			content, err := nbio.read_entire_file(server.l, path)
+			defer delete(content)
 			reason = "nonexistent asset name to switch to"
-			content, err := nbio.read_entire_file(
-				server.l,
-				path,
-				context.temp_allocator,
-			)
 			if err != nil {
 				log.warn("failed to load stat group to switch to:", err)
 				return
 			}
 
+			reason = "invalid map file"
+			if !game_set_map(game, content) do return
+
+			content = {}
 		case .Create_Group:
 			name := nm.str(&p.create_as)
 
@@ -727,13 +728,48 @@ server_handle_packet :: proc(
 			assert(err == nil)
 
 			save_asset(server, &asset)
+		case .Save_Map:
+			name := nm.str(&p.create_as)
+
+			reason = "invalid asset name to create"
+			if !sim.validate_asset_name(name) do return
+
+			mapa := game.ents.mapa
+			stats := game.ents.stats[:]
+			mapa.asoc_stats = sim.custom_encoding_stats(&stats)
+
+			buf := sim.serialize_to_bytes(mapa, context.temp_allocator)
+
+			asset := sim.Asset {
+				name = p.create_as,
+				type = .Map,
+				size = len(buf),
+			}
+			sim.hash(buf, &asset.hash)
+
+			path := asset_path(&asset)
+
+			err := nbio.make_directory_all(nbio.dir(path))
+			fmt.assertf(
+				err == nil || err == .Exist,
+				"failed to create parents of stat group: %v",
+				err,
+			)
+
+			err = nbio.write_entire_file(server.l, path, buf)
+			assert(err == nil)
+
+			save_asset(server, &asset)
+		case .Delete_Map:
+			log.error("TODO: implement map deletion")
 		}
 	case sim.Client_Map_Edit:
-		map_path := pick_map(
-			server.l,
-			game.map_index - 1,
-			context.temp_allocator,
-		)
+		asset := sim.Asset {
+			name = game.ents.map_name,
+			type = .Map,
+		}
+
+		map_path := asset_path(&asset)
 
 		me: sim.Encoder
 
@@ -750,9 +786,17 @@ server_handle_packet :: proc(
 			return
 		}
 
+		stats := game.ents.stats[:]
+		p.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
+
+		me = {}
+		okm = sim.marshall(p.mapa, &me)
+		assert(okm)
+
 		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
 		defer if !ok do delete(buf)
 		me = {buf}
+
 		oka := sim.marshall(p.mapa, &me)
 		assert(oka)
 
@@ -760,10 +804,14 @@ server_handle_packet :: proc(
 		reason = "unloadable map"
 		if !okam do return
 
+		asset.size = len(buf)
+		sim.hash(buf, &asset.hash)
+
 		err := nbio.write_entire_file(server.l, map_path, buf)
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
-		server_bundle_refresh(server)
+		save_asset(server, &asset)
+
 		ok = true
 	case sim.Broadcast_Packet:
 		cursor := bit_arr.dl_iter(&game.players)
@@ -863,6 +911,25 @@ game_set_map :: proc(game: ^Game, buf: []u8) -> bool {
 
 	sim.ents_clear(&game.ents)
 	game.ents.mapa = mapa
+
+	if len(mapa.asoc_stats.raw) != 0 {
+		clear(&game.ents.stats)
+
+		d := sim.Decoder{game.ents.mapa.asoc_stats.raw}
+		for len(d.remining) != 0 {
+			stat: sim.Ent_Stats
+			sim.ent_stats_decode(
+				&stat,
+				sim.Ent_Stats_ID(len(game.ents.stats)),
+				&d,
+			) or_break
+			append(&game.ents.stats, stat)
+		}
+
+		if len(d.remining) != 0 {
+			log.warn("some of the ent stats were invalid")
+		}
+	}
 
 	map_ent_to_ent := make(
 		[]^sim.Ent,
@@ -1337,7 +1404,7 @@ server_bundle_refresh :: proc(server: ^Server) {
 		game := &server.lobby
 
 		delete(game.ents.stats)
-		game.ents.stats_name = nm.from_str("default")
+		game.ents.map_name = nm.from_str("default")
 		game.ents.stats = stats
 	}
 }

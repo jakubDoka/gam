@@ -476,8 +476,8 @@ ui_text_focus :: proc(id: orui.Id) {
 }
 
 ui_set_validity :: proc(id: orui.Id, value: bool) {
-	if !value {
-		ctx := orui.current_context
+	ctx := orui.current_context
+	if !value && id == ctx.focus_id {
 		elem_idx :=
 			orui.element_index_by_id(
 				ctx,

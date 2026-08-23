@@ -2,6 +2,8 @@ package client
 
 import "../sim"
 import "../util/bit_arr"
+import "../util/nm"
+import "../util/sqlite"
 import orui "../vendored/orui/src"
 import "core:fmt"
 import la "core:math/linalg"
@@ -18,10 +20,13 @@ CONTROL_SIZE :: 64
 UI_Map_Editor :: struct {
 	expanded:           bool,
 	resizing:           bool,
+	saving_map:         bool,
+	selecting_map:      bool,
 	map_hash:           sim.Hash,
 	brush:              UI_Map_Editor_Brush,
 	editing_brush:      bool,
 	editing_brush_text: strings.Builder,
+	save_name_text:     strings.Builder,
 	team:               sim.Ent_Team_ID,
 	editing_team:       bool,
 	color_state:        UI_Color_Picker_State,
@@ -117,6 +122,7 @@ ui_map_editor :: proc(client: ^Client) {
 			id("map-editor-view"),
 			{width = orui.grow(), height = orui.grow(), layer = -200},
 		)
+
 		if ctx.resizing {
 			ui_label(
 				id("map-editor-size-label"),
@@ -130,6 +136,125 @@ ui_map_editor :: proc(client: ^Client) {
 					),
 				},
 			)
+		}
+
+		box(
+			id("map-editor-save-padder"),
+			{
+				position = {.Absolute, 0},
+				width = orui.grow(),
+				height = orui.grow(),
+				align_cross = .Center,
+				align_main = .Center,
+			},
+		)
+
+		if ctx.saving_map {
+			box(
+				id("map-editor-save-box"),
+				{
+					background_color = ui_color(.SECONDARY),
+					gap = PADDING,
+					padding = orui.padding(PADDING),
+					width = orui.fixed(300),
+					layer = 100,
+				},
+			)
+
+			text, confirm := ui_text_input(
+				id("map-editor-save-name"),
+				&ctx.save_name_text,
+				{
+					placeholder = "Map name...",
+					width = orui.grow(),
+					height = orui.fixed(ROW_HEIGHT),
+					border = 1,
+				},
+			)
+
+			name, ok := nm.from_str(text)
+			is_valid := ok && sim.validate_asset_name(text)
+
+			ui_set_validity(id("map-editor-save-name"), is_valid)
+
+			if ui_icon_button(
+				   id("map-editor-save-confirm"),
+				   ROW_HEIGHT,
+				   .ICON_OK_TICK,
+				   "Confirm map save",
+				   {disabled = !is_valid},
+			   ) ||
+			   confirm && is_valid {
+				pure.tcp_send(
+					client,
+					sim.Client_Content_Action {
+						type = .Save_Map,
+						create_as = name,
+					},
+				)
+				ctx.saving_map = false
+			}
+		}
+
+		if ctx.selecting_map {
+			box(
+				id("map-editor-select-box"),
+				{
+					background_color = ui_color(.SECONDARY),
+					gap = PADDING,
+					padding = orui.padding(PADDING),
+					width = orui.fixed(500),
+					height = orui.grow(),
+					layer = 100,
+					layout = .Grid,
+					cols = 2,
+					col_sizes = {orui.grow(), {}},
+					rows = 1000,
+				},
+			)
+
+			query, stmt := sqlite.query(
+				client.get_server_assets_of_type,
+				pure.Saved_Asset,
+				client.hctx.sh.id,
+				sim.Asset_Type.Map,
+			)
+			i := 0
+			for asset in sqlite.query_next(&query) {
+				if ui_button(
+					id("map-editor-select-map", i),
+					{
+						label = nm.str(&asset.name),
+						height = orui.fixed(ROW_HEIGHT),
+						width = orui.grow(),
+					},
+				) {
+					pure.tcp_send(
+						client,
+						sim.Client_Content_Action {
+							type = .Switch,
+							switch_to = asset.name,
+						},
+					)
+				}
+
+				if ui_icon_button(
+					id("map-editor-select-delete", i),
+					ROW_HEIGHT,
+					.ICON_BIN,
+					"Delete the map from the server.",
+				) {
+					pure.tcp_send(
+						client,
+						sim.Client_Content_Action {
+							type = .Delete_Map,
+							delete_the = asset.name,
+						},
+					)
+				}
+				i += 1
+			}
+			sqlite.reset(stmt)
 		}
 	}
 
@@ -335,14 +460,20 @@ ui_map_editor :: proc(client: ^Client) {
 
 		}
 
-		if ui_icon_button(
+		ctx.saving_map ~= ui_icon_button(
 			id("map-save"),
 			TEAM_SIZE,
-			.ICON_FILE_EXPORT,
-			"Export map to a file",
-		) {
+			ctx.saving_map ? .ICON_CROSS : .ICON_FILE_SAVE_CLASSIC,
+			ctx.saving_map ? "Close the dialog." : "Save the map on server.",
+		)
 
-		}
+		ctx.selecting_map ~= ui_icon_button(
+			id("map-select"),
+			TEAM_SIZE,
+			ctx.selecting_map ? .ICON_CROSS : .ICON_LINK_MULTI,
+			ctx.selecting_map ? "Close map selection." : "Open map selection dialog.",
+		)
+
 	}
 }
 

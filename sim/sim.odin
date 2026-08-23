@@ -419,7 +419,7 @@ Ents :: struct {
 	on_laser:      proc(_: ^Ents, _: ^Ent),
 	on_deflect:    proc(_: ^Ents, target: ^Ent, by: ^Ent),
 	stats:         [dynamic]Ent_Stats,
-	stats_name:    nm.Name,
+	map_name:      nm.Name,
 	using mapa:    Map,
 	spawn_seq:     ^Ent_Net_ID,
 	quad_tree:     Quad_Tree,

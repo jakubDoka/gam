@@ -198,7 +198,7 @@ Map :: struct {
 	ents:       []Map_Ent,
 	chargers:   []Map_Charger,
 	teams:      []Ent_Team,
-	asoc_stats: []Ent_Stats,
+	asoc_stats: Custom_Encoding,
 	asset_locs: []Asset_Loc_Entry,
 }
 

@@ -205,10 +205,12 @@ marshall :: proc(
 			}
 
 			if was_custom {
-				prev := len(e.remining)
-				slice.custom.encode(tmp_data, e) or_return
-				if !encoder_is_measuring(e) {
-					slice.len = prev - len(e.remining)
+				if slice.custom.encode != nil {
+					prev := len(e.remining)
+					slice.custom.encode(tmp_data, e) or_return
+					if !encoder_is_measuring(e) {
+						slice.len = prev - len(e.remining)
+					}
 				}
 			} else {
 				encode_slice(

@@ -121,7 +121,7 @@ client_handle_packet :: proc(
 		{
 			stats := client.ents.stats[:]
 			packet: sim.Server_Packet = sim.Server_Stats {
-				name  = client.ents.stats_name,
+				name  = client.ents.map_name,
 				stats = sim.custom_encoding_stats(&stats),
 			}
 
@@ -283,7 +283,7 @@ client_handle_packet :: proc(
 		}
 	case sim.Server_Stats:
 		clear(&client.ents.stats)
-		client.ents.stats_name = p.name
+		client.ents.map_name = p.name
 
 		d := sim.Decoder{p.stats.raw}
 		for len(d.remining) != 0 {

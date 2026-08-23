@@ -1214,6 +1214,8 @@ main_proc :: proc() {
 
 	if sim.TRACK_ALLOCATIONS {
 		hot.deinit(&hr)
+		db_res := sqlite.close(config.db)
+		sqlite.assert_ok(config.db, db_res)
 		nbio.destroy_event_loop(l)
 		context.logger = {}
 		client_static_deinit()

@@ -237,8 +237,6 @@ client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	delete(client.ents.stats)
 
 	sqlite.finalize(client.statements)
-	db_res := sqlite.close(client.db)
-	sqlite.assert_ok(client.db, db_res)
 }
 
 client_shutdown :: proc(client: ^Client) {
