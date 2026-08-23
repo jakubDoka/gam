@@ -170,7 +170,6 @@ game_tick :: proc(game: ^Game) {
 	{
 		stats := game.ents.stats[:]
 		packet := sim.Server_Stats {
-			name  = game.ents.map_name,
 			stats = sim.custom_encoding_stats(&stats),
 		}
 
@@ -192,8 +191,7 @@ game_tick :: proc(game: ^Game) {
 		}
 
 		packet := sim.Server_Cold_State {
-			dirty_stats = game.last_stats_hash != game.clean_stats_hash,
-			players     = players[:],
+			players = players[:],
 		}
 
 		ensure_up_to_date_hash(
@@ -205,8 +203,7 @@ game_tick :: proc(game: ^Game) {
 	}
 
 	{
-		packet := sim.Server_Map{game.map_buf}
-
+		packet := sim.Server_Map{game.ents.map_name, game.map_buf}
 		ensure_up_to_date_hash(game, &game.last_map_hash, packet, "map")
 	}
 
@@ -433,7 +430,7 @@ server_handle_packet :: proc(
 					you = e.net_id,
 					your_next_net_id = from.input.next_net_id,
 					ents = {value = {&game.ents, encode_state}},
-					stat_hash = game.last_stats_hash,
+					map_hash = game.last_map_hash,
 					players = players[:],
 				},
 			)
@@ -646,7 +643,6 @@ server_handle_packet :: proc(
 			path := asset_path(&asset)
 
 			content, err := nbio.read_entire_file(server.l, path)
-			defer delete(content)
 			reason = "nonexistent asset name to switch to"
 			if err != nil {
 				log.warn("failed to load stat group to switch to:", err)
@@ -654,34 +650,9 @@ server_handle_packet :: proc(
 			}
 
 			reason = "invalid map file"
-			if !game_set_map(game, content) do return
+			if !game_set_map(game, p.switch_to, content) do return
 
 			content = {}
-		case .Create_Group:
-			name := nm.str(&p.create_as)
-
-			reason = "invalid asset name to create"
-			if !sim.validate_asset_name(name) do return
-
-			asset := sim.Asset {
-				name = p.create_as,
-				type = .Stats,
-			}
-			sim.hash({}, &asset.hash)
-
-			path := asset_path(&asset)
-
-			err := nbio.make_directory_all(nbio.dir(path))
-			fmt.assertf(
-				err == nil || err == .Exist,
-				"failed to create parents of stat group: %v",
-				err,
-			)
-
-			err = nbio.write_entire_file(server.l, path, {})
-			assert(err == nil)
-
-			save_asset(server, &asset)
 		case .Save_Map:
 			name := nm.str(&p.create_as)
 
@@ -743,14 +714,19 @@ server_handle_packet :: proc(
 			return
 		}
 
+		stats := game.ents.stats[:]
+		p.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
+		me = {}
+		okm = sim.marshall(p.mapa, &me)
+		assert(okm)
+
 		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
-		defer if !ok do delete(buf)
 		me = {buf}
 
 		oka := sim.marshall(p.mapa, &me)
 		assert(oka)
 
-		okam := game_set_map(game, buf)
+		okam := game_set_map(game, game.ents.map_name, buf)
 		reason = "unloadable map"
 		if !okam do return
 
@@ -761,8 +737,6 @@ server_handle_packet :: proc(
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
 		save_asset(server, &asset)
-
-		ok = true
 	case sim.Broadcast_Packet:
 		cursor := bit_arr.dl_iter(&game.players)
 		for player in player_next(&cursor) {
@@ -807,7 +781,10 @@ pick_map :: proc(
 	l: ^nbio.Event_Loop,
 	index: int,
 	temp_allocator: runtime.Allocator,
-) -> string {
+) -> (
+	string,
+	nm.Name,
+) {
 	map_entries, map_entries_err := nbio.read_all_directory_by_path(
 		l,
 		sim.MAP_DIR,
@@ -833,13 +810,17 @@ pick_map :: proc(
 	)
 	assert(fperr == nil)
 
-	return full_path
+	// TODO(low): dont panic here and actually validate
+
+	return full_path, nm.from_str(
+		choosen.name[:len(choosen.name) - len(sim.MAP_EXT)],
+	)
 }
 
 game_load_next_map :: proc(game: ^Game) {
 	temp_allocator := context.temp_allocator
 
-	map_path := pick_map(game.l, game.map_index, temp_allocator)
+	map_path, name := pick_map(game.l, game.map_index, temp_allocator)
 	game.map_index += 1
 
 	map_bytes, map_bytes_err := nbio.read_entire_file(
@@ -849,11 +830,13 @@ game_load_next_map :: proc(game: ^Game) {
 	)
 	assert(map_bytes_err == nil)
 
-	ok := game_set_map(game, map_bytes)
+	ok := game_set_map(game, name, map_bytes)
 	assert(ok)
 }
 
-game_set_map :: proc(game: ^Game, buf: []u8) -> bool {
+// takes ownership of buf
+game_set_map :: proc(game: ^Game, name: nm.Name, buf: []u8) -> (ok: bool) {
+	defer if !ok do delete(buf)
 	mapa := sim.map_load(buf) or_return
 
 	delete(game.map_buf)
@@ -861,22 +844,10 @@ game_set_map :: proc(game: ^Game, buf: []u8) -> bool {
 
 	sim.ents_clear(&game.ents)
 	game.ents.mapa = mapa
+	game.ents.map_name = name
 
 	if len(mapa.asoc_stats.raw) != 0 {
-		clear(&game.ents.stats)
-
-		d := sim.Decoder{game.ents.mapa.asoc_stats.raw}
-		for len(d.remining) != 0 {
-			stat: sim.Ent_Stats
-			sim.ent_stats_decode(
-				&stat,
-				sim.Ent_Stats_ID(len(game.ents.stats)),
-				&d,
-			) or_break
-			append(&game.ents.stats, stat)
-		}
-
-		if len(d.remining) != 0 {
+		if !sim.ents_load_stats(&game.ents, game.ents.mapa.asoc_stats.raw) {
 			log.warn("some of the ent stats were invalid")
 		}
 	}

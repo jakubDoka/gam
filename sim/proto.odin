@@ -91,7 +91,6 @@ Content_Action_Type :: enum {
 	Create,
 	Edit,
 	Switch,
-	Create_Group,
 	Save_Map,
 	Delete_Map,
 }
@@ -200,7 +199,7 @@ Server_State :: struct {
 	you:              Ent_Net_ID,
 	your_next_net_id: Ent_Net_ID,
 	ents:             Custom_Encoding,
-	stat_hash:        Hash,
+	map_hash:         Hash,
 	players:          []Client_Input_Keys,
 }
 
@@ -209,6 +208,7 @@ Server_Config :: struct {
 }
 
 Server_Map :: struct {
+	name:  nm.Name,
 	bytes: []u8,
 }
 
@@ -230,8 +230,7 @@ Player :: struct {
 }
 
 Server_Cold_State :: struct {
-	dirty_stats: bool,
-	players:     []Player,
+	players: []Player,
 }
 
 Server_Global_Cold_State :: struct {
@@ -252,10 +251,11 @@ Server_Cmd :: struct {
 	count: int,
 }
 
+// NOTE: Server_Map also updates the stats, but this way the game can be
+// hotreloaded, meaning all entityes are preserved. Changes will also trigger
+// the save option in the ui, that will burn the final stats to the map.
 Server_Stats :: struct {
-	name:    nm.Name,
-	stats:   Custom_Encoding,
-	sprites: []u32,
+	stats: Custom_Encoding,
 }
 
 custom_encoding_slice :: proc(bytes: ^[]$T) -> Custom_Encoding {

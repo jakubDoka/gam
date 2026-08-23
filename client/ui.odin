@@ -1146,6 +1146,14 @@ ui_game_hud :: proc(client: ^Client) {
 		},
 	)
 
+	ui_label(
+		id("map-name"),
+		{
+			label = nm.str(&client.ents.map_name),
+			height = orui.fixed(ROW_HEIGHT),
+		},
+	)
+
 	transfere: {
 		Indicator :: struct {
 			name:     string,
@@ -1207,6 +1215,26 @@ ui_game_hud :: proc(client: ^Client) {
 			player := client.players[client.player_idx]
 
 			if .Edit_Content in player.permissions {
+
+				if ui_map_has_changes(client) {
+					if ui_icon_button(
+						id("map-editor-save"),
+						ROW_HEIGHT,
+						.ICON_FILE_SAVE_CLASSIC,
+						"Save map changes",
+					) {
+						pure.tcp_send(
+							client,
+							sim.Client_Map_Edit {
+								mapa = pure.map_export(
+									client,
+									&client.map_editing,
+								),
+							},
+						)
+					}
+				}
+
 				if ui_icon_button(
 					id("download-all-assets"),
 					ROW_HEIGHT,
@@ -1227,28 +1255,7 @@ ui_game_hud :: proc(client: ^Client) {
 				if is_key_pressed(client, .Open_Content_Editor) {
 					emit_event(client, .Open_Content_Editor, {priority = 1})
 				}
-			}
 
-			if client.map_editing.expanded && ui_map_has_changes(client) {
-				if ui_icon_button(
-					id("map-editor-save"),
-					ROW_HEIGHT,
-					.ICON_FILE_SAVE_CLASSIC,
-					"Save map changes",
-				) {
-					pure.tcp_send(
-						client,
-						sim.Client_Map_Edit {
-							mapa = pure.map_export(
-								client,
-								&client.map_editing,
-							),
-						},
-					)
-				}
-			}
-
-			if .Edit_Content in player.permissions {
 				ui_icon_dropdown(
 					id("map-editor-opener"),
 					&client.map_editing.expanded,

@@ -440,6 +440,20 @@ team_spawnable :: proc(team: Ent_Team_ID, counts: []int) -> bool {
 	return team != 0 && (counts[team] != ma || ma == mi)
 }
 
+ents_load_stats :: proc(ents: ^Ents, bytes: []u8) -> bool {
+	clear(&ents.stats)
+
+	d := Decoder{bytes}
+	for len(d.remining) != 0 {
+		i := len(ents.stats)
+		append(&ents.stats, Ent_Stats{})
+		slot := &ents.stats[i]
+		ent_stats_decode(slot, Ent_Stats_ID(i), &d) or_break
+	}
+
+	return len(d.remining) == 0
+}
+
 ents_is_authoritative :: proc(ents: ^Ents) -> bool {
 	return ents.spawn_seq != nil
 }

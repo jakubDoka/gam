@@ -4,7 +4,6 @@ import "../sim"
 import "../util/b58"
 import "../util/nm"
 import "../util/packer"
-import "../util/sqlite"
 import orui "../vendored/orui/src"
 import "base:runtime"
 import "core:fmt"
@@ -63,125 +62,6 @@ ui_content_editor :: proc(client: ^Client) {
 		if ctx.prev_scroll != 0 {
 			orui.set_scroll_offset(ctx.prev_scroll)
 			ctx.prev_scroll = 0
-		}
-
-		if ctx.creating_stats {
-			box(
-				id("content-stats-selection"),
-				{width = orui.grow(), gap = PADDING},
-			)
-
-			text, confirm := ui_text_input(
-				id("create-stats-name"),
-				&ctx.create_stats_name,
-				{
-					placeholder = "Stat Group Name...",
-					height = orui.fixed(ROW_HEIGHT),
-					width = orui.grow(),
-				},
-			)
-
-			str, ok := nm.from_str(text)
-			is_valid := ok && sim.validate_asset_name(text)
-
-			ui_set_validity(id("create-stats-name"), is_valid)
-
-			if confirm && is_valid {
-				pure.tcp_send(
-					client,
-					sim.Client_Content_Action {
-						type = .Create_Group,
-						create_as = str,
-					},
-				)
-			}
-
-			ctx.creating_stats ~=
-				ui_icon_button(
-					id("stats-switch-close"),
-					ROW_HEIGHT,
-					.ICON_CROSS,
-					"Cancel stats creation.",
-				) ||
-				confirm && is_valid
-		} else if ctx.switch_stats {
-			box(
-				id("content-stats-selection"),
-				{
-					width = orui.grow(),
-					gap = PADDING,
-					flex_wrap = .Wrap,
-					align_main = .Center,
-				},
-			)
-
-			query, stmt := sqlite.query(
-				client.get_server_assets_of_type,
-				pure.Saved_Asset,
-				client.hctx.sh.id,
-				sim.Asset_Type.Stats,
-			)
-			for asset in sqlite.query_next(&query) {
-				if ui_button(
-					id("stat-switch-btn", asset.id),
-					{
-						label = nm.str(&asset.name),
-						height = orui.fixed(ROW_HEIGHT),
-					},
-				) {
-					pure.tcp_send(
-						client,
-						sim.Client_Content_Action {
-							type = .Switch,
-							switch_to = asset.name,
-						},
-					)
-				}
-			}
-			sqlite.reset(stmt)
-
-			ctx.switch_stats ~= ui_icon_button(
-				id("stats-switch-close"),
-				ROW_HEIGHT,
-				.ICON_CROSS,
-				"Cancel stats switch.",
-			)
-		} else {
-			box(id("content-editor-r1"), {width = orui.grow(), gap = PADDING})
-			name := nm.str(&client.ents.map_name)
-
-			ui_label(
-				id("stats-name"),
-				{
-					label = name,
-					height = orui.fixed(ROW_HEIGHT),
-					width = orui.grow(),
-					align = .Start,
-				},
-			)
-
-			ctx.switch_stats ~= ui_icon_button(
-				id("stats-switch"),
-				ROW_HEIGHT,
-				.ICON_LINK_MULTI,
-				"Switch active content stats.",
-			)
-
-			ctx.creating_stats ~= ui_icon_button(
-				id("stats-switch-create"),
-				ROW_HEIGHT,
-				.ICON_FILE_ADD,
-				"Create new stats.",
-			)
-
-			if ui_icon_button(
-				id("stats-settingss"),
-				ROW_HEIGHT,
-				.ICON_GEAR_BIG,
-				"Manage stat settings.",
-			) {
-
-			}
 		}
 
 		query, confirmed := ui_text_input(

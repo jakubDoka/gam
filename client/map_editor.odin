@@ -22,7 +22,6 @@ UI_Map_Editor :: struct {
 	resizing:           bool,
 	saving_map:         bool,
 	selecting_map:      bool,
-	map_hash:           sim.Hash,
 	brush:              UI_Map_Editor_Brush,
 	editing_brush:      bool,
 	editing_brush_text: strings.Builder,
@@ -72,16 +71,7 @@ ui_map_editor_sync :: proc(client: ^Client) {
 }
 
 ui_map_has_changes :: proc(client: ^Client) -> bool {
-	context.allocator = context.temp_allocator
-
-	mapa := pure.map_export(client, &client.map_editing)
-
-	buf := sim.serialize_to_bytes(mapa)
-
-	hash: sim.Hash
-	sim.hash(buf, &hash)
-
-	return hash != client.map_editing.map_hash
+	return pure.map_has_changes(client, &client.map_editing)
 }
 
 ui_map_editor :: proc(client: ^Client) {

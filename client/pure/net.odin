@@ -119,16 +119,15 @@ client_handle_packet :: proc(
 		client.tps = p.tps
 
 		{
-			stats := client.ents.stats[:]
-			packet: sim.Server_Packet = sim.Server_Stats {
-				name  = client.ents.map_name,
-				stats = sim.custom_encoding_stats(&stats),
+			packet: sim.Server_Packet = sim.Server_Map {
+				client.ents.map_name,
+				client.map_buf,
 			}
+			bytes := sim.serialize_to_bytes(packet, context.temp_allocator)
 
-			buf := sim.serialize_to_bytes(packet, context.temp_allocator)
-			stats_hash: sim.Hash
-			sim.hash(buf, &stats_hash)
-			if stats_hash != p.stat_hash do break
+			hash: sim.Hash
+			sim.hash(bytes, &hash)
+			if hash != p.map_hash do return
 		}
 
 		present := bit_arr.init(len(client.ents.slots), context.temp_allocator)
@@ -256,11 +255,16 @@ client_handle_packet :: proc(
 		}
 
 	case sim.Server_Map:
+		client.ents.map_name = p.name
 		delete(client.map_buf)
 		client.map_buf = slice.clone(p.bytes)
 		mapa, ok := sim.map_load(client.map_buf)
 		if !ok do break
 		client.ents.mapa = mapa
+
+		assert(slice.equal(p.bytes, client.map_buf))
+
+		sim.ents_load_stats(&client.ents, client.ents.mapa.asoc_stats.raw)
 
 		client_fetch_missig_assets(
 			client,
@@ -268,8 +272,6 @@ client_handle_packet :: proc(
 		)
 	case sim.Server_Cold_State:
 		clear(&client.players)
-
-		client.has_dirty_config = p.dirty_stats
 
 		for &pl in p.players {
 			append(&client.players, Player{pl, {}, {}})
@@ -282,16 +284,7 @@ client_handle_packet :: proc(
 			}
 		}
 	case sim.Server_Stats:
-		clear(&client.ents.stats)
-		client.ents.map_name = p.name
-
-		d := sim.Decoder{p.stats.raw}
-		for len(d.remining) != 0 {
-			i := len(client.ents.stats)
-			append(&client.ents.stats, sim.Ent_Stats{})
-			slot := &client.ents.stats[i]
-			sim.ent_stats_decode(slot, sim.Ent_Stats_ID(i), &d) or_return
-		}
+		sim.ents_load_stats(&client.ents, p.stats.raw)
 
 		assets := make([dynamic]sim.Asset_ID, context.temp_allocator)
 

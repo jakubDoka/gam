@@ -90,7 +90,6 @@ Client :: struct {
 	using config:          ^Config,
 	using statements:      Statements,
 	did_shutdown:          bool,
-	has_dirty_config:      bool,
 	upload:                Upload_State,
 	messages:              Chat_Ring,
 	ip_error:              string,
@@ -303,6 +302,20 @@ Map_Edit_State :: struct {
 	teams:           [dynamic]sim.Ent_Team,
 	width:           int,
 	height:          int,
+	map_hash:        sim.Hash,
+}
+
+map_has_changes :: proc(client: ^Client, ctx: ^Map_Edit_State) -> bool {
+	context.allocator = context.temp_allocator
+
+	mapa := map_export(client, ctx)
+
+	buf := sim.serialize_to_bytes(mapa)
+
+	hash: sim.Hash
+	sim.hash(buf, &hash)
+
+	return hash != ctx.map_hash
 }
 
 map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
@@ -328,7 +341,8 @@ map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
 			client.ents.mapa.tiles[i] ~ int(ctx.changed_terrain.masks[i])
 	}
 
-	if mapa.width != ctx.width || mapa.height != ctx.height {
+	if (mapa.width != ctx.width || mapa.height != ctx.height) &&
+	   ctx.width + ctx.height != 0 {
 		old_tiles := bit_arr.Bit_Set {
 			raw_data(mapa.tiles),
 			mapa.width * mapa.height,
