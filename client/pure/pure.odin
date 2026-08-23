@@ -311,6 +311,9 @@ map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
 	mapa.width = client.ents.width
 	mapa.height = client.ents.height
 	mapa.sprites = client.ents.sprites
+	mapa.asoc_stats = sim.custom_encoding_stats(
+		new_clone(client.ents.stats[:]),
+	)
 
 	mapa.tiles = make(
 		[]int,

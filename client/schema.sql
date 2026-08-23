@@ -31,9 +31,5 @@ CREATE TABLE IF NOT EXISTS asset (
 	name TEXT NOT NULL,
 	type INTEGER NOT NULL,
 
-	UNIQUE (server, name),
-
-	PRIMARY KEY (id, server)
+	PRIMARY KEY (server, name)
 ) STRICT;
-
-CREATE INDEX IF NOT EXISTS asset_name ON asset (server, name);

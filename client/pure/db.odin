@@ -83,7 +83,6 @@ Statements :: struct {
 	`,
 	save_asset:                sqlite.Statement `
 		INSERT INTO asset VALUES (?, ?, ?, ?)
-			ON CONFLICT (id, server) DO UPDATE SET name = ?3, type = ?4
 			ON CONFLICT (server, name) DO UPDATE SET id = ?2, type = ?4 
 	`,
 	get_server_assets:         sqlite.Statement `

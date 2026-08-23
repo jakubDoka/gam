@@ -90,7 +90,6 @@ Client_Content_Action :: struct {
 Content_Action_Type :: enum {
 	Create,
 	Edit,
-	Save,
 	Switch,
 	Create_Group,
 	Save_Map,
@@ -257,6 +256,14 @@ Server_Stats :: struct {
 	name:    nm.Name,
 	stats:   Custom_Encoding,
 	sprites: []u32,
+}
+
+custom_encoding_slice :: proc(bytes: ^[]$T) -> Custom_Encoding {
+	return {value = {bytes, encode_bytes}}
+
+	encode_bytes :: proc(data: rawptr, e: ^Encoder) -> bool {
+		return encode_slice(e, (^[]T)(data)^)
+	}
 }
 
 custom_encoding_stats :: proc(stats: ^[]Ent_Stats) -> Custom_Encoding {

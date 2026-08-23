@@ -89,7 +89,6 @@ UI_Event_Kind :: enum {
 	Quit_Content_Editor,
 	Open_Content_Editor,
 	Close_Stat_Editor,
-	Save_Content_Changes,
 	Open_Map_Editor,
 	Close_Map_Editor,
 	Focus,
@@ -1207,20 +1206,6 @@ ui_game_hud :: proc(client: ^Client) {
 		} else {
 			player := client.players[client.player_idx]
 
-			if (client.content_editor.expanded ||
-				   client.content_editor.selected != 0) &&
-			   client.has_dirty_config {
-				if ui_icon_button(
-					   id("content-edinting-save"),
-					   ROW_HEIGHT,
-					   .ICON_FILE_SAVE_CLASSIC,
-					   "Save content changes",
-				   ) ||
-				   is_key_pressed(client, .Save) {
-					emit_event(client, .Save_Content_Changes, {priority = 1})
-				}
-			}
-
 			if .Edit_Content in player.permissions {
 				if ui_icon_button(
 					id("download-all-assets"),
@@ -1820,7 +1805,6 @@ ui_build :: proc(client: ^Client) {
 		case .Disconnect,
 		     .Quit_Content_Editor,
 		     .Open_Content_Editor,
-		     .Save_Content_Changes,
 		     .Close_Stat_Editor,
 		     .Close_Map_Editor,
 		     .Open_Map_Editor,
@@ -1860,8 +1844,6 @@ ui_build :: proc(client: ^Client) {
 			client.ui.content_editor.expanded = false
 		case .Open_Content_Editor:
 			client.ui.content_editor.expanded = true
-		case .Save_Content_Changes:
-			pure.tcp_send(client, sim.Client_Content_Action{type = .Save})
 		case .Close_Stat_Editor:
 			client.content_editor.selected = 0
 		case .Open_Map_Editor:

@@ -22,16 +22,14 @@ CREATE TABLE IF NOT EXISTS ip_sighting (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS asset (
-	id INTEGER NOT NULL PRIMARY KEY,
+	id INTEGER NOT NULL,
 	name TEXT NOT NULL,
-	hash BLOB NOT NULL UNIQUE,
+	hash BLOB NOT NULL,
 	size INTEGER NOT NULL,
 	type INTEGER NOT NULL,
 	visited INTEGER NOT NULL,
 
-	UNIQUE (name, type)
+	PRIMARY KEY (name, type)
 ) STRICT;
-
-CREATE INDEX IF NOT EXISTS asset_name ON asset (name);
 
 UPDATE asset SET visited = 0;

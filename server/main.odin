@@ -11,7 +11,6 @@ import "../util/sqlite"
 import "base:runtime"
 import "core:container/lru"
 import "core:fmt"
-import "core:io"
 import "core:log"
 import "core:math/linalg"
 import "core:mem"
@@ -292,7 +291,6 @@ Server_Statements :: struct {
 		VALUES (?, ?, ?, ?, ?, 1)
 		ON CONFLICT (name, type) DO UPDATE
 			SET id = ?1, hash = ?3, size = ?4, visited = 1
-		ON CONFLICT (hash) DO UPDATE SET name = ?2, visited = 1
 	`,
 	count_assets:        sqlite.Statement `
 		SELECT count(*) FROM asset
@@ -635,50 +633,6 @@ server_handle_packet :: proc(
 			game.ents.stats[stats.id] = stats
 
 			reason = ""
-		case .Save:
-			group_asset := sim.Asset {
-				name = game.ents.map_name,
-				type = .Stats,
-			}
-
-			path := asset_path(&group_asset)
-
-			edited_file, edited_file_err := nbio.open(
-				server.l,
-				path,
-				{.Create, .Trunc, .Write},
-			)
-			log.assertf(
-				edited_file_err == nil,
-				"failed to open the edited config",
-			)
-
-			edited_stream := nbio.to_stream(edited_file)
-
-			ctx: sim.Store_Ctx
-			ctx.asoc_data = server
-			ctx.sprite_name = proc(ptr: rawptr, id: sim.Asset_ID) -> string {
-				server := (^Server)(ptr)
-
-				asset: Saved_Asset
-				res, stmt := sqlite.query(server.get_asset, asset, id)
-				sqlite.assert_ok(stmt, res)
-				sqlite.reset(stmt)
-
-				return strings.clone(
-					nm.str(&asset.name),
-					context.temp_allocator,
-				)
-			}
-			ctx.stats = game.ents.stats[:]
-
-			sim.store_config(ctx, edited_stream)
-
-			io.close(edited_stream)
-
-			server_bundle_refresh(server)
-
-			game.clean_stats_hash = game.last_stats_hash
 		case .Switch:
 			name := nm.str(&p.switch_to)
 
@@ -773,6 +727,9 @@ server_handle_packet :: proc(
 
 		me: sim.Encoder
 
+		bytes := p.mapa.asoc_stats.raw
+		p.mapa.asoc_stats = sim.custom_encoding_slice(&bytes)
+
 		okm := sim.marshall(p.mapa, &me)
 		assert(okm)
 		reason = "map with overlapping regions"
@@ -785,13 +742,6 @@ server_handle_packet :: proc(
 			)
 			return
 		}
-
-		stats := game.ents.stats[:]
-		p.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
-
-		me = {}
-		okm = sim.marshall(p.mapa, &me)
-		assert(okm)
 
 		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
 		defer if !ok do delete(buf)
@@ -1335,7 +1285,7 @@ server_on_tick :: proc(op: ^nbio.Operation, server: ^Server) {
 	free_all(context.temp_allocator)
 }
 
-server_bundle_refresh :: proc(server: ^Server) {
+sync_assets :: proc(server: ^Server) {
 	Ctx :: struct {
 		server: ^Server,
 		type:   sim.Asset_Type,
@@ -1375,38 +1325,6 @@ server_bundle_refresh :: proc(server: ^Server) {
 
 	_, psres := sqlite.exec(server.prune_assets)
 	sqlite.assert_ok(server.prune_assets, psres)
-
-	config: []u8
-	config_err: nbio.Error
-
-	paths := []string{CONFIG_PATH_EDITED, CONFIG_PATH}
-
-	for path in paths {
-		config, config_err = nbio.read_entire_file(
-			server.l,
-			path,
-			context.temp_allocator,
-		)
-		if config_err == nil do break
-	}
-	fmt.assertf(
-		config_err == nil,
-		"Failed to load config from %v: %v",
-		paths,
-		config_err,
-	)
-
-	stats := load_stats(server, string(config))
-
-	{
-		// TODO(low): this should be extracted out
-		// low: idk
-		game := &server.lobby
-
-		delete(game.ents.stats)
-		game.ents.map_name = nm.from_str("default")
-		game.ents.stats = stats
-	}
 }
 
 load_stats :: proc(server: ^Server, config: string) -> [dynamic]sim.Ent_Stats {
@@ -1638,7 +1556,7 @@ server_init_without_game :: proc(
 		}
 	}
 
-	server_bundle_refresh(server)
+	sync_assets(server)
 
 	init_net: {
 		udp_sock, create_err := nbio.create_udp_socket(.IP4, server.l)
