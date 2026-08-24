@@ -82,22 +82,23 @@ DEFAULT_MAPS := [?]Default_Map {
 }
 
 Connection :: struct {
-	using hctx:     sim.Handshake,
-	observed_ticks: int,
-	tcp_endpoint:   nbio.Endpoint,
-	udp_endpoint:   nbio.Endpoint,
-	last_packet:    time.Time,
-	input:          sim.Input_State,
-	ent:            sim.Ent_ID,
-	rtt:            rtt.Estimator,
-	using player:   sim.Player,
-	next_free:      ^Connection,
-	resolving_udp:  bit_arr.DL_Node,
-	listener:       bit_arr.DL_Node,
-	in_game:        bit_arr.DL_Node,
-	game:           ^Game,
-	last_info:      sim.Server_Info,
-	list_stmt:      sqlite.Query(sim.Asset),
+	using hctx:              sim.Handshake,
+	observed_ticks:          int,
+	tcp_endpoint:            nbio.Endpoint,
+	udp_endpoint:            nbio.Endpoint,
+	last_packet:             time.Time,
+	input:                   sim.Input_State,
+	ent:                     sim.Ent_ID,
+	rtt:                     rtt.Estimator,
+	using player:            sim.Player,
+	next_free:               ^Connection,
+	resolving_udp:           bit_arr.DL_Node,
+	listener:                bit_arr.DL_Node,
+	in_game:                 bit_arr.DL_Node,
+	game:                    ^Game,
+	last_info:               sim.Server_Info,
+	list_stmt:               sqlite.Query(sim.Asset),
+	pauses_game_progression: bool,
 }
 
 Game :: struct {
@@ -153,32 +154,39 @@ game_tick :: proc(game: ^Game) {
 		}
 	}
 
+	pause_game_progression := false
 	cursor := bit_arr.dl_iter(&game.players)
 	for p in player_next(&cursor) {
 		rtt := rtt.smoothed(&p.rtt)
 		sim.ents_integrate_input(&game.ents, p.ent, rtt, &p.input)
 		p.observed_ticks += 1
+		pause_game_progression |= p.pauses_game_progression
 	}
 
 	sim.ents_update(&game.ents)
+
+	if !pause_game_progression {
+		alives := make([]bool, len(game.ents.teams), context.temp_allocator)
+		iter := sim.ents_iter(&game.ents)
+		for e in sim.ents_iter_next(&iter) {
+			s := sim.ents_stats_get(&game.ents, e.stats)
+			if int(e.team) >= len(alives) do continue
+			alives[e.team] |= s.can_spawn_player
+		}
+
+		active_teams := 0
+		for a in alives do active_teams += int(a)
+
+		if active_teams <= 1 {
+			game_load_next_map(game)
+		}
+	}
 
 	// NOTE: we do a immediate mode synchronization -> check if hash of a
 	// packet changed and send it. Nice property of this is that we dont need
 	// to remember to sync on mutation although we trade extra computation.
 	//
 	// Its to be evaluated if that is an actuall performance problem.
-	{
-		stats := game.ents.stats[:]
-		packet := sim.Server_Stats {
-			stats = sim.custom_encoding_stats(&stats),
-		}
-
-		ensure_up_to_date_hash(game, &game.last_stats_hash, packet, "stats")
-
-		if game.clean_stats_hash == {} {
-			game.clean_stats_hash = game.last_stats_hash
-		}
-	}
 
 	{
 		players := make([dynamic]sim.Player, context.temp_allocator)
@@ -205,6 +213,19 @@ game_tick :: proc(game: ^Game) {
 	{
 		packet := sim.Server_Map{game.ents.map_name, game.map_buf}
 		ensure_up_to_date_hash(game, &game.last_map_hash, packet, "map")
+	}
+
+	{
+		stats := game.ents.stats[:]
+		packet := sim.Server_Stats {
+			stats = sim.custom_encoding_stats(&stats),
+		}
+
+		ensure_up_to_date_hash(game, &game.last_stats_hash, packet, "stats")
+
+		if game.clean_stats_hash == {} {
+			game.clean_stats_hash = game.last_stats_hash
+		}
 	}
 
 	ensure_up_to_date_hash :: proc(
@@ -543,6 +564,8 @@ server_handle_packet :: proc(
 	case sim.Client_Cold_State:
 		name := nm.str(&p.username)
 
+		from.pauses_game_progression = p.pause_game_progression
+
 		login: if len(name) != 0 {
 			ip := ip_to_integers(from.tcp_endpoint.address)
 			query_res, s := sqlite.query(
@@ -607,6 +630,7 @@ server_handle_packet :: proc(
 
 			server_clear_violations(server, ip)
 		}
+
 	case sim.Client_Content_Action:
 		switch p.type {
 		case .Create:
@@ -630,6 +654,21 @@ server_handle_packet :: proc(
 			game.ents.stats[stats.id] = stats
 
 			reason = ""
+		case .Delete_Stat:
+			reason = "id out of bounds"
+			if p.stats.id < 0 || int(p.stats.id) >= len(game.ents.stats) do return
+
+			game.ents.stats[len(game.ents.stats) - 1].id = p.stats.id
+
+			unordered_remove(&game.ents.stats, p.stats.id)
+
+			for it := sim.ents_iter(&game.ents); e in sim.ents_iter_next(&it) {
+				if e.stats == p.stats.id {
+					sim.ents_queue_remove(&game.ents, e.id)
+				} else if int(e.stats) == len(game.ents.stats) {
+					e.stats = p.stats.id
+				}
+			}
 		case .Switch:
 			name := nm.str(&p.switch_to)
 
@@ -685,6 +724,8 @@ server_handle_packet :: proc(
 			assert(err == nil)
 
 			save_asset(server, &asset)
+
+			game.ents.map_name = p.create_as
 		case .Delete_Map:
 			log.error("TODO: implement map deletion")
 		}
@@ -1277,8 +1318,6 @@ sync_assets :: proc(server: ^Server) {
 		sim.SPRITE_EXT,
 		visit_file,
 	)
-	ctx.type = .Stats
-	visit_files(server.l, server.cwd, sim.STATS_DIR, sim.STATS_EXT, visit_file)
 
 	visit_file :: proc(name: string, content: []u8) {
 		ctx := (^Ctx)(context.user_ptr)
@@ -1329,7 +1368,6 @@ load_stats :: proc(server: ^Server, config: string) -> [dynamic]sim.Ent_Stats {
 		}
 		return asset.id, ""
 	}
-
 }
 
 visit_files :: proc(

@@ -19,14 +19,12 @@ STATS_EXT :: ".gyml"
 EXT_BY_TYPE := [Asset_Type]string {
 	.Map    = MAP_EXT,
 	.Sprite = SPRITE_EXT,
-	.Stats  = STATS_EXT,
 }
 
 @(rodata)
 DIR_BY_TYPE := [Asset_Type]string {
 	.Map    = MAP_DIR,
 	.Sprite = SPRITE_DIR,
-	.Stats  = STATS_DIR,
 }
 
 Relative_Slice :: struct {
@@ -147,6 +145,8 @@ serialize_to_bytes :: proc(
 	ok := marshall(header, &e)
 	assert(ok)
 
+	assert(mem.is_aligned(rawptr(uintptr(encoded_len(&e))), 8))
+
 	buf, _ := mem.alloc_bytes(encoded_len(&e), 8, allocator)
 
 	e = {buf}
@@ -156,19 +156,12 @@ serialize_to_bytes :: proc(
 	return buf
 }
 
-marshall :: proc(
-	header: any,
-	e: ^Encoder,
-	buffer_len: int = -1,
-) -> (
-	ok: bool,
-) {
-
+marshall :: proc(header: any, e: ^Encoder) -> (ok: bool) {
 	if bytes, ok := header.([]u8); ok {
 		return encode_slice(e, bytes)
 	}
 
-	buffer_len := buffer_len if buffer_len != -1 else len(e.remining)
+	buffer_len := len(e.remining)
 
 	header_slot := encoder_reserve(
 		e,
@@ -225,9 +218,10 @@ marshall :: proc(
 
 	copy(header_slot, reflect.as_bytes(header))
 
-	written := buffer_len - len(e.remining)
+	// NOTE: abs here accounts for the measurement mode
+	written := abs(buffer_len - len(e.remining))
 	aligned := mem.align_forward_int(written, 8)
-	encoder_reserve(e, aligned - written)
+	encoder_reserve(e, aligned - written) or_return
 
 	return true
 }

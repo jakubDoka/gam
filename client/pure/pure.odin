@@ -89,6 +89,7 @@ Client :: struct {
 	using hctx:            sim.Handshake,
 	using config:          ^Config,
 	using statements:      Statements,
+	edit_mode_on:          bool,
 	did_shutdown:          bool,
 	upload:                Upload_State,
 	messages:              Chat_Ring,

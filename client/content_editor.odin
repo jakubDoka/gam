@@ -16,11 +16,24 @@ import "core:strings"
 import "pure"
 import rl "vendor:raylib"
 
+emit_set_event :: proc(
+	client: ^Client,
+	slot: ^$T,
+	value: T,
+	base: UI_Event = {},
+) {
+	base := base
+	base.kind = .Set_Value
+	base.set_target = {slot, typeid_of(T)}
+	base.set_value = {new_clone(value, context.temp_allocator), typeid_of(T)}
+	emit_event(client, .Set_Value, base)
+}
+
 ui_content_editor :: proc(client: ^Client) {
 	ctx := &client.ui.content_editor
 
 	if is_key_pressed(client, .Exit) {
-		emit_event(client, .Quit_Content_Editor, {priority = 3})
+		emit_set_event(client, &ctx.expanded, false, {priority = 3})
 	}
 
 	box(
@@ -95,27 +108,55 @@ ui_content_editor :: proc(client: ^Client) {
 			})
 		}
 
-		for stats, i in order {
-			name := nm.str(&stats.name)
-			matched_chars := pure.fuzzy_rank_new_bitset(name, query)
+		{box(
+				id("stat-selector-table"),
+				{
+					layout = .Grid,
+					cols = 2,
+					rows = 10000,
+					width = orui.grow(),
+					col_sizes = {orui.grow(), {}},
+					gap = PADDING,
+				},
+			)
 
-			if ui_button(
-				   id("stat-selector", i),
-				   {
-					   label = name,
-					   width = orui.grow(),
-					   height = orui.fixed(ROW_HEIGHT),
-					   background = .SECONDARY,
-					   focused_color = .PRIMARY,
-					   custom_dc = draw_call_init_text_highlight(
-						   matched_chars,
-					   ),
-				   },
-			   ) ||
-			   (i == 0 && confirmed) {
-				ctx.prev_scroll = prev_scroll
-				orui.set_scroll_offset(ce, 0)
-				emit_event(client, .Select_Stat, {stats = stats.id})
+			for stats, i in order {
+				name := nm.str(&stats.name)
+				matched_chars := pure.fuzzy_rank_new_bitset(name, query)
+
+				if ui_button(
+					   id("stat-selector", i),
+					   {
+						   label = name,
+						   width = orui.grow(),
+						   height = orui.fixed(ROW_HEIGHT),
+						   background = .SECONDARY,
+						   focused_color = .PRIMARY,
+						   custom_dc = draw_call_init_text_highlight(
+							   matched_chars,
+						   ),
+					   },
+				   ) ||
+				   (i == 0 && confirmed) {
+					ctx.prev_scroll = prev_scroll
+					orui.set_scroll_offset(ce, 0)
+					emit_event(client, .Select_Stat, {stats = stats.id})
+				}
+
+				if ui_icon_button(
+					id("stat-selector-delete", i),
+					ROW_HEIGHT,
+					.ICON_BIN,
+					"Delete the stats.",
+				) {
+					pure.tcp_send(
+						client,
+						sim.Client_Content_Action {
+							type = .Delete_Stat,
+							stats = {id = stats.id},
+						},
+					)
+				}
 			}
 		}
 
@@ -221,7 +262,7 @@ ui_content_editor :: proc(client: ^Client) {
 				   "Close editor",
 			   ) ||
 			   is_key_pressed(client, .Exit) {
-				emit_event(client, .Close_Stat_Editor, {priority = 4})
+				emit_set_event(client, &ctx.selected, 0, {priority = 4})
 			}
 		}
 
@@ -494,7 +535,6 @@ ui_file_upload :: proc(client: ^Client) {
 				EXT_TO_ICON := [sim.Asset_Type]rl.GuiIconName {
 					.Map    = .ICON_GRID,
 					.Sprite = .ICON_FILETYPE_IMAGE,
-					.Stats  = .ICON_TEXT_NOTES,
 				}
 
 				ui_icon_button(

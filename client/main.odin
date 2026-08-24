@@ -516,6 +516,7 @@ refresh_sheet :: proc(client: ^Client) {
 client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 	client.ents.delta = 1.0 / 60
 	client.ents.on_remove = client_on_remove
+	client.ents.on_laser = proc(_: ^sim.Ents, _: ^sim.Ent) {}
 	client.rtt = sync.atomic_load(&client.shared_rtt)
 	client.on_sheet_refresh = refresh_sheet
 

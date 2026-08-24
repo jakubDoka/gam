@@ -85,12 +85,8 @@ UI_Event_Kind :: enum {
 	Select_Team,
 	Delete_Team,
 	Select_Profile,
+	Set_Value,
 	Disconnect,
-	Quit_Content_Editor,
-	Open_Content_Editor,
-	Close_Stat_Editor,
-	Open_Map_Editor,
-	Close_Map_Editor,
 	Focus,
 	Apply_Content_Changes,
 }
@@ -114,6 +110,8 @@ Key_Bind :: enum {
 	Build_Select_Clear,
 	Open_Content_Editor,
 	Open_Map_Editor,
+	Open_Map_Selection,
+	Open_Map_Save,
 	Save,
 	Select_Finder,
 }
@@ -150,6 +148,8 @@ BIND_TO_KEY := [Key_Bind]Key {
 	.Build_Select_Clear  = MousetButton.RIGHT,
 	.Open_Content_Editor = .C,
 	.Open_Map_Editor     = .B,
+	.Open_Map_Selection  = .R,
+	.Open_Map_Save       = .T,
 	.Save                = Mod_And_Key{.LEFT_CONTROL, .S},
 	.Select_Finder       = .F,
 }
@@ -164,6 +164,8 @@ UI_Event :: struct {
 	target:       orui.Id,
 	carret_index: int,
 	stats:        sim.Ent_Stats_ID,
+	set_target:   any,
+	set_value:    any,
 }
 
 emit_event :: proc(r: ^UI_Reactor, kind: UI_Event_Kind, event: UI_Event) {
@@ -605,7 +607,8 @@ ui_connection_menu :: proc(client: ^Client) {
 			endp, identity, ok := pure.parse_conn_string(row.conn_string)
 
 			for oentry, i in ctx.server_info_cache {
-				if oentry.expected_identity == row.pk {
+				if oentry.expected_identity == row.pk &&
+				   oentry.server_endpoint == endp {
 					entry = oentry
 					entry_idx = i
 				}
@@ -616,6 +619,7 @@ ui_connection_menu :: proc(client: ^Client) {
 				fetch_server_info(entry, endp, client.l)
 				entry_idx = len(ctx.server_info_cache)
 				entry.expected_identity = row.pk
+				entry.server_endpoint = endp
 				append(&ctx.server_info_cache, entry)
 			}
 
@@ -623,7 +627,7 @@ ui_connection_menu :: proc(client: ^Client) {
 			entry.present = true
 
 			{box(
-					id("server-name-row"),
+					id("server-name-row", i),
 					{
 						width = orui.grow(),
 						height = orui.fixed(ROW_HEIGHT),
@@ -676,7 +680,7 @@ ui_connection_menu :: proc(client: ^Client) {
 
 			if len(entry.error) != 0 {
 				ui_error_label(
-					id("dial-server-error"),
+					id("dial-server-error", i),
 					entry.error,
 					orui.grow(),
 					orui.fixed(ROW_HEIGHT),
@@ -694,7 +698,7 @@ ui_connection_menu :: proc(client: ^Client) {
 			if entry.expected_identity != entry.sh.id &&
 			   entry.expected_identity != {} {
 				ui_error_label(
-					id("server-invalid-identity"),
+					id("server-invalid-identity", i),
 					"servers idenitty changed",
 					orui.grow(),
 					orui.fixed(ROW_HEIGHT),
@@ -703,7 +707,7 @@ ui_connection_menu :: proc(client: ^Client) {
 			}
 
 			box(
-				id("server-info-table"),
+				id("server-info-table", i),
 				{
 					width = orui.grow(),
 					gap = PADDING,
@@ -726,12 +730,12 @@ ui_connection_menu :: proc(client: ^Client) {
 				)
 
 				ui_label(
-					id("server-info-field-name"),
+					id("server-info-field-name", i),
 					{label = fmt.tprintf("%v:", name), background = .NONE},
 				)
 
 				ui_label(
-					id("server-info-field-value"),
+					id("server-info-field-value", i),
 					{label = fmt.tprint(value), background = .NONE},
 				)
 			}
@@ -1215,6 +1219,14 @@ ui_game_hud :: proc(client: ^Client) {
 			player := client.players[client.player_idx]
 
 			if .Edit_Content in player.permissions {
+				ui_icon_dropdown(
+					id("edit mode toggle"),
+					&client.edit_mode_on,
+					ROW_HEIGHT,
+					.ICON_PLAYER_PAUSE,
+					"game progression.",
+					{open_verb = "Pause", close_verb = "Resume"},
+				)
 
 				if ui_map_has_changes(client) {
 					if ui_icon_button(
@@ -1253,7 +1265,12 @@ ui_game_hud :: proc(client: ^Client) {
 				)
 
 				if is_key_pressed(client, .Open_Content_Editor) {
-					emit_event(client, .Open_Content_Editor, {priority = 1})
+					emit_set_event(
+						client,
+						&client.content_editor.expanded,
+						true,
+						{priority = 1},
+					)
 				}
 
 				ui_icon_dropdown(
@@ -1265,7 +1282,12 @@ ui_game_hud :: proc(client: ^Client) {
 				)
 
 				if is_key_pressed(client, .Open_Map_Editor) {
-					emit_event(client, .Open_Map_Editor, {priority = 1})
+					emit_set_event(
+						client,
+						&client.map_editing.expanded,
+						true,
+						{priority = 1},
+					)
 				}
 			}
 		}
@@ -1801,7 +1823,6 @@ ui_build :: proc(client: ^Client) {
 
 	for &ev in client.events {
 		if ev.bind != .Nil {
-			fmt.println(ev)
 			append(
 				&client.captured_key_binds,
 				key_or_mouse_from_key(BIND_TO_KEY[ev.bind]),
@@ -1809,14 +1830,7 @@ ui_build :: proc(client: ^Client) {
 		}
 
 		switch ev.kind {
-		case .Disconnect,
-		     .Quit_Content_Editor,
-		     .Open_Content_Editor,
-		     .Close_Stat_Editor,
-		     .Close_Map_Editor,
-		     .Open_Map_Editor,
-		     .Apply_Content_Changes,
-		     .Focus:
+		case .Disconnect, .Apply_Content_Changes, .Set_Value, .Focus:
 			slot := &winning_kb_events[ev.bind]
 			if slot.priority < ev.priority {
 				slot^ = ev
@@ -1847,16 +1861,11 @@ ui_build :: proc(client: ^Client) {
 		#partial switch ev.kind {
 		case .Disconnect:
 			pure.client_clear_state(client, "manual disconnect")
-		case .Quit_Content_Editor:
-			client.ui.content_editor.expanded = false
-		case .Open_Content_Editor:
-			client.ui.content_editor.expanded = true
-		case .Close_Stat_Editor:
-			client.content_editor.selected = 0
-		case .Open_Map_Editor:
-			client.ui.map_editing.expanded = true
-		case .Close_Map_Editor:
-			client.ui.map_editing.expanded = false
+		case .Set_Value:
+			copy(
+				reflect.as_bytes(ev.set_target),
+				reflect.as_bytes(ev.set_value),
+			)
 		case .Focus:
 			orui.current_context.focus_id = ev.target
 			orui.current_context.caret_index = ev.carret_index

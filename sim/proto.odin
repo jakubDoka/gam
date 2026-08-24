@@ -67,7 +67,6 @@ Client_Request_Type :: enum int {
 Asset_Type :: enum int {
 	Map,
 	Sprite,
-	Stats,
 }
 
 Asset :: struct {
@@ -90,6 +89,7 @@ Client_Content_Action :: struct {
 Content_Action_Type :: enum {
 	Create,
 	Edit,
+	Delete_Stat,
 	Switch,
 	Save_Map,
 	Delete_Map,
@@ -143,7 +143,8 @@ Client_Control :: struct {
 }
 
 Client_Cold_State :: struct {
-	username: Player_Name,
+	username:               Player_Name,
+	pause_game_progression: bool,
 }
 
 Client_Map_Edit :: struct {
@@ -427,8 +428,7 @@ decode_leb128 :: proc(d: ^Decoder, $T: typeid) -> (vl: T, ok: bool) {
 	return T(val), true
 }
 
-/// if zero initialized, the encoder will measure the size instead in the
-/// data encoded
+/// if zero initialized, the encoder will measure the size instead
 Encoder :: struct {
 	remining: []u8,
 }

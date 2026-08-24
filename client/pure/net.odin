@@ -938,7 +938,8 @@ client_on_ping :: proc(client: ^Client) {
 		selected_user := get_selected_user(client)
 
 		packet := sim.Client_Cold_State {
-			username = selected_user.name,
+			pause_game_progression = client.edit_mode_on,
+			username               = selected_user.name,
 		}
 
 		buf := sim.serialize_to_bytes(packet, context.temp_allocator)

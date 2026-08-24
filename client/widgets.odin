@@ -386,6 +386,8 @@ Dropdown_Config :: struct {
 	icon:         rl.GuiIconName,
 	layer:        int,
 	tooltip:      string,
+	open_verb:    Maybe(string),
+	close_verb:   Maybe(string),
 }
 
 ui_dropdown :: proc(
@@ -427,7 +429,10 @@ ui_dropdown :: proc(
 
 	state^ ~= orui.hovered() && rl.IsMouseButtonPressed(.LEFT)
 
-	ui_tooltip_end(uid, config.tooltip, state^ ? "Close" : "Open")
+	cv := config.close_verb.? or_else "Close"
+	ov := config.open_verb.? or_else "Open"
+
+	ui_tooltip_end(uid, config.tooltip, state^ ? cv : ov)
 
 	return state^
 }

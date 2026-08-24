@@ -78,7 +78,7 @@ ui_map_editor :: proc(client: ^Client) {
 	ctx := &client.map_editing
 
 	if is_key_pressed(client, .Exit) {
-		emit_event(client, .Close_Map_Editor, {priority = 2})
+		emit_set_event(client, &ctx.expanded, false, {priority = 2})
 	}
 
 	TEAM_SIZE :: 32
@@ -112,6 +112,12 @@ ui_map_editor :: proc(client: ^Client) {
 			id("map-editor-view"),
 			{width = orui.grow(), height = orui.grow(), layer = -200},
 		)
+
+		if orui.hovered() && rl.IsMouseButtonPressed(.LEFT) {
+			append(&client.captured_key_binds, MousetButton.LEFT)
+			ctx.saving_map = false
+			ctx.selecting_map = false
+		}
 
 		if ctx.resizing {
 			ui_label(
@@ -211,12 +217,17 @@ ui_map_editor :: proc(client: ^Client) {
 			)
 			i := 0
 			for asset in sqlite.query_next(&query) {
+				selected := asset.name == client.ents.map_name
+
 				if ui_button(
 					id("map-editor-select-map", i),
 					{
 						label = nm.str(&asset.name),
 						height = orui.fixed(ROW_HEIGHT),
 						width = orui.grow(),
+						toggle = selected,
+						focused_color = .PRIMARY,
+						background = .PRIMARY_FAINT,
 					},
 				) {
 					pure.tcp_send(
@@ -233,6 +244,7 @@ ui_map_editor :: proc(client: ^Client) {
 					ROW_HEIGHT,
 					.ICON_BIN,
 					"Delete the map from the server.",
+					{disabled = selected},
 				) {
 					pure.tcp_send(
 						client,
@@ -441,21 +453,18 @@ ui_map_editor :: proc(client: ^Client) {
 			},
 		)
 
-		if ui_icon_button(
-			id("map-export"),
-			TEAM_SIZE,
-			.ICON_FILE_EXPORT,
-			"Export map to a file",
-		) {
-
-		}
-
 		ctx.saving_map ~= ui_icon_button(
 			id("map-save"),
 			TEAM_SIZE,
 			ctx.saving_map ? .ICON_CROSS : .ICON_FILE_SAVE_CLASSIC,
 			ctx.saving_map ? "Close the dialog." : "Save the map on server.",
 		)
+
+		ctx.saving_map |= is_key_pressed(client, .Open_Map_Save)
+
+		if ctx.saving_map && is_key_pressed(client, .Exit) {
+			emit_set_event(client, &ctx.saving_map, false, {priority = 4})
+		}
 
 		ctx.selecting_map ~= ui_icon_button(
 			id("map-select"),
@@ -464,6 +473,11 @@ ui_map_editor :: proc(client: ^Client) {
 			ctx.selecting_map ? "Close map selection." : "Open map selection dialog.",
 		)
 
+		ctx.selecting_map |= is_key_pressed(client, .Open_Map_Selection)
+
+		if ctx.selecting_map && is_key_pressed(client, .Exit) {
+			emit_set_event(client, &ctx.selecting_map, false, {priority = 4})
+		}
 	}
 }
 
@@ -551,8 +565,8 @@ ui_map_editor_update :: proc(client: ^Client) {
 
 	if ctx.resizing {
 		end_pos := sim.map_vec_to_pos(client_mouse_pos(client))
-		ctx.width = end_pos.x
-		ctx.height = end_pos.y
+		ctx.width = max(0, end_pos.x)
+		ctx.height = max(0, end_pos.y)
 	}
 }
 
@@ -680,8 +694,8 @@ map_draw :: proc(client: ^Client) {
 			{
 				0,
 				0,
-				f32(end_pos.x) * sim.TILE_SIZE,
-				f32(end_pos.y) * sim.TILE_SIZE,
+				f32(max(0, end_pos.x)) * sim.TILE_SIZE,
+				f32(max(0, end_pos.y)) * sim.TILE_SIZE,
 			},
 			2 / client.camera.zoom,
 			ui_color(.PRIMARY),
