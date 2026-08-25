@@ -196,7 +196,6 @@ alloc :: proc(
 	end := base + size
 
 	if end > arena.reserved {
-		assert(false)
 		return {}, .Out_Of_Memory
 	}
 

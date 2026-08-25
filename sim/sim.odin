@@ -105,6 +105,7 @@ Ent_Stats :: struct {
 		body_damage:             f32 `gam:"round"`,
 		bounce_multiplier:       f32 `gam:"round1"`,
 		lifetime_multiplier:     f32 `gam:"round1"`,
+		hit_multiplier:          f32 `ver:"1",gam:"round1"`,
 		bounce_age_reduction:    f32 `gam:"round1"`,
 	},
 	using attack:     Ent_Stats_Attack,
@@ -326,7 +327,7 @@ test_ent_stat_encode_decode :: proc(t: ^testing.T) {
 	stat.bullet = 2
 
 	e := Encoder{buf[:]}
-	assert(ent_stats_encode(stat, &e))
+	assert(ent_stats_encode(stat, 0, &e))
 
 	stat = {}
 
@@ -448,7 +449,8 @@ ents_load_stats :: proc(ents: ^Ents, bytes: []u8) -> bool {
 		i := len(ents.stats)
 		append(&ents.stats, Ent_Stats{})
 		slot := &ents.stats[i]
-		ent_stats_decode(slot, Ent_Stats_ID(i), &d) or_break
+		slot.id = Ent_Stats_ID(i)
+		ent_stats_decode(slot, ents.version, &d) or_break
 	}
 
 	return len(d.remining) == 0

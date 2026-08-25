@@ -49,7 +49,6 @@ ui_content_editor :: proc(client: ^Client) {
 
 	if orui.hovered() && rl.IsMouseButtonPressed(.LEFT) {
 		append(&client.captured_key_binds, MousetButton.LEFT)
-		if !ctx.expanded do ctx.selected = 0
 		ctx.expanded = false
 		return
 	}
@@ -403,7 +402,8 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 		} else {
 			ctx.stat_editor.root = id("stat-struct-editor")
-			ctx.stat_editor.eidt_root = id("edit-struct-editor")
+			ctx.stat_editor.eidt_root =
+				id("edit-struct-editor") + id(nm.str(&stats.name))
 			ui_stat_editor(
 				client,
 				&ctx.stat_editor,

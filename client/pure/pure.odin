@@ -322,11 +322,17 @@ map_has_changes :: proc(client: ^Client, ctx: ^Map_Edit_State) -> bool {
 map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
 	context.allocator = context.temp_allocator
 
+	mapa.version = client.ents.version
 	mapa.width = client.ents.width
 	mapa.height = client.ents.height
 	mapa.sprites = client.ents.sprites
 	mapa.asoc_stats = sim.custom_encoding_stats(
-		new_clone(client.ents.stats[:]),
+		new_clone(
+			sim.Custom_Encoding_Stats_Data {
+				client.ents.stats[:],
+				client.ents.version,
+			},
+		),
 	)
 
 	mapa.tiles = make(

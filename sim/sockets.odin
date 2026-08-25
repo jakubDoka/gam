@@ -946,7 +946,6 @@ end_crypt_packet :: proc(sec: ^Secret_Key, buf: []u8, e: Encoder) -> int {
 	assert(len(buf) >= size_of(Crypt_Header))
 	header := (^Crypt_Header)(raw_data(buf))
 	len := len(buf) - size_of(Crypt_Header) - len(e.remining)
-	assert(mem.is_aligned(rawptr(uintptr(len)), 8))
 	if sec == nil {
 		header^ = {}
 	} else {

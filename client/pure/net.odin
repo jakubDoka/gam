@@ -353,6 +353,8 @@ client_handle_packet :: proc(
 	case sim.Asset:
 		save_asset(client, client.sh.id, &p)
 		client_fetch_missig_assets(client, {sim.hash_prefix(&p.hash)})
+	case sim.Server_Asset_Deleted:
+		delete_asset(client, client.sh.id, p.id, p.name)
 	}
 
 	return
@@ -369,16 +371,33 @@ client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 
 	for s in set {
 		if s == 0 do continue
+
+		slot: Saved_Asset
+		res, st := sqlite.query(client.get_asset, slot, s)
+		sqlite.reset(st)
+
 		ctx.to_stat += 1
 
 		name := asset_path(client, s)
 
 		// TODO(low): this does not matter that much but we could use arena
-		nbio.open_poly2(strings.clone(name), ctx, s, on_open, l = client.l)
+		nbio.open_poly3(
+			strings.clone(name),
+			ctx,
+			s,
+			res == .DONE,
+			on_open,
+			l = client.l,
+		)
 
-		on_open :: proc(op: ^nbio.Operation, ctx: ^Ctx, asset: sim.Asset_ID) {
+		on_open :: proc(
+			op: ^nbio.Operation,
+			ctx: ^Ctx,
+			asset: sim.Asset_ID,
+			missing_in_db: bool,
+		) {
 			delete(op.open.path)
-			if op.open.err != nil {
+			if op.open.err != nil || missing_in_db {
 				append(&ctx.client.assets_to_fetch, asset)
 			} else {
 				nbio.close(op.open.handle, l = ctx.client.l)
@@ -391,7 +410,6 @@ client_fetch_missig_assets :: proc(client: ^Client, set: []sim.Asset_ID) {
 			}
 		}
 	}
-
 }
 
 Req :: struct {

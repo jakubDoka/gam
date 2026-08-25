@@ -7,6 +7,7 @@ import "core:encoding/varint"
 import "core:log"
 import "core:mem"
 import "core:reflect"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 
@@ -151,16 +152,6 @@ Client_Map_Edit :: struct {
 	mapa: Map,
 }
 
-Client_Asset_Request :: struct {
-	inverted: bool,
-	assets:   []Asset_ID,
-}
-
-Client_Asset_Upload :: struct {
-	token: Hash,
-	metas: []Asset,
-}
-
 Client_Packet :: union #no_nil {
 	Client_Input,
 	Client_Cmd,
@@ -267,14 +258,21 @@ custom_encoding_slice :: proc(bytes: ^[]$T) -> Custom_Encoding {
 	}
 }
 
-custom_encoding_stats :: proc(stats: ^[]Ent_Stats) -> Custom_Encoding {
+Custom_Encoding_Stats_Data :: struct {
+	stats:   []Ent_Stats,
+	version: int,
+}
+
+custom_encoding_stats :: proc(
+	stats: ^Custom_Encoding_Stats_Data,
+) -> Custom_Encoding {
 	return {value = {stats, encode_stats}}
 
 	encode_stats :: proc(data: rawptr, e: ^Encoder) -> bool {
-		stats := (^[]Ent_Stats)(data)^
+		data := (^Custom_Encoding_Stats_Data)(data)^
 
-		for stat in stats {
-			ent_stats_encode(stat, e) or_return
+		for stat in data.stats {
+			ent_stats_encode(stat, data.version, e) or_return
 		}
 
 		return true
@@ -300,6 +298,12 @@ Server_Packet :: union #no_nil {
 	Broadcast_Packet,
 	Server_Event,
 	Asset,
+	Server_Asset_Deleted,
+}
+
+Server_Asset_Deleted :: struct {
+	id:   Asset_ID,
+	name: nm.Name,
 }
 
 Crypt_Header :: struct {
@@ -626,13 +630,15 @@ ent_synced_decode :: proc(
 	return
 }
 
-ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
+ent_stats_encode :: proc(stat: Ent_Stats, version: int, e: ^Encoder) -> bool {
 	Ctx :: struct {
 		e:        ^Encoder,
 		presence: Field_Presence,
+		version:  int,
 	}
 
 	ctx: Ctx
+	ctx.version = version
 	ctx.e = e
 	slot: [2]int
 	field_presence_init(&ctx.presence, slot[:])
@@ -654,6 +660,10 @@ ent_stats_encode :: proc(stat: Ent_Stats, e: ^Encoder) -> bool {
 		ctx := (^Ctx)(context.user_ptr)
 		e := ctx.e
 		presence := &ctx.presence
+
+		if is_newer_version(tag, ctx.version) {
+			return false, true
+		}
 
 		switch &v in val {
 		case bool:
@@ -729,19 +739,21 @@ try_unwrap_rounded_float :: proc(
 	return
 }
 
-ent_stats_decode :: proc(
-	stat: ^Ent_Stats,
-	id: Ent_Stats_ID,
-	d: ^Decoder,
-) -> bool {
-	stat.id = id
+is_newer_version :: proc(tag: reflect.Struct_Tag, current: int) -> bool {
+	version_str := reflect.struct_tag_lookup(tag, "ver") or_else "0"
+	version := strconv.parse_int(version_str) or_else 0
+	return version > current
+}
 
+ent_stats_decode :: proc(stat: ^Ent_Stats, version: int, d: ^Decoder) -> bool {
 	Ctx :: struct {
 		d:        ^Decoder,
 		presence: Field_Presence,
+		version:  int,
 	}
 
 	ctx: Ctx
+	ctx.version = version
 	ctx.d = d
 	slot := decode(d, [2]int) or_return
 	field_presence_init(&ctx.presence, slot[:])
@@ -759,6 +771,10 @@ ent_stats_decode :: proc(
 		ctx := (^Ctx)(context.user_ptr)
 		presence := &ctx.presence
 		d := ctx.d
+
+		if is_newer_version(tag, ctx.version) {
+			return false, true
+		}
 
 		switch &v in val {
 		case bool:

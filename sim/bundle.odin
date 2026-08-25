@@ -171,6 +171,10 @@ marshall :: proc(header: any, e: ^Encoder) -> (ok: bool) {
 	{
 		context.user_ptr = e
 		context.user_index = buffer_len
+
+		//header := header
+		//if !encoder_is_measuring(e) do header = {raw_data(header_slot), header.id}
+
 		traverse_recur(header, {post_slice = post_slice}) or_return
 
 		post_slice :: proc(

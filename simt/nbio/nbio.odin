@@ -258,6 +258,14 @@ to_stream :: proc(f: ^File) -> io.Stream {
 	}
 }
 
+delete_file :: proc(l: ^Event_Loop, path: string) -> Error {
+	when !SIMULATE {
+		return os.remove(path)
+	} else {
+		panic("TODO")
+	}
+}
+
 write_entire_file :: proc(
 	l: ^Event_Loop,
 	name: string,

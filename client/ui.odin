@@ -1790,8 +1790,7 @@ ui_build :: proc(client: ^Client) {
 				ui_map_editor(client)
 			}
 
-			if client.content_editor.expanded ||
-			   client.content_editor.selected != 0 {
+			if client.content_editor.expanded {
 				ui_content_editor(client)
 			}
 

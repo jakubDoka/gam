@@ -5,6 +5,7 @@ import "../../simt/nbio"
 import "../../util/nm"
 import "../../util/sqlite"
 import "base:runtime"
+import "core:log"
 
 Profile :: struct {
 	name: sim.Player_Name,
@@ -95,7 +96,7 @@ Statements :: struct {
 		SELECT * FROM asset WHERE id = ?
 	`,
 	delete_asset:              sqlite.Statement `
-		DELETE FROM asset WHERE id = ?
+		DELETE FROM asset WHERE id = ? AND server = ? AND name = ?
 	`,
 }
 
@@ -156,4 +157,17 @@ select_profile :: proc(client: ^Client, name: string) {
 		name,
 	)
 	sqlite.assert_ok(client.save_input_content, save_err)
+}
+
+delete_asset :: proc(
+	client: ^Client,
+	server: sim.Identity,
+	id: sim.Asset_ID,
+	name: nm.Name,
+) {
+	cnt, delete_err := sqlite.exec(client.delete_asset, id, server, name)
+	sqlite.assert_ok(client.delete_asset, delete_err)
+	if cnt == 0 {
+		log.warn("got asset delete request we dont even have")
+	}
 }

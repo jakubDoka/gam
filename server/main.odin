@@ -216,7 +216,10 @@ game_tick :: proc(game: ^Game) {
 	}
 
 	{
-		stats := game.ents.stats[:]
+		stats := sim.Custom_Encoding_Stats_Data {
+			game.ents.stats[:],
+			game.ents.version,
+		}
 		packet := sim.Server_Stats {
 			stats = sim.custom_encoding_stats(&stats),
 		}
@@ -323,7 +326,7 @@ Server_Statements :: struct {
 		SELECT * FROM asset WHERE id = ?
 	`,
 	delete_asset:        sqlite.Statement `
-		DELETE FROM asset WHERE id = ?
+		DELETE FROM asset WHERE name = ? AND type = ? RETURNING id
 	`,
 	prune_assets:        sqlite.Statement `
 		DELETE FROM asset WHERE visited = 0
@@ -699,7 +702,10 @@ server_handle_packet :: proc(
 			if !sim.validate_asset_name(name) do return
 
 			mapa := game.ents.mapa
-			stats := game.ents.stats[:]
+			stats := sim.Custom_Encoding_Stats_Data {
+				game.ents.stats[:],
+				game.ents.version,
+			}
 			mapa.asoc_stats = sim.custom_encoding_stats(&stats)
 
 			buf := sim.serialize_to_bytes(mapa, context.temp_allocator)
@@ -727,7 +733,12 @@ server_handle_packet :: proc(
 
 			game.ents.map_name = p.create_as
 		case .Delete_Map:
-			log.error("TODO: implement map deletion")
+			name := nm.str(&p.delete_the)
+
+			reason = "invalid asset name to delete"
+			if !sim.validate_asset_name(name) do return
+
+			delete_asset(server, p.delete_the, .Map)
 		}
 	case sim.Client_Map_Edit:
 		asset := sim.Asset {
@@ -755,7 +766,10 @@ server_handle_packet :: proc(
 			return
 		}
 
-		stats := game.ents.stats[:]
+		stats := sim.Custom_Encoding_Stats_Data {
+			game.ents.stats[:],
+			game.ents.version,
+		}
 		p.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
 		me = {}
 		okm = sim.marshall(p.mapa, &me)
@@ -891,6 +905,20 @@ game_set_map :: proc(game: ^Game, name: nm.Name, buf: []u8) -> (ok: bool) {
 		if !sim.ents_load_stats(&game.ents, game.ents.mapa.asoc_stats.raw) {
 			log.warn("some of the ent stats were invalid")
 		}
+	}
+
+	if game.ents.version != sim.MAP_VERSION {
+		game.ents.version = sim.MAP_VERSION
+
+		stats := sim.Custom_Encoding_Stats_Data {
+			game.ents.stats[:],
+			game.ents.version,
+		}
+		game.ents.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
+		reencoded := sim.serialize_to_bytes(game.ents.mapa)
+		delete(game.map_buf)
+		game.map_buf = reencoded
+		game.ents.mapa = sim.map_load(game.map_buf) or_else panic("")
 	}
 
 	map_ent_to_ent := make(
@@ -1135,6 +1163,39 @@ save_asset :: proc(server: ^Server, asset: ^sim.Asset, broadcast := true) {
 	}
 }
 
+delete_asset :: proc(server: ^Server, name: nm.Name, type: sim.Asset_Type) {
+	id: sim.Asset_ID
+	deres, s := sqlite.query(server.delete_asset, id, name, type)
+	if deres == .DONE {
+		log.warn("deleteing asset that is not in the db:", name, type)
+		return
+	}
+	sqlite.assert_ok(s, deres)
+	sqlite.reset(s)
+
+	asset := sim.Asset {
+		name = name,
+		type = type,
+	}
+
+	path := asset_path(&asset)
+
+	err := nbio.delete_file(server.l, path)
+	if err != nil {
+		log.warn("Failed to delete the asset file it self:", name, type, err)
+	}
+
+	for _, conn in server.connections {
+		if .Edit_Content in conn.permissions {
+			server_tcp_send(
+				server,
+				conn,
+				sim.Server_Asset_Deleted{id = id, name = name},
+			)
+		}
+	}
+}
+
 list_assets :: proc(
 	server: ^Server,
 	conn: ^Connection,
@@ -1220,6 +1281,7 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 	ext := sim.EXT_BY_TYPE[asset.type]
 
 	name := strings.join({name_str, ext}, "", context.temp_allocator)
+	// TODO: memory leak
 	path, _ := nbio.join_path({dir, name}, context.allocator)
 	return path
 }
