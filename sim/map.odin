@@ -205,6 +205,19 @@ Map :: struct {
 	asset_locs: []Asset_Loc_Entry,
 }
 
+MapV2 :: struct {
+	version:    Version `cc:"version_field"`,
+	width:      int `cc:"leb"`,
+	height:     int `cc:"leb"`,
+	sprites:    [Map_Sprite_Kind]Asset_ID,
+	tiles:      []int,
+	ents:       []Map_Ent `cc:"leb"`,
+	chargers:   []Map_Charger `cc:"leb"`,
+	teams:      []Ent_Team,
+	asoc_stats: []Ent_Stats,
+	asset_locs: []Asset_Loc_Entry,
+}
+
 map_is_initialized :: proc(mapa: ^Map) -> bool {
 	return mapa.width * mapa.height != 0
 }

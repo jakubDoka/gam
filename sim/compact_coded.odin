@@ -2,8 +2,8 @@ package sim
 
 import "../util/arna"
 import "base:runtime"
-import "core:log"
 import "core:mem"
+import "core:os"
 import "core:reflect"
 import "core:slice"
 import "core:strconv"
@@ -39,6 +39,21 @@ CC_Flags :: bit_field int {
 }
 
 MAX_ALIGN :: 8
+
+cc_encode_to_bytes :: proc(v: any, allc := context.allocator) -> []u8 {
+	e: Encoder
+
+	ok := cc_encode(v, &e, {})
+	assert(ok)
+
+	buf, _ := mem.alloc_bytes(encoded_len(&e), 8, allc)
+
+	e = {buf}
+	ok = cc_encode(v, &e, {})
+	assert(ok)
+
+	return buf
+}
 
 // NOTE: you can later just deallocate the slot to deallocate all
 cc_decode_single_alloc :: proc(
@@ -358,6 +373,8 @@ collect_flags :: proc(
 			base.float_prec = .Prec2
 		} else if flg == "leb" {
 			base.leb = true
+		} else if flg == "skip" {
+			return false
 		}
 	}
 
@@ -491,4 +508,26 @@ sanity_cc :: proc(t: ^testing.T) {
 	compare(t, ex, slota^)
 
 	free(slota)
+}
+
+main :: proc() {
+	source := os.args[1]
+	dest := os.args[2]
+
+	data := os.read_entire_file(source, context.allocator) or_else panic("")
+
+	mapa := map_load(data) or_else panic("")
+
+	mapav2 := transmute(MapV2)mapa
+
+	ents: Ents
+	ents.mapa = mapa
+	ents_load_stats(&ents, ents.mapa.asoc_stats.raw)
+
+	mapav2.asoc_stats = ents.stats[:]
+
+	buf := cc_encode_to_bytes(mapav2)
+
+	err := os.write_entire_file(dest, buf)
+	assert(err == nil)
 }
