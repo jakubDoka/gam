@@ -2,6 +2,7 @@ package sim
 
 import "../util/arna"
 import "base:runtime"
+import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:reflect"
@@ -203,7 +204,9 @@ cc_decode :: proc(vl: any, e: ^Decoder, flags: CC_Ctx) -> (ok: bool) {
 			cc_decode(value, e, flags) or_return
 			if flags.is_version {
 				flags.version = value.(Version)
-				flags.is_version = false
+			}
+			flags = {
+				version = flags.version,
 			}
 		}
 	case runtime.Type_Info_Union:
@@ -315,9 +318,11 @@ cc_encode :: proc(vl: any, e: ^Encoder, flags: CC_Ctx) -> bool {
 			collect_flags(&flags, field.tag) or_continue
 			if flags.is_version {
 				flags.version = value.(Version)
-				flags.is_version = false
 			}
 			cc_encode(value, e, flags) or_return
+			flags = {
+				version = flags.version,
+			}
 		}
 	case runtime.Type_Info_Union:
 		encode_leb128(e, uint(reflect.get_union_variant_raw_tag(vl)))
@@ -354,6 +359,7 @@ collect_flags :: proc(
 	active := true,
 ) {
 	field_flags := reflect.struct_tag_get(tag, "cc")
+	fmt.println(field_flags, tag)
 	for flg in strings.split_iterator(&field_flags, ",") {
 		if flg == "version_field" {
 			base.is_version = true
@@ -375,6 +381,8 @@ collect_flags :: proc(
 			base.leb = true
 		} else if flg == "skip" {
 			return false
+		} else {
+			panic(flg)
 		}
 	}
 
@@ -527,6 +535,13 @@ main :: proc() {
 	mapav2.asoc_stats = ents.stats[:]
 
 	buf := cc_encode_to_bytes(mapav2)
+
+	buff := arna.init_from_buffer(make([]u8, 1024 * 128))
+
+	d := Decoder{buf}
+	mapav2_dec: MapV2
+	mapa3, ok := cc_decode_single_alloc(MapV2, &d, &buff)
+	assert(ok)
 
 	err := os.write_entire_file(dest, buf)
 	assert(err == nil)

@@ -182,7 +182,6 @@ asset_loc_sanity :: proc(t: ^testing.T) {
 			testing.expect_value(t, res, cs.expected)
 		} else {
 			testing.expect(t, res.error != "")
-			log.info(res.error)
 		}
 	}
 }
