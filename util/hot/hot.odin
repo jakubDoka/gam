@@ -177,7 +177,7 @@ should_reload :: proc(hr: ^Reloader) -> (should_reload: bool) {
 }
 
 interrupted :: proc() -> bool {
-	return sync.atomic_load(&_interrupted)
+	return sync.atomic_load(sip.interrupted)
 }
 
 @(require_results)

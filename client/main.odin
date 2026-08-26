@@ -626,6 +626,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 		x.trail_cooldown -= client.ents.delta
 		t := sim.ents_team_get(&client.ents, e.team)
 		sradius := sim.ents_radius(&client.ents, e.id)
+		tcolor := client_ent_color(client, e.id)
 
 		if s.kind == .Beam {
 			px := pure.client_ent_extra_get(client, e.parent)
@@ -657,7 +658,7 @@ client_update :: proc(hr: ^hot.Reloader, client: ^Client) {
 						s.trail.spawn_innaccuracy
 				p.radius = (1 - spec.one_minus_radius_ratio) * sradius
 				p.stats = spec^
-				p.color = get_color(t.color)
+				p.color = tcolor
 			}
 		}
 	}

@@ -111,10 +111,10 @@ ui_content_editor :: proc(client: ^Client) {
 				id("stat-selector-table"),
 				{
 					layout = .Grid,
-					cols = 2,
+					cols = 3,
 					rows = 10000,
 					width = orui.grow(),
-					col_sizes = {orui.grow(), {}},
+					col_sizes = {orui.grow(), {}, {}},
 					gap = PADDING,
 				},
 			)
@@ -143,6 +143,32 @@ ui_content_editor :: proc(client: ^Client) {
 				}
 
 				if ui_icon_button(
+					id("stat-selector-copy", i),
+					ROW_HEIGHT,
+					.ICON_FILE_COPY,
+					"Duplicate these stats.",
+				) {
+					stats := stats.ref^
+
+					name := nm.str(&stats.name)
+					stats.name = nm.from_str(
+						fmt.tprintf(
+							"%v:%v",
+							name[:min(len(name), size_of(nm.Name) - 5)],
+							"copy",
+						),
+					)
+
+					pure.tcp_send(
+						client,
+						sim.Client_Content_Action {
+							type = .Create,
+							stats = stats,
+						},
+					)
+				}
+
+				if ui_icon_button(
 					id("stat-selector-delete", i),
 					ROW_HEIGHT,
 					.ICON_BIN,
@@ -159,8 +185,7 @@ ui_content_editor :: proc(client: ^Client) {
 			}
 		}
 
-		if ctx.create_stat {
-			box(
+		{box(
 				id("create-stat-frame"),
 				{
 					background_color = ui_color(.SECONDARY_FAINT),
@@ -175,7 +200,7 @@ ui_content_editor :: proc(client: ^Client) {
 				{
 					width = orui.grow(),
 					height = orui.fixed(ROW_HEIGHT),
-					placeholder = "name...",
+					placeholder = "name new stats...",
 					border = 1,
 				},
 			)
@@ -203,24 +228,6 @@ ui_content_editor :: proc(client: ^Client) {
 					},
 				)
 			}
-
-			ctx.create_stat ~=
-				ui_icon_button(
-					id("create-stat-close"),
-					ROW_HEIGHT,
-					.ICON_CROSS,
-					"Cancel new stat",
-				) ||
-				confirmed
-		} else {
-			ctx.create_stat ~= ui_button(
-				id("create-stat-expand"),
-				{
-					label = "+",
-					width = orui.grow(),
-					height = orui.fixed(ROW_HEIGHT),
-				},
-			)
 		}
 
 		ui_file_upload(client)

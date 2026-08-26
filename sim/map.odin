@@ -5,7 +5,6 @@ import rt "base:runtime"
 import "core:log"
 import "core:math"
 import "core:math/linalg"
-import "core:math/rand"
 import "core:mem"
 import "core:net"
 import "core:reflect"
@@ -13,6 +12,7 @@ import "core:strconv"
 import "core:strings"
 import "core:testing"
 
+MAX_MAP_SIZE :: 1024 * 16
 MAP_VERSION :: 1
 FILE_ALIGNMENT :: size_of(int)
 MASK_SIZE :: size_of(int) * 8
@@ -191,7 +191,7 @@ Asset_Loc_Entry :: struct {
 	loc: string,
 }
 
-Map :: struct {
+MapV2 :: struct {
 	version:    int,
 	width:      int,
 	height:     int,
@@ -204,7 +204,7 @@ Map :: struct {
 	asset_locs: []Asset_Loc_Entry,
 }
 
-MapV2 :: struct {
+Map :: struct {
 	version:    Version `cc:"version_field"`,
 	width:      int `cc:"leb"`,
 	height:     int `cc:"leb"`,
@@ -219,68 +219,6 @@ MapV2 :: struct {
 
 map_is_initialized :: proc(mapa: ^Map) -> bool {
 	return mapa.width * mapa.height != 0
-}
-
-map_text_to_bin :: proc(
-	text: string,
-	e: ^Encoder,
-	core_stat: string,
-	stats: string,
-) {
-	context.allocator = context.temp_allocator
-
-	loader: Asset_Loader
-
-	text := strings.trim(text, "\n")
-
-	mapa: Map
-
-	mapa.width = strings.index_byte(text, '\n')
-	mapa.height = strings.count(text, "\n") + 1
-	charger_count := strings.count(text, "a")
-
-	core_count := 0
-	for c in text do if '0' <= c && c <= '9' {
-		core_count = max(core_count, int(c - '0') + 1)
-	}
-
-	tile_len := map_tile_storage_size(mapa.width, mapa.height)
-	mapa.tiles = make([]int, tile_len)
-	mapa.ents = make([]Map_Ent, core_count + 1)
-	mapa.teams = make([]Ent_Team, core_count + 1)
-	mapa.chargers = make([]Map_Charger, charger_count)
-
-	y, charger_idx: int
-	for row in strings.split_iterator(&text, "\n") {
-		x: int
-		for c in row {
-			switch c {
-			case 'w':
-				idx := y * mapa.width + x
-				mapa.tiles[idx / MASK_SIZE] |= 1 << uint(idx % MASK_SIZE)
-			case ' ':
-			case '0' ..= '9':
-				idx := Ent_Team_ID(c - '0') + 1
-				mapa.ents[idx] = {
-					pos  = {x, y},
-					team = idx,
-					stat = 1,
-				}
-				mapa.teams[idx] = {Color(rand.uint32() | 0x000000FF), true}
-			case 'a':
-				mapa.chargers[charger_idx] = {
-					pos    = {x, y},
-					radius = 1,
-				}
-				charger_idx += 1
-			}
-			x += 1
-		}
-		y += 1
-	}
-
-	ok := marshall(mapa, e)
-	assert(ok)
 }
 
 map_tile_storage_size :: proc(width: int, height: int) -> int {
@@ -304,7 +242,7 @@ map_load :: proc(
 	raw: []u8,
 	max_ents := MAX_ENTS_PER_GAME,
 ) -> (
-	mapa: Map,
+	mapa: MapV2,
 	ok: bool,
 ) {
 	assert(mem.is_aligned(raw_data(raw), FILE_ALIGNMENT))
@@ -330,7 +268,15 @@ map_load :: proc(
 }
 
 map_vec_to_pos :: proc(v: Vec) -> Map_Pos {
-	return {int(v.x * TILE_RECIPRO), int(v.y * TILE_RECIPRO)}
+	return {tile_coord(v.x * TILE_RECIPRO), tile_coord(v.y * TILE_RECIPRO)}
+}
+
+tile_coord :: proc(x: f32) -> int {
+	i := int(x)
+	if x < 0 && f32(i) != x {
+		i -= 1
+	}
+	return i
 }
 
 map_pos_to_vec :: proc(pos: Map_Pos) -> Vec {

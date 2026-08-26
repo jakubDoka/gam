@@ -1238,9 +1238,12 @@ ui_game_hud :: proc(client: ^Client) {
 						pure.tcp_send(
 							client,
 							sim.Client_Map_Edit {
-								mapa = pure.map_export(
-									client,
-									&client.map_editing,
+								mapa = sim.cc_encode_to_bytes(
+									pure.map_export(
+										client,
+										&client.map_editing,
+									),
+									context.temp_allocator,
 								),
 							},
 						)

@@ -121,7 +121,10 @@ client_handle_packet :: proc(
 		{
 			packet: sim.Server_Packet = sim.Server_Map {
 				client.ents.map_name,
-				client.map_buf,
+				sim.cc_encode_to_bytes(
+					client.ents.mapa,
+					context.temp_allocator,
+				),
 			}
 			bytes := sim.serialize_to_bytes(packet, context.temp_allocator)
 
@@ -188,8 +191,11 @@ client_handle_packet :: proc(
 			}
 
 			x := client_ent_extra_get(client, ne.id)
+			s := sim.ents_stats_get(&client.ents, ne.stats)
 
-			synced.counter = max(synced.counter, ne.counter)
+			if s.bounce_multiplier == 0 {
+				synced.counter = max(synced.counter, ne.counter)
+			}
 
 			x.energy_smoothing =
 				ne.synced.energy_consumed +
@@ -243,7 +249,9 @@ client_handle_packet :: proc(
 			}
 		}
 
+		//client.ents.catch_up = true
 		sim.ents_move(&client.ents, client.rtt)
+		//client.ents.catch_up = false
 
 		for m in marks {
 			m.id.gen -= 1
@@ -256,15 +264,20 @@ client_handle_packet :: proc(
 
 	case sim.Server_Map:
 		client.ents.map_name = p.name
-		delete(client.map_buf)
-		client.map_buf = slice.clone(p.bytes)
-		mapa, ok := sim.map_load(client.map_buf)
-		if !ok do break
-		client.ents.mapa = mapa
+		d := sim.Decoder{p.bytes}
 
-		assert(slice.equal(p.bytes, client.map_buf))
+		mapa, ok := sim.cc_decode_single_alloc(
+			sim.Map,
+			&d,
+			&client.map_load_arna,
+		)
+		if !ok {
+			log.error("server sent an invalid map")
+			break
+		}
+		sim.ents_set_map(&client.ents, mapa)
 
-		sim.ents_load_stats(&client.ents, client.ents.mapa.asoc_stats.raw)
+		sim.ents_load_stats(&client.ents, client.ents.asoc_stats)
 
 		client_fetch_missig_assets(
 			client,
@@ -284,7 +297,19 @@ client_handle_packet :: proc(
 			}
 		}
 	case sim.Server_Stats:
-		sim.ents_load_stats(&client.ents, p.stats.raw)
+		d := sim.Decoder{p.stats}
+		stats, ok := sim.cc_decode_single_alloc(
+			[]sim.Ent_Stats,
+			&d,
+			&client.map_load_arna,
+			context.temp_allocator,
+		)
+		if !ok {
+			log.error("server sent invalid stats")
+			break
+		}
+
+		sim.ents_load_stats(&client.ents, stats^)
 
 		assets := make([dynamic]sim.Asset_ID, context.temp_allocator)
 

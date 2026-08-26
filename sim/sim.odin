@@ -7,6 +7,7 @@ import "../util/nm"
 import "base:runtime"
 import "core:container/queue"
 import "core:fmt"
+import "core:hash"
 import "core:io"
 import "core:log"
 import "core:math"
@@ -17,6 +18,7 @@ import "core:mem/tlsf"
 import "core:reflect"
 import "core:sort"
 import "core:testing"
+import "core:time"
 
 ESP :: 1e-5
 DIST_ESP :: 1e-4
@@ -94,7 +96,7 @@ Ent_Stats :: struct {
 	spawn_unit:       Ent_Stats_ID `cc:"leb"`,
 	using physics:    struct {
 		speed:                   f32 `gam:"round"cc:"fixed"`,
-		friction:                f32 `gam:"round"cc:"fixed"`,
+		friction:                f32 `gam:"round1"cc:"round1"`,
 		lifetime:                f32 `gam:"round2"cc:"round2"`,
 		radius:                  f32 `gam:"round"cc:"fixed"`,
 		sprite_factor_minus_one: f32 `gam:"round1"cc:"round1"`,
@@ -173,14 +175,15 @@ ents_apply_stat_multipliers :: proc(
 	ents: ^Ents,
 	eid: Ent_ID,
 	off: uintptr,
+	factor: f32 = 1,
 ) -> f32 {
 	e := ents_get(ents, eid)
 	s := ents_stats_get(ents, e.stats)
 	base := (^f32)(uintptr(s) + off)^
 	return(
 		base +
-		f32(e.counter) * base * s.bounce_multiplier +
-		base * e.age * s.lifetime_multiplier \
+		f32(e.counter) * base * s.bounce_multiplier * factor +
+		base * e.age * s.lifetime_multiplier * factor \
 	)
 }
 
@@ -192,7 +195,12 @@ ents_radius :: proc(ents: ^Ents, eid: Ent_ID) -> f32 {
 		return s.radius * (1 + (math.sin(e.age / s.lifetime * math.PI) * 2))
 	}
 
-	return ents_apply_stat_multipliers(ents, eid, offset_of(Ent_Stats, radius))
+	return ents_apply_stat_multipliers(
+		ents,
+		eid,
+		offset_of(Ent_Stats, radius),
+		factor = 0.5,
+	)
 }
 
 ents_damage :: proc(ents: ^Ents, eid: Ent_ID) -> f32 {
@@ -406,10 +414,12 @@ PState :: struct {
 	quad:             Quad_Ent,
 	spatial:          Spatial_Ent,
 	ent:              ^Ent,
+	radius:           f32,
 }
 
 Ents :: struct {
 	slots:         []Ent,
+	catch_up:      bool,
 	winning_team:  Ent_Team_ID,
 	len:           int,
 	pstate:        []PState,
@@ -422,6 +432,8 @@ Ents :: struct {
 	stats:         [dynamic]Ent_Stats,
 	map_name:      nm.Name,
 	using mapa:    Map,
+	mapa_ptr:      ^Map,
+	garbo_mapa:    MapV2,
 	spawn_seq:     ^Ent_Net_ID,
 	quad_tree:     Quad_Tree,
 	spatial_map:   Spatial_Map,
@@ -441,7 +453,14 @@ team_spawnable :: proc(team: Ent_Team_ID, counts: []int) -> bool {
 	return team != 0 && (counts[team] != ma || ma == mi)
 }
 
-ents_load_stats :: proc(ents: ^Ents, bytes: []u8) -> bool {
+ents_load_stats :: proc(ents: ^Ents, stats: []Ent_Stats) {
+	clear(&ents.stats)
+
+	append(&ents.stats, ..stats)
+	for &s, i in ents.stats do s.id = auto_cast i
+}
+
+ents_load_stats_garbo :: proc(ents: ^Ents, bytes: []u8) -> bool {
 	clear(&ents.stats)
 
 	d := Decoder{bytes}
@@ -450,7 +469,7 @@ ents_load_stats :: proc(ents: ^Ents, bytes: []u8) -> bool {
 		append(&ents.stats, Ent_Stats{})
 		slot := &ents.stats[i]
 		slot.id = Ent_Stats_ID(i)
-		ent_stats_decode(slot, ents.version, &d) or_break
+		ent_stats_decode(slot, ents.garbo_mapa.version, &d) or_break
 	}
 
 	return len(d.remining) == 0
@@ -700,7 +719,8 @@ laser_iter_next :: proc(
 ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	s := ents_stats_get(ents, e.stats)
 	if s.kind not_in COLLIDES_WITH_OTHERS do return
-	radius := ents_radius(ents, e.id)
+	pstate := &ents.pstate[e.id.index]
+	radius := pstate.radius
 
 	overscan := radius / linalg.length(e.vel)
 
@@ -740,8 +760,6 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	tMax2 := (next_boundary2 - p2) * inv_v
 
 	t1, t2: f32
-
-	pstate := &ents.pstate[e.id.index]
 
 	best_t := pstate.fuel
 	best_normal := linalg.orthogonal(e.vel)
@@ -823,7 +841,8 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 	iter := ents_query(ents, e.pos + vel_estimate / 2, movement_range)
 	for oent in ents_query_next(&iter) {
 		if oent == e do continue
-		oradius := ents_radius(ents, oent.id)
+		opstate := ents.pstate[oent.id.index]
+		oradius := opstate.radius
 		os := ents_stats_get(ents, oent.stats)
 		if os.kind not_in COLLIDES_WITH_OTHERS do continue
 
@@ -840,8 +859,6 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 			radius,
 			oradius,
 		)
-
-		opstate := ents.pstate[oent.id.index]
 
 		if ESP <= t && t < best_t && t <= opstate.fuel {
 			ot, _, _ := map_wall_collision(ents, oent.pos, oent.vel * t)
@@ -863,7 +880,15 @@ ents_step :: proc(ents: ^Ents, e: ^Ent) {
 
 		ents_trade_forces(ents, e, ce)
 	} else {
+		pvel := e.vel
 		e.vel = linalg.reflect(e.vel, best_normal)
+		if best_t != pstate.fuel && !ents.catch_up {
+			if s.bounce_multiplier != 0 {
+				e.counter += 1
+				e.counter = min(4, e.counter)
+			}
+			e.age -= s.bounce_age_reduction
+		}
 	}
 
 	pstate.no_change_streak += u32(best_t < ESP)
@@ -883,8 +908,8 @@ ents_trade_forces :: proc(ents: ^Ents, e: ^Ent, ce: ^Ent) {
 	} else if cs.kind == .Building {
 		e.vel = linalg.reflect(e.vel, norm)
 	} else {
-		cradius := ents_radius(ents, ce.id)
-		radius := ents_radius(ents, e.id)
+		cradius := ents.pstate[ce.id.index].radius
+		radius := ents.pstate[e.id.index].radius
 
 		amass := radius * radius * math.PI * (1 + s.mass_mult_minus_one)
 		bmass := cradius * cradius * math.PI * (1 + s.mass_mult_minus_one)
@@ -929,6 +954,7 @@ ents_move :: proc(ents: ^Ents, delta: f32) {
 			}
 
 			radius := ents_radius(ents, e.id)
+			pstate.radius = radius
 			pstate.quad.rect = quad_rect_square(e.pos, radius)
 			quad_tree_add(&ents.quad_tree, &pstate.quad, config)
 			pos := map_vec_to_pos(e.pos)
@@ -990,22 +1016,40 @@ eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 			continue
 		}
 
-		normal: Vec
-		if oent.pos == e.pos {
-			normal = vec_of(f32((int(oent.id.index) << 32) | int(e.id.index)))
-		} else {
-			normal = linalg.normalize(oent.pos - e.pos)
-		}
-
 		contact_point := (oent.pos + e.pos) / 2
 
-		if (radius > oradius || s.kind == .Building) && os.kind != .Building {
-			oent.pos = e.pos + normal * (oradius + radius + DIST_ESP)
-		} else {
-			e.pos = oent.pos - normal * (radius + oradius + DIST_ESP)
-		}
+		// NOTE: This whole bullshaist handles the exact overlap when the
+		// player gets spawned form a core, mostly, we retry so that we don't
+		// get stuck in the wall and only go in cardinal directions so that
+		// they don't end up in a corner forced to respawn. We also preserver
+		// the pseudo random positioning
+		ets := [?]^Ent{e, oent}
 
-		//ents_trade_forces(ents, e, oent)
+		idx :=
+			(radius > oradius || s.kind == .Building) && os.kind != .Building
+		a, b := ets[int(idx)], ets[int(!idx)]
+
+		identical := a.pos == b.pos
+		try_from :=
+			hash.ginger_hash16(u16(a.net_id.seq)) +
+			hash.ginger_hash16(u16(b.net_id.seq))
+
+		for i in 0 ..< 4 {
+			normal: Vec
+			if identical {
+				dir := (math.TAU / 4 * f32((1 + (try_from + u16(i)) % 4)))
+				normal = vec_of(dir)
+			} else {
+				normal = linalg.normalize(a.pos - b.pos)
+			}
+
+			new_pos := b.pos + normal * (oradius + radius + DIST_ESP)
+			if !identical ||
+			   !map_tile_is_solid(&ents.mapa, map_vec_to_pos(new_pos)) {
+				a.pos = new_pos
+				break
+			}
+		}
 	}
 
 	min_tile := map_vec_to_pos(e.pos - radius)
@@ -1591,15 +1635,20 @@ ents_iter_next :: proc(iter: ^[]Ent) -> (^Ent, bool) {
 dummy_teams := [2]Ent_Team{{color = 0xFF0000FF}, {color = 0x00FF00FF}}
 
 ents_reserve :: proc(ents: ^Ents, capacity: int) {
-	err: runtime.Allocator_Error
-	ents.slots, err = make([]Ent, capacity)
-	log.assertf(err == nil, "failed to allocate ents slots: %v", err)
+	ents.slots = make([]Ent, capacity)
 	ents.len += 1
+}
+
+ents_set_map :: proc(ents: ^Ents, mapa: ^Map) {
+	free(ents.mapa_ptr)
+	ents.mapa_ptr = mapa
+	ents.mapa = mapa^
 }
 
 ents_destroy :: proc(ents: ^Ents) {
 	delete(ents.slots)
 	delete(ents.stats)
+	free(ents.mapa_ptr)
 }
 
 ents_clear :: proc(ents: ^Ents) {

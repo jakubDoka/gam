@@ -107,7 +107,6 @@ Game :: struct {
 	ents:                 sim.Ents,
 	net_id:               sim.Ent_Net_ID,
 	map_index:            int,
-	map_buf:              []u8,
 	last_cold_state_hash: sim.Hash,
 	last_stats_hash:      sim.Hash,
 	clean_stats_hash:     sim.Hash,
@@ -211,17 +210,21 @@ game_tick :: proc(game: ^Game) {
 	}
 
 	{
-		packet := sim.Server_Map{game.ents.map_name, game.map_buf}
+		map_buf := sim.cc_encode_to_bytes(
+			game.ents.mapa,
+			context.temp_allocator,
+		)
+		packet := sim.Server_Map{game.ents.map_name, map_buf}
 		ensure_up_to_date_hash(game, &game.last_map_hash, packet, "map")
 	}
 
 	{
-		stats := sim.Custom_Encoding_Stats_Data {
+		stat_buf := sim.cc_encode_to_bytes(
 			game.ents.stats[:],
-			game.ents.version,
-		}
+			context.temp_allocator,
+		)
 		packet := sim.Server_Stats {
-			stats = sim.custom_encoding_stats(&stats),
+			stats = stat_buf,
 		}
 
 		ensure_up_to_date_hash(game, &game.last_stats_hash, packet, "stats")
@@ -253,7 +256,6 @@ game_tick :: proc(game: ^Game) {
 }
 
 game_destroy :: proc(game: ^Game) {
-	delete(game.map_buf)
 	sim.ents_destroy(&game.ents)
 }
 
@@ -382,6 +384,7 @@ Server :: struct {
 	using statements:        Server_Statements,
 	conn_buf:                []Connection,
 	lru_pool:                arna.Allocator,
+	map_load_arna:           arna.Allocator,
 	l:                       ^nbio.Event_Loop,
 	hr:                      ^hot.Reloader,
 	did_shutdown:            bool,
@@ -661,15 +664,14 @@ server_handle_packet :: proc(
 			reason = "id out of bounds"
 			if p.stats.id < 0 || int(p.stats.id) >= len(game.ents.stats) do return
 
-			game.ents.stats[len(game.ents.stats) - 1].id = p.stats.id
-
-			unordered_remove(&game.ents.stats, p.stats.id)
+			ordered_remove(&game.ents.stats, p.stats.id)
+			for &stat, i in game.ents.stats do stat.id = auto_cast i
 
 			for it := sim.ents_iter(&game.ents); e in sim.ents_iter_next(&it) {
 				if e.stats == p.stats.id {
 					sim.ents_queue_remove(&game.ents, e.id)
-				} else if int(e.stats) == len(game.ents.stats) {
-					e.stats = p.stats.id
+				} else if e.stats > p.stats.id {
+					e.stats -= 1
 				}
 			}
 		case .Switch:
@@ -682,19 +684,29 @@ server_handle_packet :: proc(
 				name = p.switch_to,
 				type = .Map,
 			}
-			path := asset_path(&asset)
+			path := asset_path(&asset, context.temp_allocator)
 
-			content, err := nbio.read_entire_file(server.l, path)
+			content, err := nbio.read_entire_file(
+				server.l,
+				path,
+				context.temp_allocator,
+			)
 			reason = "nonexistent asset name to switch to"
 			if err != nil {
 				log.warn("failed to load stat group to switch to:", err)
 				return
 			}
 
-			reason = "invalid map file"
-			if !game_set_map(game, p.switch_to, content) do return
+			d := sim.Decoder{content}
+			mapa, ok := sim.cc_decode_single_alloc(
+				sim.Map,
+				&d,
+				&server.map_load_arna,
+			)
+			reason = "invalid map file in our saves, dang"
+			if !ok do return
 
-			content = {}
+			game_set_map(game, p.switch_to, mapa)
 		case .Save_Map:
 			name := nm.str(&p.create_as)
 
@@ -702,13 +714,8 @@ server_handle_packet :: proc(
 			if !sim.validate_asset_name(name) do return
 
 			mapa := game.ents.mapa
-			stats := sim.Custom_Encoding_Stats_Data {
-				game.ents.stats[:],
-				game.ents.version,
-			}
-			mapa.asoc_stats = sim.custom_encoding_stats(&stats)
-
-			buf := sim.serialize_to_bytes(mapa, context.temp_allocator)
+			mapa.asoc_stats = game.ents.stats[:]
+			buf := sim.cc_encode_to_bytes(mapa, context.temp_allocator)
 
 			asset := sim.Asset {
 				name = p.create_as,
@@ -717,7 +724,7 @@ server_handle_packet :: proc(
 			}
 			sim.hash(buf, &asset.hash)
 
-			path := asset_path(&asset)
+			path := asset_path(&asset, context.temp_allocator)
 
 			err := nbio.make_directory_all(nbio.dir(path))
 			fmt.assertf(
@@ -746,49 +753,24 @@ server_handle_packet :: proc(
 			type = .Map,
 		}
 
-		map_path := asset_path(&asset)
+		d := sim.Decoder{p.mapa}
+		mapa, ok := sim.cc_decode_single_alloc(
+			sim.Map,
+			&d,
+			&server.map_load_arna,
+			context.allocator,
+		)
 
-		me: sim.Encoder
+		reason = "invalid map file sent"
+		if !ok do return
 
-		bytes := p.mapa.asoc_stats.raw
-		p.mapa.asoc_stats = sim.custom_encoding_slice(&bytes)
+		game_set_map(game, game.ents.map_name, mapa)
 
-		okm := sim.marshall(p.mapa, &me)
-		assert(okm)
-		reason = "map with overlapping regions"
-		if sim.encoded_len(&me) > len(packet_bytes) {
-			log.warn(
-				"map sent from player has overlapping regions:",
-				sim.encoded_len(&me),
-				"!=",
-				len(packet_bytes),
-			)
-			return
-		}
+		asset.size = len(p.mapa)
+		sim.hash(p.mapa, &asset.hash)
 
-		stats := sim.Custom_Encoding_Stats_Data {
-			game.ents.stats[:],
-			game.ents.version,
-		}
-		p.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
-		me = {}
-		okm = sim.marshall(p.mapa, &me)
-		assert(okm)
-
-		buf, _ := mem.alloc_bytes(sim.encoded_len(&me), 8)
-		me = {buf}
-
-		oka := sim.marshall(p.mapa, &me)
-		assert(oka)
-
-		okam := game_set_map(game, game.ents.map_name, buf)
-		reason = "unloadable map"
-		if !okam do return
-
-		asset.size = len(buf)
-		sim.hash(buf, &asset.hash)
-
-		err := nbio.write_entire_file(server.l, map_path, buf)
+		map_path := asset_path(&asset, context.temp_allocator)
+		err := nbio.write_entire_file(server.l, map_path, p.mapa)
 		log.assertf(err == nil, "failed to write the map: %v", err)
 
 		save_asset(server, &asset)
@@ -881,52 +863,38 @@ game_load_next_map :: proc(game: ^Game) {
 	map_bytes, map_bytes_err := nbio.read_entire_file(
 		game.l,
 		map_path,
-		context.allocator,
+		context.temp_allocator,
 	)
 	assert(map_bytes_err == nil)
 
-	ok := game_set_map(game, name, map_bytes)
+	d := sim.Decoder{map_bytes}
+	mapa, ok := sim.cc_decode_single_alloc(
+		sim.Map,
+		&d,
+		&game.server.map_load_arna,
+	)
 	assert(ok)
+
+	game_set_map(game, name, mapa)
 }
 
 // takes ownership of buf
-game_set_map :: proc(game: ^Game, name: nm.Name, buf: []u8) -> (ok: bool) {
-	defer if !ok do delete(buf)
-	mapa := sim.map_load(buf) or_return
-
-	delete(game.map_buf)
-	game.map_buf = buf
-
+game_set_map :: proc(game: ^Game, name: nm.Name, mapa: ^sim.Map) {
 	sim.ents_clear(&game.ents)
-	game.ents.mapa = mapa
+	sim.ents_set_map(&game.ents, mapa)
 	game.ents.map_name = name
 
-	if len(mapa.asoc_stats.raw) != 0 {
-		if !sim.ents_load_stats(&game.ents, game.ents.mapa.asoc_stats.raw) {
-			log.warn("some of the ent stats were invalid")
-		}
-	}
-
-	if game.ents.version != sim.MAP_VERSION {
-		game.ents.version = sim.MAP_VERSION
-
-		stats := sim.Custom_Encoding_Stats_Data {
-			game.ents.stats[:],
-			game.ents.version,
-		}
-		game.ents.mapa.asoc_stats = sim.custom_encoding_stats(&stats)
-		reencoded := sim.serialize_to_bytes(game.ents.mapa)
-		delete(game.map_buf)
-		game.map_buf = reencoded
-		game.ents.mapa = sim.map_load(game.map_buf) or_else panic("")
-	}
+	sim.ents_load_stats(&game.ents, game.ents.asoc_stats)
 
 	map_ent_to_ent := make(
 		[]^sim.Ent,
 		len(game.ents.mapa.ents),
 		context.temp_allocator,
 	)
-	map_ent_to_ent[0] = sim.NIL_ENT
+
+	if len(map_ent_to_ent) != 0 {
+		map_ent_to_ent[0] = sim.NIL_ENT
+	}
 
 	prefix := min(1, len(game.ents.mapa.ents))
 
@@ -944,8 +912,6 @@ game_set_map :: proc(game: ^Game, name: nm.Name, buf: []u8) -> (ok: bool) {
 		p := map_ent_to_ent[ent.parent]
 		e.parent = p.id
 	}
-
-	return true
 }
 
 server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
@@ -971,9 +937,6 @@ server_on_accept :: proc(op: ^nbio.Operation, server: ^Server) {
 
 	if server.free_conns == nil {
 		log.warn("connection capacity reached, dropping")
-		for conn in server.conn_buf {
-			fmt.print(conn.id, conn.rc, conn.sock, "")
-		}
 		return
 	}
 
@@ -1129,7 +1092,7 @@ recv_asset :: proc(
 	return conn->on_boot()
 
 	asset_path_ :: proc(conn: ^Connection) -> string {
-		return asset_path(&conn.fetch.asset_meta)
+		return asset_path(&conn.fetch.asset_meta, context.allocator)
 	}
 
 	on_kill :: proc(conn: ^Connection) {
@@ -1178,7 +1141,7 @@ delete_asset :: proc(server: ^Server, name: nm.Name, type: sim.Asset_Type) {
 		type = type,
 	}
 
-	path := asset_path(&asset)
+	path := asset_path(&asset, context.temp_allocator)
 
 	err := nbio.delete_file(server.l, path)
 	if err != nil {
@@ -1263,13 +1226,13 @@ send_asset :: proc(
 	sim.send_asset(conn)
 
 	asset_path_ :: proc(conn: ^Connection) -> string {
-		return asset_path(&conn.send.asset)
+		return asset_path(&conn.send.asset, context.allocator)
 	}
 
 	return true
 }
 
-asset_path :: proc(asset: ^sim.Asset) -> string {
+asset_path :: proc(asset: ^sim.Asset, allc: runtime.Allocator) -> string {
 	name_str := nm.str(&asset.name)
 
 	// NOTE: it suffices to return null value since subsequent file operations
@@ -1281,8 +1244,7 @@ asset_path :: proc(asset: ^sim.Asset) -> string {
 	ext := sim.EXT_BY_TYPE[asset.type]
 
 	name := strings.join({name_str, ext}, "", context.temp_allocator)
-	// TODO: memory leak
-	path, _ := nbio.join_path({dir, name}, context.allocator)
+	path, _ := nbio.join_path({dir, name}, allc)
 	return path
 }
 
@@ -1520,6 +1482,8 @@ server_init_without_game :: proc(
 	server.l = hr.l
 	server.hr = hr
 
+	server.map_load_arna = arna.init_from_buffer(make([]u8, sim.MAX_MAP_SIZE))
+
 	lru.init(
 		&server.banned_ips,
 		BANNED_IP_LRU_SIZE,
@@ -1590,40 +1554,22 @@ server_init_without_game :: proc(
 				create_dir_err,
 			)
 
-			buf: [4096]u8
-			for m in DEFAULT_MAPS {
-				e := sim.Encoder{buf[:]}
-				sim.map_text_to_bin(m.spec, &e, "", "")
-				final := buf[:len(buf) - len(e.remining)]
+			empty_map: sim.Map
+			buf := sim.cc_encode_to_bytes(empty_map, context.temp_allocator)
 
-				full_path, fperr := nbio.join_path(
-					{sim.MAP_DIR, m.name},
-					context.temp_allocator,
-				)
-				log.assertf(fperr == nil, "failed to join path: %v", fperr)
-
-				full_path_with_ext, fpwerr := nbio.join_filename(
-					full_path,
-					"gmap",
-					context.temp_allocator,
-				)
-				log.assertf(
-					fpwerr == nil,
-					"failed to join filename: %v",
-					fpwerr,
-				)
-
-				write_map_err := nbio.write_entire_file(
-					server.l,
-					full_path_with_ext,
-					final,
-				)
-				log.assertf(
-					write_map_err == nil,
-					"failed to write map: %v",
-					write_map_err,
-				)
+			asset := sim.Asset {
+				name = nm.from_str("empty"),
+				type = .Map,
 			}
+
+			path := asset_path(&asset, context.temp_allocator)
+
+			write_map_err := nbio.write_entire_file(server.l, path, buf)
+			log.assertf(
+				write_map_err == nil,
+				"failed to write map: %v",
+				write_map_err,
+			)
 		}
 	}
 

@@ -50,3 +50,8 @@ alias measure 'rg --files --glob "*.odin" --glob "!vendored" | xargs cloc'
 alias check-sim 'odin check client -define:SIMULATE=true &&\
 	odin check server -define:SIMULATE=true &&\
 	odin check client && odin check server'
+
+function kill_server
+	ss -tunlp | grep $argv[1] | awk '{ print $7 }' \
+		| cut -d',' -f 2 | cut -d'=' -f 2 | xargs kill
+end

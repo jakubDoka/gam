@@ -14,7 +14,7 @@ WINDOW_HEIGHT :: 900
 PANEL_WIDTH :: 330
 MAX_LINES :: 100_000
 SAMPLE_COUNT :: 120
-SIMD_LANES :: 8
+SIMD_LANES :: 4
 
 Entity :: struct {
 	x, y:   f32,

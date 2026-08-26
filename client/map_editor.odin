@@ -50,7 +50,8 @@ ui_map_eats_input :: proc(ui: ^UI_Reactor) -> bool {
 
 ui_map_editor_sync :: proc(client: ^Client) {
 	new_hash: sim.Hash
-	sim.hash(client.map_buf, &new_hash)
+	buf := sim.cc_encode_to_bytes(client.ents.mapa, context.temp_allocator)
+	sim.hash(buf, &new_hash)
 
 	ctx := &client.map_editing
 
@@ -127,8 +128,8 @@ ui_map_editor :: proc(client: ^Client) {
 						"%vx%v - %v%%x%v%%",
 						ctx.width,
 						ctx.height,
-						ctx.width * 100 / client.ents.width,
-						ctx.height * 100 / client.ents.height,
+						ctx.width * 100 / max(client.ents.width, 1),
+						ctx.height * 100 / max(client.ents.height, 1),
 					),
 				},
 			)

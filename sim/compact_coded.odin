@@ -2,9 +2,7 @@ package sim
 
 import "../util/arna"
 import "base:runtime"
-import "core:fmt"
 import "core:mem"
-import "core:os"
 import "core:reflect"
 import "core:slice"
 import "core:strconv"
@@ -70,6 +68,7 @@ cc_decode_single_alloc :: proc(
 
 	context.allocator = arna.allocator(buff)
 	prev_pos := buff.pos
+	defer buff.pos = prev_pos
 	err: runtime.Allocator_Error
 	slot, err = new_aligned(T, MAX_ALIGN)
 	if err != nil do return
@@ -80,7 +79,6 @@ cc_decode_single_alloc :: proc(
 	// NOTE: this can be bigger then nescessary, but eh?
 	buf, errr := mem.alloc_bytes(int(buff.pos - prev_pos), MAX_ALIGN)
 	assert(errr == nil)
-	buff.pos = prev_pos
 
 	buf_arna := arna.init_from_buffer(buf)
 	context.allocator = arna.allocator(&buf_arna)
@@ -359,7 +357,6 @@ collect_flags :: proc(
 	active := true,
 ) {
 	field_flags := reflect.struct_tag_get(tag, "cc")
-	fmt.println(field_flags, tag)
 	for flg in strings.split_iterator(&field_flags, ",") {
 		if flg == "version_field" {
 			base.is_version = true
@@ -516,33 +513,4 @@ sanity_cc :: proc(t: ^testing.T) {
 	compare(t, ex, slota^)
 
 	free(slota)
-}
-
-main :: proc() {
-	source := os.args[1]
-	dest := os.args[2]
-
-	data := os.read_entire_file(source, context.allocator) or_else panic("")
-
-	mapa := map_load(data) or_else panic("")
-
-	mapav2 := transmute(MapV2)mapa
-
-	ents: Ents
-	ents.mapa = mapa
-	ents_load_stats(&ents, ents.mapa.asoc_stats.raw)
-
-	mapav2.asoc_stats = ents.stats[:]
-
-	buf := cc_encode_to_bytes(mapav2)
-
-	buff := arna.init_from_buffer(make([]u8, 1024 * 128))
-
-	d := Decoder{buf}
-	mapav2_dec: MapV2
-	mapa3, ok := cc_decode_single_alloc(MapV2, &d, &buff)
-	assert(ok)
-
-	err := os.write_entire_file(dest, buf)
-	assert(err == nil)
 }

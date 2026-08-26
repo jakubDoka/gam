@@ -149,7 +149,7 @@ Client_Cold_State :: struct {
 }
 
 Client_Map_Edit :: struct {
-	mapa: Map,
+	mapa: []u8,
 }
 
 Client_Packet :: union #no_nil {
@@ -247,7 +247,7 @@ Server_Cmd :: struct {
 // hotreloaded, meaning all entityes are preserved. Changes will also trigger
 // the save option in the ui, that will burn the final stats to the map.
 Server_Stats :: struct {
-	stats: Custom_Encoding,
+	stats: []u8,
 }
 
 custom_encoding_slice :: proc(bytes: ^[]$T) -> Custom_Encoding {
@@ -255,27 +255,6 @@ custom_encoding_slice :: proc(bytes: ^[]$T) -> Custom_Encoding {
 
 	encode_bytes :: proc(data: rawptr, e: ^Encoder) -> bool {
 		return encode_slice(e, (^[]T)(data)^)
-	}
-}
-
-Custom_Encoding_Stats_Data :: struct {
-	stats:   []Ent_Stats,
-	version: int,
-}
-
-custom_encoding_stats :: proc(
-	stats: ^Custom_Encoding_Stats_Data,
-) -> Custom_Encoding {
-	return {value = {stats, encode_stats}}
-
-	encode_stats :: proc(data: rawptr, e: ^Encoder) -> bool {
-		data := (^Custom_Encoding_Stats_Data)(data)^
-
-		for stat in data.stats {
-			ent_stats_encode(stat, data.version, e) or_return
-		}
-
-		return true
 	}
 }
 

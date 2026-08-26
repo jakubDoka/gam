@@ -109,7 +109,6 @@ Client :: struct {
 	ent_extra:             []Ent_Extra,
 	current_input:         sim.Input_State,
 	applied_input:         sim.Input_State,
-	map_buf:               []u8,
 	players:               [dynamic]Player,
 	free_deffered_inputs:  ^Deffered_Client_Input,
 	last_cold_state_hash:  sim.Hash,
@@ -128,6 +127,7 @@ Client :: struct {
 	inflight_assets:       int,
 	inflight_asset_cursor: int,
 	on_sheet_refresh:      proc(_: ^Client),
+	map_load_arna:         arna.Allocator,
 }
 
 client_ent_extra_get :: proc(client: ^Client, id: sim.Ent_ID) -> ^Ent_Extra {
@@ -178,11 +178,13 @@ client_init :: proc(client: ^Client, hr: ^hot.Reloader, config: ^Config) {
 	client.udp.recv_buf = make([]u8, 1 << 16)
 	sim.packet_buffer_reserve(&client.udp.send_buf, 16)
 	sim.ents_reserve(&client.ents, sim.MAX_ENTS_PER_GAME)
+	client.ents.stats.allocator = context.allocator
 	client.lasers.slots = make([]Laser, MAX_LASERS)
 	client.ent_extra = make([]Ent_Extra, sim.MAX_ENTS_PER_GAME)
 	client.config_allocator = arna.init_from_buffer(make([]u8, 1 << 16))
 	client.upload.arena = arna.init_from_buffer(make([]u8, 1 << 14))
 	client.assets_to_fetch.allocator = hr.init_allocator
+	client.map_load_arna = arna.init_from_buffer(make([]u8, sim.MAX_MAP_SIZE))
 
 	client.input_pool = make([]Deffered_Client_Input, 64)
 	for &ci in client.input_pool {
@@ -231,10 +233,8 @@ client_init :: proc(client: ^Client, hr: ^hot.Reloader, config: ^Config) {
 client_deinit :: proc(hr: ^hot.Reloader, client: ^Client) {
 	client_shutdown(client)
 
-	delete(client.map_buf)
 	delete(client.players)
-
-	delete(client.ents.stats)
+	free(client.ents.mapa_ptr)
 
 	sqlite.finalize(client.statements)
 }
@@ -311,7 +311,7 @@ map_has_changes :: proc(client: ^Client, ctx: ^Map_Edit_State) -> bool {
 
 	mapa := map_export(client, ctx)
 
-	buf := sim.serialize_to_bytes(mapa)
+	buf := sim.cc_encode_to_bytes(mapa)
 
 	hash: sim.Hash
 	sim.hash(buf, &hash)
@@ -326,14 +326,7 @@ map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
 	mapa.width = client.ents.width
 	mapa.height = client.ents.height
 	mapa.sprites = client.ents.sprites
-	mapa.asoc_stats = sim.custom_encoding_stats(
-		new_clone(
-			sim.Custom_Encoding_Stats_Data {
-				client.ents.stats[:],
-				client.ents.version,
-			},
-		),
-	)
+	mapa.asoc_stats = client.ents.stats[:]
 
 	mapa.tiles = make(
 		[]int,
