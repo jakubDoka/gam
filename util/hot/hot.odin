@@ -17,6 +17,8 @@ import "core:time"
 
 HOT_RELOAD :: #config(HOT_RELOAD, false)
 
+Trace_Ctx :: trace.Context when ODIN_DEBUG else struct{}
+
 when ODIN_OS == .Windows {
 	DYN_EXT :: ".dll"
 } else when ODIN_OS == .Darwin {
@@ -37,7 +39,7 @@ Static_Init_Params :: struct {
 	io_remove:   proc(_: ^nbio.Operation),
 	io_run:      proc(_: ^nbio.Event_Loop) -> nbio.General_Error,
 	interrupted: ^bool,
-	trace:       ^trace.Context,
+	trace:       ^Trace_Ctx,
 }
 
 Api :: struct($T: typeid) {
@@ -296,43 +298,52 @@ reload_impl :: proc(
 }
 
 once: sync.Once
-global_trace_ctx: trace.Context
 
-dump_trace :: proc() {
-	ctx := sip.trace
-	if !trace.in_resolve(ctx) {
-		buf: [64]trace.Frame
-		runtime.print_string("Debug Trace:\n")
-		frames := trace.frames(ctx, 1, buf[:])
-		for f in frames {
-			fl := trace.resolve(ctx, f, context.temp_allocator)
-			if fl.loc.file_path == "" && fl.loc.line == 0 {
-				continue
+global_trace_ctx: Trace_Ctx
+
+when ODIN_DEBUG {
+	dump_trace :: proc() {
+		ctx := sip.trace
+		if !trace.in_resolve(ctx) {
+			buf: [64]trace.Frame
+			runtime.print_string("Debug Trace:\n")
+			frames := trace.frames(ctx, 1, buf[:])
+			for f in frames {
+				fl := trace.resolve(ctx, f, context.temp_allocator)
+				if fl.loc.file_path == "" && fl.loc.line == 0 {
+					continue
+				}
+				fl.column = 1
+				runtime.print_caller_location(fl.loc)
+				runtime.print_byte('\n')
 			}
-			fl.column = 1
-			runtime.print_caller_location(fl.loc)
-			runtime.print_byte('\n')
 		}
+	}
+} else {
+	dump_trace :: proc() {
 	}
 }
 
 @(require_results)
 init_trace :: proc(
 ) -> proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
-	when !ODIN_DEBUG do return context.assertion_failure_proc
-	sync.once_do(&once, proc() {
-		trace.init(&global_trace_ctx)
-	})
-	return proc(prefix, message: string, loc := #caller_location) -> ! {
-			runtime.print_caller_location(loc)
-			runtime.print_string(" ")
-			runtime.print_string(prefix)
-			if len(message) > 0 {
-				runtime.print_string(": ")
-				runtime.print_string(message)
+	when !ODIN_DEBUG {
+		return context.assertion_failure_proc
+	} else {
+		sync.once_do(&once, proc() {
+			trace.init(&global_trace_ctx)
+		})
+		return proc(prefix, message: string, loc := #caller_location) -> ! {
+				runtime.print_caller_location(loc)
+				runtime.print_string(" ")
+				runtime.print_string(prefix)
+				if len(message) > 0 {
+					runtime.print_string(": ")
+					runtime.print_string(message)
+				}
+				runtime.print_byte('\n')
+				dump_trace()
+				runtime.trap()
 			}
-			runtime.print_byte('\n')
-			dump_trace()
-			runtime.trap()
-		}
+	}
 }
