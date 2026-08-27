@@ -168,8 +168,7 @@ server_handshake_end :: proc(
 ) -> bool {
 
 	id: ed.Public_Key
-	ok := ed.public_key_set_bytes(&id, ch.id[:])
-	assert(ok)
+	ed.public_key_set_bytes(&id, ch.id[:]) or_return
 
 	sig_msg := Sig_Msg {
 		client_challenge = ch.challenge,
@@ -238,8 +237,7 @@ sign_sig_msg :: proc(pk: ^Private_Key, msg: any, sig: ^Signature) {
 
 verify_sig_msg :: proc(pk: ^Identity, msg: any, sig: ^Signature) -> bool {
 	id: ed.Public_Key
-	ok := ed.public_key_set_bytes(&id, pk[:])
-	assert(ok)
+	ed.public_key_set_bytes(&id, pk[:]) or_return
 
 	bytes := reflect.as_bytes(msg)
 

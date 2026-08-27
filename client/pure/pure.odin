@@ -303,6 +303,7 @@ Map_Edit_State :: struct {
 	teams:           [dynamic]sim.Ent_Team,
 	width:           int,
 	height:          int,
+	sprites:         [sim.Map_Sprite_Kind]sim.Asset_ID,
 	map_hash:        sim.Hash,
 }
 
@@ -325,7 +326,7 @@ map_export :: proc(client: ^Client, ctx: ^Map_Edit_State) -> (mapa: sim.Map) {
 	mapa.version = client.ents.version
 	mapa.width = client.ents.width
 	mapa.height = client.ents.height
-	mapa.sprites = client.ents.sprites
+	mapa.sprites = ctx.sprites
 	mapa.asoc_stats = client.ents.stats[:]
 
 	mapa.tiles = make(

@@ -35,7 +35,6 @@ UI_Map_Editor :: struct {
 UI_Map_Editor_Brush :: enum int {
 	Wall,
 	Floor,
-	Charger,
 	Building,
 }
 
@@ -68,6 +67,7 @@ ui_map_editor_sync :: proc(client: ^Client) {
 
 		ctx.width = client.ents.width
 		ctx.height = client.ents.height
+		ctx.sprites = client.ents.sprites
 	}
 }
 
@@ -275,7 +275,7 @@ ui_map_editor :: proc(client: ^Client) {
 	deselected := ui_color_slot(.SLOT1, rl.ColorAlpha(rl.WHITE, 0.8))
 
 	tile_brashes := [?]UI_Map_Editor_Brush{.Wall, .Floor, .Building}
-	tile_sprites := slice.enumerated_array(&client.ents.sprites)
+	tile_sprites := slice.enumerated_array(&ctx.sprites)
 
 	for brush, i in tile_brashes {
 		selected := ctx.brush == brush
@@ -611,8 +611,7 @@ map_draw :: proc(client: ^Client) {
 			rect := map_tile_rect({x, y})
 
 			is_wall := sim.map_tile_is_solid(&client.ents, {x, y})
-			sprite :=
-				is_wall ? client.ents.sprites[.Wall] : client.ents.sprites[.Floor]
+			sprite := ctx.sprites[is_wall ? .Wall : .Floor]
 
 			if is_wall do rl.DrawRectangleRec(rect, rl.BLACK)
 			texture, region := ui_get_sprite(&client.ui, sprite)
@@ -632,8 +631,7 @@ map_draw :: proc(client: ^Client) {
 					ctx.changed_terrain,
 					x + y * client.ents.width,
 				) {
-					opposite_sprite :=
-						is_wall ? client.ents.sprites[.Floor] : client.ents.sprites[.Wall]
+					opposite_sprite := ctx.sprites[is_wall ? .Floor : .Wall]
 					texture, region := ui_get_sprite(
 						&client.ui,
 						opposite_sprite,

@@ -733,7 +733,7 @@ draw_world :: proc(world: ^World) {
 		radius := max(world.entities.radius[i] * scale, 1.4)
 		color :=
 			world.collided[i] ? rl.Color{249, 93, 108, 255} : rl.Color{69, 197, 185, 235}
-		rl.DrawCircleV(pos, radius, color)
+		//rl.DrawCircleV(pos, radius, color)
 	}
 
 	strategy_text: cstring

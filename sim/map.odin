@@ -1,6 +1,5 @@
 package sim
 
-import "base:intrinsics"
 import rt "base:runtime"
 import "core:log"
 import "core:math"
@@ -191,19 +190,6 @@ Asset_Loc_Entry :: struct {
 	loc: string,
 }
 
-MapV2 :: struct {
-	version:    int,
-	width:      int,
-	height:     int,
-	sprites:    [Map_Sprite_Kind]Asset_ID,
-	tiles:      []int,
-	ents:       []Map_Ent,
-	chargers:   []Map_Charger,
-	teams:      []Ent_Team,
-	asoc_stats: Custom_Encoding,
-	asset_locs: []Asset_Loc_Entry,
-}
-
 Map :: struct {
 	version:    Version `cc:"version_field"`,
 	width:      int `cc:"leb"`,
@@ -236,35 +222,6 @@ map_quad_size :: proc(mapa: ^Map) -> int {
 		TILE_SIZE /
 		2 \
 	)
-}
-
-map_load :: proc(
-	raw: []u8,
-	max_ents := MAX_ENTS_PER_GAME,
-) -> (
-	mapa: MapV2,
-	ok: bool,
-) {
-	assert(mem.is_aligned(raw_data(raw), FILE_ALIGNMENT))
-
-	unmarshall(mapa, raw) or_return
-
-	if len(mapa.teams) == 0 do return
-	if len(mapa.ents) == 0 do return
-	if len(mapa.ents) > max_ents do return
-
-	for e in mapa.ents {
-		if e.parent < 0 do return
-		if e.parent >= len(mapa.ents) do return
-	}
-
-	tile_count, tcov := intrinsics.overflow_mul(mapa.width, mapa.height)
-	if tcov do return
-
-	if tile_count > len(mapa.tiles) * MASK_SIZE do return
-
-	ok = true
-	return
 }
 
 map_vec_to_pos :: proc(v: Vec) -> Map_Pos {

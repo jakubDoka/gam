@@ -18,7 +18,6 @@ import "core:mem/tlsf"
 import "core:reflect"
 import "core:sort"
 import "core:testing"
-import "core:time"
 
 ESP :: 1e-5
 DIST_ESP :: 1e-4
@@ -323,30 +322,6 @@ field_presence_get :: proc(ctx: ^Field_Presence) -> bool {
 	return bit_arr.contains(ctx.bits, ctx.cursor)
 }
 
-@(test)
-test_ent_stat_encode_decode :: proc(t: ^testing.T) {
-	buf: [4096]u8
-
-	stat: Ent_Stats
-	stat.name = nm.from_str("test")
-	stat.placable = true
-	stat.speed = 10
-	stat.sprite = 1
-	stat.bullet = 2
-
-	e := Encoder{buf[:]}
-	assert(ent_stats_encode(stat, 0, &e))
-
-	stat = {}
-
-	d := Decoder{buf[:]}
-	assert(ent_stats_decode(&stat, 0, &d))
-
-	testing.expect_value(t, nm.str(&stat.name), "test")
-	testing.expect_value(t, stat.placable, true)
-	testing.expect_value(t, stat.speed, 10)
-}
-
 Ent_Synced :: struct {
 	stats:           Ent_Stats_ID,
 	net_id:          Ent_Net_ID,
@@ -433,7 +408,6 @@ Ents :: struct {
 	map_name:      nm.Name,
 	using mapa:    Map,
 	mapa_ptr:      ^Map,
-	garbo_mapa:    MapV2,
 	spawn_seq:     ^Ent_Net_ID,
 	quad_tree:     Quad_Tree,
 	spatial_map:   Spatial_Map,
@@ -458,21 +432,6 @@ ents_load_stats :: proc(ents: ^Ents, stats: []Ent_Stats) {
 
 	append(&ents.stats, ..stats)
 	for &s, i in ents.stats do s.id = auto_cast i
-}
-
-ents_load_stats_garbo :: proc(ents: ^Ents, bytes: []u8) -> bool {
-	clear(&ents.stats)
-
-	d := Decoder{bytes}
-	for len(d.remining) != 0 {
-		i := len(ents.stats)
-		append(&ents.stats, Ent_Stats{})
-		slot := &ents.stats[i]
-		slot.id = Ent_Stats_ID(i)
-		ent_stats_decode(slot, ents.garbo_mapa.version, &d) or_break
-	}
-
-	return len(d.remining) == 0
 }
 
 ents_is_authoritative :: proc(ents: ^Ents) -> bool {
