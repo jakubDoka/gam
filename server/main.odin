@@ -176,7 +176,7 @@ game_tick :: proc(game: ^Game) {
 		active_teams := 0
 		for a in alives do active_teams += int(a)
 
-		if active_teams <= 1 {
+		if active_teams <= 1 && active_teams < len(game.ents.teams) - 2 {
 			game_load_next_map(game)
 		}
 	}
@@ -665,7 +665,14 @@ server_handle_packet :: proc(
 			if p.stats.id < 0 || int(p.stats.id) >= len(game.ents.stats) do return
 
 			ordered_remove(&game.ents.stats, p.stats.id)
-			for &stat, i in game.ents.stats do stat.id = auto_cast i
+			context.user_index = int(p.stats.id)
+			for &stat, i in game.ents.stats {
+				sim.recurse(stat, visit, ignore_unknown = true)
+			}
+
+			for &ent in game.ents.mapa.ents {
+				sim.recurse(ent, visit, ignore_unknown = true)
+			}
 
 			for it := sim.ents_iter(&game.ents); e in sim.ents_iter_next(&it) {
 				if e.stats == p.stats.id {
@@ -673,6 +680,17 @@ server_handle_packet :: proc(
 				} else if e.stats > p.stats.id {
 					e.stats -= 1
 				}
+			}
+
+			visit :: proc(vl: any, _: reflect.Struct_Tag) -> (bool, bool) {
+				if id, ok := &vl.(sim.Ent_Stats_ID); ok {
+					if int(id^) > context.user_index {
+						id^ -= 1
+					} else if int(id^) == context.user_index {
+						id^ = 0
+					}
+				}
+				return true, true
 			}
 		case .Switch:
 			name := nm.str(&p.switch_to)
@@ -879,8 +897,16 @@ game_load_next_map :: proc(game: ^Game) {
 }
 
 // takes ownership of buf
-game_set_map :: proc(game: ^Game, name: nm.Name, mapa: ^sim.Map) {
-	sim.ents_clear(&game.ents)
+game_set_map :: proc(
+	game: ^Game,
+	name: nm.Name,
+	mapa: ^sim.Map,
+	reload_entityes := false,
+) {
+	if reload_entityes {
+		sim.ents_clear(&game.ents)
+	}
+
 	sim.ents_set_map(&game.ents, mapa)
 	game.ents.map_name = name
 

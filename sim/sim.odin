@@ -18,6 +18,7 @@ import "core:mem/tlsf"
 import "core:reflect"
 import "core:sort"
 import "core:testing"
+import "core:time"
 
 ESP :: 1e-5
 DIST_ESP :: 1e-4
@@ -993,10 +994,10 @@ eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 			hash.ginger_hash16(u16(a.net_id.seq)) +
 			hash.ginger_hash16(u16(b.net_id.seq))
 
-		for i in 0 ..< 4 {
+		for i in 1 ..= 4 {
 			normal: Vec
 			if identical {
-				dir := (math.TAU / 4 * f32((1 + (try_from + u16(i)) % 4)))
+				dir := (math.TAU / 4 * f32((try_from + u16(i)) % 4))
 				normal = vec_of(dir)
 			} else {
 				normal = linalg.normalize(a.pos - b.pos)
@@ -1008,6 +1009,7 @@ eliminate_overlap :: proc(ents: ^Ents, e: ^Ent) {
 				a.pos = new_pos
 				break
 			}
+
 		}
 	}
 
@@ -1056,7 +1058,7 @@ can_connect :: proc(ents: ^Ents, from: Ent_ID, to: Vec) -> bool {
 	fs := ents_stats_get(ents, from.stats)
 
 	if linalg.length2(from.pos - to) >
-	   fs.bind_range * fs.bind_range {return false}
+	   fs.bind_range * fs.bind_range + 0.1 {return false}
 
 	if !fs.tall {
 		p_coff, _, _ := map_wall_collision(ents, from.pos, to - from.pos)
@@ -1170,8 +1172,6 @@ ents_update :: proc(ents: ^Ents) {
 
 			e.energy_consumed += su.energy
 			ne.pos = e.pos
-			ne.vel =
-				vec_of(math.PI * 2 * rand.float32()) * (sradius + suradius) * 2
 			ne.stats = s.spawn_unit
 			ne.parent_net_id = e.net_id
 			ne.parent = e.id
